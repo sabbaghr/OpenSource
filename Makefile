@@ -16,6 +16,7 @@ all: mkdirs
 	cd extrap		; $(MAKE) install
 ifneq ($(strip $(MKLROOT)),)
 	cd fdacrtmc	    ; $(MAKE) install
+	cd fdelfwi	    ; $(MAKE) install
 else
 	@echo "***************************************************************************";
 	@echo "**** There is no MKL or other library for the FFTW calls in use by fdacrtmc";
@@ -41,6 +42,7 @@ clean:
 	cd raytime		; $(MAKE) $@
 	cd extrap		; $(MAKE) $@
 	cd fdacrtmc		; $(MAKE) $@
+	cd fdelfwi		; $(MAKE) $@
 	cd zfp			; $(MAKE) $@
 	cd fdelmodc3D	; $(MAKE) $@
 	cd marchenko3D	; $(MAKE) $@
@@ -56,6 +58,7 @@ realclean:
 	cd raytime		; $(MAKE) $@
 	cd extrap		; $(MAKE) $@
 	cd fdacrtmc		; $(MAKE) $@
+	cd fdelfwi		; $(MAKE) $@
 	cd zfp			; $(MAKE) $@
 	cd fdelmodc3D	; $(MAKE) $@
 	cd marchenko3D	; $(MAKE) $@
