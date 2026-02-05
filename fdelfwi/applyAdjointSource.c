@@ -102,8 +102,14 @@ int applyAdjointSource(modPar mod, adjSrcPar adj, int itime,
 			/* P (pressure) -> inject into tzz and txx for elastic.
 			 * fdelmodc uses compression-positive convention, so
 			 * P = +0.5*(Txx + Tzz) for elastic recording.
-			 * The adjoint of extracting P = 0.5*(Txx + Tzz) is
-			 * injecting 0.5*residual into each stress component.
+			 *
+			 * SIGN CONVENTION for adjoint pressure injection:
+			 * The residual r = P_syn - P_obs. When r > 0, the model produces
+			 * too much pressure, so we need a negative gradient to reduce Vp.
+			 * However, the cross-correlation imaging condition with stress
+			 * wavefields requires a NEGATIVE sign on the adjoint stress injection
+			 * to produce the correct gradient polarity (matching Vz/Vx gradients).
+			 *
 			 * For acoustic (ischeme <= 2): P = Tzz, inject full amplitude.
 			 *
 			 * Blended fluid-solid boundary handling:
@@ -147,25 +153,26 @@ int applyAdjointSource(modPar mod, adjSrcPar adj, int itime,
 			}
 			/* else acoustic: tzz_scale=1.0, txx_scale=0.0 (already set) */
 
+			/* NEGATIVE sign for pressure adjoint injection */
 			if (sorient == 1) { /* monopole */
-				tzz[ix * n1 + iz] += tzz_scale * src_ampl;
+				tzz[ix * n1 + iz] -= tzz_scale * src_ampl;
 				if (txx && txx_scale > 0.0f)
-					txx[ix * n1 + iz] += txx_scale * src_ampl;
+					txx[ix * n1 + iz] -= txx_scale * src_ampl;
 			}
 			else if (sorient == 2) { /* vertical dipole +/- */
-				tzz[ix * n1 + iz]     += tzz_scale * src_ampl;
-				tzz[ix * n1 + iz + 1] -= tzz_scale * src_ampl;
+				tzz[ix * n1 + iz]     -= tzz_scale * src_ampl;
+				tzz[ix * n1 + iz + 1] += tzz_scale * src_ampl;
 				if (txx && txx_scale > 0.0f) {
-					txx[ix * n1 + iz]     += txx_scale * src_ampl;
-					txx[ix * n1 + iz + 1] -= txx_scale * src_ampl;
+					txx[ix * n1 + iz]     -= txx_scale * src_ampl;
+					txx[ix * n1 + iz + 1] += txx_scale * src_ampl;
 				}
 			}
 			else if (sorient == 3) { /* horizontal dipole -/+ */
-				tzz[ix * n1 + iz]         += tzz_scale * src_ampl;
-				tzz[(ix - 1) * n1 + iz]   -= tzz_scale * src_ampl;
+				tzz[ix * n1 + iz]         -= tzz_scale * src_ampl;
+				tzz[(ix - 1) * n1 + iz]   += tzz_scale * src_ampl;
 				if (txx && txx_scale > 0.0f) {
-					txx[ix * n1 + iz]       += txx_scale * src_ampl;
-					txx[(ix - 1) * n1 + iz] -= txx_scale * src_ampl;
+					txx[ix * n1 + iz]       -= txx_scale * src_ampl;
+					txx[(ix - 1) * n1 + iz] += txx_scale * src_ampl;
 				}
 			}
 		}
@@ -180,13 +187,13 @@ int applyAdjointSource(modPar mod, adjSrcPar adj, int itime,
 			}
 		}
 		else if (stype == 3) {
-			/* Tzz -> inject into tzz only */
-			tzz[ix * n1 + iz] += src_ampl;
+			/* Tzz -> inject into tzz only (negative sign for stress adjoint) */
+			tzz[ix * n1 + iz] -= src_ampl;
 		}
 		else if (stype == 4) {
-			/* Txx -> inject into txx only */
+			/* Txx -> inject into txx only (negative sign for stress adjoint) */
 			if (txx)
-				txx[ix * n1 + iz] += src_ampl;
+				txx[ix * n1 + iz] -= src_ampl;
 		}
 
 	} /* end loop over adjoint sources */
