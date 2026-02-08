@@ -5,37 +5,17 @@
 
 /*********************************************************************
  *
- * elastic4_adj - TRUE 4th-order elastic adjoint FD kernel.
+ * elastic8_adj - TRUE 8th-order elastic adjoint FD kernel.
  *
- * Implements the mathematically correct discrete adjoint of elastic4.c.
- * The adjoint is derived by transposing the discrete spatial operator
- * using the Summation By Parts (SBP) property: (D-)^T = -D+.
+ * Implements the mathematically correct discrete adjoint of elastic8.c.
+ * See elastic4_adj.c for the derivation and sign conventions.
  *
- * KEY DIFFERENCES from the forward operator:
- *
- *   1. All updates use += instead of -=
- *   2. Material parameters are INSIDE the spatial derivative
- *      (pre-multiply the field before differentiating)
- *   3. Velocity couples to ALL 3 stress components (not just 2)
- *   4. Each stress component couples to ONLY 1 velocity component
- *
- * Forward (elastic4.c):
- *   vx -= bx * [D-x(txx) + D+z(txz)]
- *   vz -= bz * [D+x(txz) + D-z(tzz)]
- *   txx -= l2m * D+x(vx) + lam * D+z(vz)
- *   tzz -= lam * D+x(vx) + l2m * D+z(vz)
- *   txz -= mul * [D-z(vx) + D-x(vz)]
- *
- * TRUE ADJOINT (this file):
+ * TRUE ADJOINT:
  *   vx += D-x(l2m*txx) + D-x(lam*tzz) + D+z(mul*txz)
  *   vz += D-z(lam*txx) + D-z(l2m*tzz) + D+x(mul*txz)
  *   txx += D+x(bx*vx)
  *   tzz += D+z(bz*vz)
  *   txz += D-z(bx*vx) + D-x(bz*vz)
- *
- *   AUTHOR:
- *           FD stencils derived from elastic4.c by Jan Thorbecke
- *           True adjoint derivation for FWI dot product test.
  *
  **********************************************************************/
 
@@ -52,17 +32,19 @@ int boundariesV_adj(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz,
 	float *lam, float *mul, int itime, int verbose);
 
 
-int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
+int elastic8_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 	float *vx, float *vz, float *tzz, float *txx, float *txz,
 	float *rox, float *roz, float *l2m, float *lam, float *mul,
 	int rec_delay, int rec_skipdt, int verbose)
 {
-	float c1, c2;
+	float c1, c2, c3, c4;
 	int   ix, iz;
 	int   n1;
 
-	c1 = 9.0/8.0;
-	c2 = -1.0/24.0;
+	c1 = 1225.0/1024.0;
+	c2 = -245.0/3072.0;
+	c3 = 49.0/5120.0;
+	c4 = -5.0/7168.0;
 	n1 = mod.naz;
 
 	/* ============================================================ */
@@ -78,13 +60,8 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 		mul, rec_delay, rec_skipdt, /*phase=*/2, verbose);
 
 	/* ============================================================ */
-	/*  Phase 1: Adjoint velocity update from adjoint stresses      */
-	/*                                                               */
+	/*  Phase 1: Adjoint velocity update                            */
 	/*  vx += D-x(l2m*txx) + D-x(lam*tzz) + D+z(mul*txz)          */
-	/*                                                               */
-	/*  Note: material params (l2m, lam, mul) are INSIDE the        */
-	/*  derivative -- this is the transpose of the forward stress   */
-	/*  update where they multiply OUTSIDE the derivative.           */
 	/* ============================================================ */
 #pragma omp for private (ix, iz) nowait schedule(guided,1)
 	for (ix=mod.ioXx; ix<mod.ieXx; ix++) {
@@ -96,7 +73,13 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 				    mul[ix*n1+iz+1]*txz[ix*n1+iz+1]     - mul[ix*n1+iz]*txz[ix*n1+iz]) +
 				c2*(l2m[(ix+1)*n1+iz]*txx[(ix+1)*n1+iz] - l2m[(ix-2)*n1+iz]*txx[(ix-2)*n1+iz] +
 				    lam[(ix+1)*n1+iz]*tzz[(ix+1)*n1+iz] - lam[(ix-2)*n1+iz]*tzz[(ix-2)*n1+iz] +
-				    mul[ix*n1+iz+2]*txz[ix*n1+iz+2]     - mul[ix*n1+iz-1]*txz[ix*n1+iz-1]);
+				    mul[ix*n1+iz+2]*txz[ix*n1+iz+2]     - mul[ix*n1+iz-1]*txz[ix*n1+iz-1]) +
+				c3*(l2m[(ix+2)*n1+iz]*txx[(ix+2)*n1+iz] - l2m[(ix-3)*n1+iz]*txx[(ix-3)*n1+iz] +
+				    lam[(ix+2)*n1+iz]*tzz[(ix+2)*n1+iz] - lam[(ix-3)*n1+iz]*tzz[(ix-3)*n1+iz] +
+				    mul[ix*n1+iz+3]*txz[ix*n1+iz+3]     - mul[ix*n1+iz-2]*txz[ix*n1+iz-2]) +
+				c4*(l2m[(ix+3)*n1+iz]*txx[(ix+3)*n1+iz] - l2m[(ix-4)*n1+iz]*txx[(ix-4)*n1+iz] +
+				    lam[(ix+3)*n1+iz]*tzz[(ix+3)*n1+iz] - lam[(ix-4)*n1+iz]*tzz[(ix-4)*n1+iz] +
+				    mul[ix*n1+iz+4]*txz[ix*n1+iz+4]     - mul[ix*n1+iz-3]*txz[ix*n1+iz-3]);
 		}
 	}
 
@@ -113,30 +96,26 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 				    mul[(ix+1)*n1+iz]*txz[(ix+1)*n1+iz] - mul[ix*n1+iz]*txz[ix*n1+iz]) +
 				c2*(lam[ix*n1+iz+1]*txx[ix*n1+iz+1]     - lam[ix*n1+iz-2]*txx[ix*n1+iz-2] +
 				    l2m[ix*n1+iz+1]*tzz[ix*n1+iz+1]     - l2m[ix*n1+iz-2]*tzz[ix*n1+iz-2] +
-				    mul[(ix+2)*n1+iz]*txz[(ix+2)*n1+iz] - mul[(ix-1)*n1+iz]*txz[(ix-1)*n1+iz]);
+				    mul[(ix+2)*n1+iz]*txz[(ix+2)*n1+iz] - mul[(ix-1)*n1+iz]*txz[(ix-1)*n1+iz]) +
+				c3*(lam[ix*n1+iz+2]*txx[ix*n1+iz+2]     - lam[ix*n1+iz-3]*txx[ix*n1+iz-3] +
+				    l2m[ix*n1+iz+2]*tzz[ix*n1+iz+2]     - l2m[ix*n1+iz-3]*tzz[ix*n1+iz-3] +
+				    mul[(ix+3)*n1+iz]*txz[(ix+3)*n1+iz] - mul[(ix-2)*n1+iz]*txz[(ix-2)*n1+iz]) +
+				c4*(lam[ix*n1+iz+3]*txx[ix*n1+iz+3]     - lam[ix*n1+iz-4]*txx[ix*n1+iz-4] +
+				    l2m[ix*n1+iz+3]*tzz[ix*n1+iz+3]     - l2m[ix*n1+iz-4]*tzz[ix*n1+iz-4] +
+				    mul[(ix+4)*n1+iz]*txz[(ix+4)*n1+iz] - mul[(ix-3)*n1+iz]*txz[(ix-3)*n1+iz]);
 		}
 	}
 
-	/* ============================================================ */
-	/*  STEP 4: Adjoint velocity boundaries (reverse of fwd Step 3) */
-	/* ============================================================ */
+	/* STEP 4: Adjoint velocity boundaries (reverse of fwd Step 3) */
 	boundariesP_adj(mod, bnd, vx, vz, tzz, txx, txz, rox, roz, l2m, lam, mul, itime, verbose);
 
-	/* ============================================================ */
-	/*  STEP 5: Inject adjoint FORCE sources (reverse of fwd Step 2)*/
-	/* ============================================================ */
+	/* STEP 5: Inject adjoint FORCE sources (reverse of fwd Step 2) */
 	applyAdjointSource(mod, adj, itime, vx, vz, tzz, txx, txz,
 		mul, rec_delay, rec_skipdt, /*phase=*/1, verbose);
 
 	/* ============================================================ */
-	/*  Phase 2: Adjoint stress update from adjoint velocities      */
-	/*                                                               */
-	/*  txx += D+x(rox*vx)                                         */
-	/*  tzz += D+z(roz*vz)                                         */
-	/*                                                               */
-	/*  Note: buoyancy (rox, roz) is INSIDE the derivative --       */
-	/*  this is the transpose of the forward velocity update where  */
-	/*  buoyancy multiplies OUTSIDE the derivative.                  */
+	/*  Phase 2: Adjoint stress update                              */
+	/*  txx += D+x(rox*vx),  tzz += D+z(roz*vz)                   */
 	/* ============================================================ */
 #pragma omp for private (ix, iz) nowait schedule(guided,1)
 	for (ix=mod.ioPx; ix<mod.iePx; ix++) {
@@ -144,10 +123,14 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 		for (iz=mod.ioPz; iz<mod.iePz; iz++) {
 			txx[ix*n1+iz] +=
 				c1*(rox[(ix+1)*n1+iz]*vx[(ix+1)*n1+iz] - rox[ix*n1+iz]*vx[ix*n1+iz]) +
-				c2*(rox[(ix+2)*n1+iz]*vx[(ix+2)*n1+iz] - rox[(ix-1)*n1+iz]*vx[(ix-1)*n1+iz]);
+				c2*(rox[(ix+2)*n1+iz]*vx[(ix+2)*n1+iz] - rox[(ix-1)*n1+iz]*vx[(ix-1)*n1+iz]) +
+				c3*(rox[(ix+3)*n1+iz]*vx[(ix+3)*n1+iz] - rox[(ix-2)*n1+iz]*vx[(ix-2)*n1+iz]) +
+				c4*(rox[(ix+4)*n1+iz]*vx[(ix+4)*n1+iz] - rox[(ix-3)*n1+iz]*vx[(ix-3)*n1+iz]);
 			tzz[ix*n1+iz] +=
 				c1*(roz[ix*n1+iz+1]*vz[ix*n1+iz+1]     - roz[ix*n1+iz]*vz[ix*n1+iz]) +
-				c2*(roz[ix*n1+iz+2]*vz[ix*n1+iz+2]     - roz[ix*n1+iz-1]*vz[ix*n1+iz-1]);
+				c2*(roz[ix*n1+iz+2]*vz[ix*n1+iz+2]     - roz[ix*n1+iz-1]*vz[ix*n1+iz-1]) +
+				c3*(roz[ix*n1+iz+3]*vz[ix*n1+iz+3]     - roz[ix*n1+iz-2]*vz[ix*n1+iz-2]) +
+				c4*(roz[ix*n1+iz+4]*vz[ix*n1+iz+4]     - roz[ix*n1+iz-3]*vz[ix*n1+iz-3]);
 		}
 	}
 
@@ -162,30 +145,35 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 				c1*(rox[ix*n1+iz]*vx[ix*n1+iz]         - rox[ix*n1+iz-1]*vx[ix*n1+iz-1] +
 				    roz[ix*n1+iz]*vz[ix*n1+iz]         - roz[(ix-1)*n1+iz]*vz[(ix-1)*n1+iz]) +
 				c2*(rox[ix*n1+iz+1]*vx[ix*n1+iz+1]     - rox[ix*n1+iz-2]*vx[ix*n1+iz-2] +
-				    roz[(ix+1)*n1+iz]*vz[(ix+1)*n1+iz] - roz[(ix-2)*n1+iz]*vz[(ix-2)*n1+iz]);
+				    roz[(ix+1)*n1+iz]*vz[(ix+1)*n1+iz] - roz[(ix-2)*n1+iz]*vz[(ix-2)*n1+iz]) +
+				c3*(rox[ix*n1+iz+2]*vx[ix*n1+iz+2]     - rox[ix*n1+iz-3]*vx[ix*n1+iz-3] +
+				    roz[(ix+2)*n1+iz]*vz[(ix+2)*n1+iz] - roz[(ix-3)*n1+iz]*vz[(ix-3)*n1+iz]) +
+				c4*(rox[ix*n1+iz+3]*vx[ix*n1+iz+3]     - rox[ix*n1+iz-4]*vx[ix*n1+iz-4] +
+				    roz[(ix+3)*n1+iz]*vz[(ix+3)*n1+iz] - roz[(ix-4)*n1+iz]*vz[(ix-4)*n1+iz]);
 		}
 	}
 
 	/* ============================================================ */
 	/*  Free surface txz correction: missing F1^T contributions     */
-	/*                                                               */
-	/*  Phase F1 vx at iz=surface reads txz[surface] and            */
-	/*  txz[surface-1] through D+z, but Phase A2 txz starts at     */
-	/*  ioTz=surface+1 and misses these transpose contributions.    */
-	/*  Without them, BV_adj's txz scatter has nothing to propagate */
-	/*  and the antisymmetric mirror coupling is lost.              */
 	/* ============================================================ */
 	if (bnd.top == 1) {
 		int izs = bnd.surface[mod.ioPx];
 #pragma omp for private (ix) schedule(guided,1)
 		for (ix=mod.ioTx; ix<mod.ieTx; ix++) {
-			/* adj_txz[surface]: from F1 vx at iz=s (c1) and iz=s+1 (c2) */
 			txz[ix*n1+izs] +=
 				c1*rox[ix*n1+izs]*vx[ix*n1+izs] +
-				c2*rox[ix*n1+izs+1]*vx[ix*n1+izs+1];
-			/* adj_txz[surface-1]: from F1 vx at iz=s (c2 arm) */
+				c2*rox[ix*n1+izs+1]*vx[ix*n1+izs+1] +
+				c3*rox[ix*n1+izs+2]*vx[ix*n1+izs+2] +
+				c4*rox[ix*n1+izs+3]*vx[ix*n1+izs+3];
 			txz[ix*n1+izs-1] +=
-				c2*rox[ix*n1+izs]*vx[ix*n1+izs];
+				c2*rox[ix*n1+izs]*vx[ix*n1+izs] +
+				c3*rox[ix*n1+izs+1]*vx[ix*n1+izs+1] +
+				c4*rox[ix*n1+izs+2]*vx[ix*n1+izs+2];
+			txz[ix*n1+izs-2] +=
+				c3*rox[ix*n1+izs]*vx[ix*n1+izs] +
+				c4*rox[ix*n1+izs+1]*vx[ix*n1+izs+1];
+			txz[ix*n1+izs-3] +=
+				c4*rox[ix*n1+izs]*vx[ix*n1+izs];
 		}
 	}
 

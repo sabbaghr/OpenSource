@@ -16,7 +16,7 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 
 ***********************************************************************/
 
-	float c1, c2;
+	float c1, c2, c3, c4;
 	float dp, dvx, dvz;
 	int   ix, iz, ixs, izs, ibnd, ib, ibx, ibz;
 	int   nx, nz, n1, n2;
@@ -29,8 +29,6 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 	static int allocated=0;
     float Jx, Jz, rho, d;
 
-	c1 = 9.0/8.0;
-	c2 = -1.0/24.0;
 	nx  = mod.nx;
     nz  = mod.nz;
     n1  = mod.naz;
@@ -42,6 +40,14 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 	else pml=0;
 
 	ibnd = mod.iorder/2-1;
+
+	if (mod.iorder <= 4) {
+		c1 = 9.0/8.0;  c2 = -1.0/24.0;  c3 = 0.0;  c4 = 0.0;
+	} else if (mod.iorder == 6) {
+		c1 = 75.0/64.0;  c2 = -25.0/384.0;  c3 = 3.0/640.0;  c4 = 0.0;
+	} else { /* iorder >= 8 */
+		c1 = 1225.0/1024.0;  c2 = -245.0/3072.0;  c3 = 49.0/5120.0;  c4 = -5.0/7168.0;
+	}
 
 	if (mod.ischeme <= 2) { /* Acoustic scheme */
 		if (bnd.top==1) { /* free surface at top */
@@ -572,6 +578,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[ix*n1+iz+1]   - txz[ix*n1+iz])	+
 								c2*(txx[(ix+1)*n1+iz] - txx[(ix-2)*n1+iz] +
 									txz[ix*n1+iz+2]   - txz[ix*n1+iz-1])  );
+					if (mod.iorder >= 6) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+								c3*(txx[(ix+2)*n1+iz] - txx[(ix-3)*n1+iz] +
+								    txz[ix*n1+iz+3]   - txz[ix*n1+iz-2])  );
+					if (mod.iorder >= 8) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+								c4*(txx[(ix+3)*n1+iz] - txx[(ix-4)*n1+iz] +
+								    txz[ix*n1+iz+4]   - txz[ix*n1+iz-3])  );
 
 					vx[ix*n1+iz]   *= bnd.tapx[ib-iz];
 				}
@@ -591,6 +603,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 										txz[ix*n1+iz+1]   - txz[ix*n1+iz])	+
 									c2*(txx[(ix+1)*n1+iz] - txx[(ix-2)*n1+iz] +
 										txz[ix*n1+iz+2]   - txz[ix*n1+iz-1])  );
+						if (mod.iorder >= 6) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+									c3*(txx[(ix+2)*n1+iz] - txx[(ix-3)*n1+iz] +
+									    txz[ix*n1+iz+3]   - txz[ix*n1+iz-2])  );
+						if (mod.iorder >= 8) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+									c4*(txx[(ix+3)*n1+iz] - txx[(ix-4)*n1+iz] +
+									    txz[ix*n1+iz+4]   - txz[ix*n1+iz-3])  );
 	
 						vx[ix*n1+iz]   *= bnd.tapxz[(ix-ibx)*bnd.ntap+(ibz-iz)];
 					}
@@ -611,6 +629,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 										txz[ix*n1+iz+1]   - txz[ix*n1+iz])	+
 									c2*(txx[(ix+1)*n1+iz] - txx[(ix-2)*n1+iz] +
 										txz[ix*n1+iz+2]   - txz[ix*n1+iz-1])  );
+						if (mod.iorder >= 6) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+									c3*(txx[(ix+2)*n1+iz] - txx[(ix-3)*n1+iz] +
+									    txz[ix*n1+iz+3]   - txz[ix*n1+iz-2])  );
+						if (mod.iorder >= 8) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+									c4*(txx[(ix+3)*n1+iz] - txx[(ix-4)*n1+iz] +
+									    txz[ix*n1+iz+4]   - txz[ix*n1+iz-3])  );
 						
 						vx[ix*n1+iz]   *= bnd.tapxz[(ibx-ix)*bnd.ntap+(ibz-iz)];
 					}
@@ -633,6 +657,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[(ix+1)*n1+iz] - txz[ix*n1+iz])  +
 								c2*(tzz[ix*n1+iz+1]   - tzz[ix*n1+iz-2] +
 									txz[(ix+2)*n1+iz] - txz[(ix-1)*n1+iz])  );
+					if (mod.iorder >= 6) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c3*(tzz[ix*n1+iz+2]   - tzz[ix*n1+iz-3] +
+								    txz[(ix+3)*n1+iz] - txz[(ix-2)*n1+iz])  );
+					if (mod.iorder >= 8) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c4*(tzz[ix*n1+iz+3]   - tzz[ix*n1+iz-4] +
+								    txz[(ix+4)*n1+iz] - txz[(ix-3)*n1+iz])  );
 
 					vz[ix*n1+iz] *= bnd.tapz[ib-iz];
 				}
@@ -652,6 +682,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[(ix+1)*n1+iz] - txz[ix*n1+iz])  +
 								c2*(tzz[ix*n1+iz+1]   - tzz[ix*n1+iz-2] +
 									txz[(ix+2)*n1+iz] - txz[(ix-1)*n1+iz])  );
+					if (mod.iorder >= 6) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c3*(tzz[ix*n1+iz+2]   - tzz[ix*n1+iz-3] +
+								    txz[(ix+3)*n1+iz] - txz[(ix-2)*n1+iz])  );
+					if (mod.iorder >= 8) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c4*(tzz[ix*n1+iz+3]   - tzz[ix*n1+iz-4] +
+								    txz[(ix+4)*n1+iz] - txz[(ix-3)*n1+iz])  );
 	
 						vz[ix*n1+iz]   *= bnd.tapxz[(ix-ibx)*bnd.ntap+(ibz-iz)];
 					}
@@ -672,6 +708,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[(ix+1)*n1+iz] - txz[ix*n1+iz])  +
 								c2*(tzz[ix*n1+iz+1]   - tzz[ix*n1+iz-2] +
 									txz[(ix+2)*n1+iz] - txz[(ix-1)*n1+iz])  );
+						if (mod.iorder >= 6) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c3*(tzz[ix*n1+iz+2]   - tzz[ix*n1+iz-3] +
+								    txz[(ix+3)*n1+iz] - txz[(ix-2)*n1+iz])  );
+						if (mod.iorder >= 8) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c4*(tzz[ix*n1+iz+3]   - tzz[ix*n1+iz-4] +
+								    txz[(ix+4)*n1+iz] - txz[(ix-3)*n1+iz])  );
 						
 						vz[ix*n1+iz]   *= bnd.tapxz[(ibx-ix)*bnd.ntap+(ibz-iz)];
 					}
@@ -818,6 +860,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[ix*n1+iz+1]   - txz[ix*n1+iz])	+
 								c2*(txx[(ix+1)*n1+iz] - txx[(ix-2)*n1+iz] +
 									txz[ix*n1+iz+2]   - txz[ix*n1+iz-1])  );
+					if (mod.iorder >= 6) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+								c3*(txx[(ix+2)*n1+iz] - txx[(ix-3)*n1+iz] +
+								    txz[ix*n1+iz+3]   - txz[ix*n1+iz-2])  );
+					if (mod.iorder >= 8) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+								c4*(txx[(ix+3)*n1+iz] - txx[(ix-4)*n1+iz] +
+								    txz[ix*n1+iz+4]   - txz[ix*n1+iz-3])  );
 
 					vx[ix*n1+iz]   *= bnd.tapx[iz-ib];
 				}
@@ -837,6 +885,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[ix*n1+iz+1]   - txz[ix*n1+iz])	+
 								c2*(txx[(ix+1)*n1+iz] - txx[(ix-2)*n1+iz] +
 									txz[ix*n1+iz+2]   - txz[ix*n1+iz-1])  );
+						if (mod.iorder >= 6) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+								c3*(txx[(ix+2)*n1+iz] - txx[(ix-3)*n1+iz] +
+								    txz[ix*n1+iz+3]   - txz[ix*n1+iz-2])  );
+						if (mod.iorder >= 8) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+								c4*(txx[(ix+3)*n1+iz] - txx[(ix-4)*n1+iz] +
+								    txz[ix*n1+iz+4]   - txz[ix*n1+iz-3])  );
 	
 						vx[ix*n1+iz]   *= bnd.tapxz[(ix-ibx)*bnd.ntap+(iz-ibz)];
 					}
@@ -861,6 +915,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[ix*n1+iz+1]   - txz[ix*n1+iz])	+
 								c2*(txx[(ix+1)*n1+iz] - txx[(ix-2)*n1+iz] +
 									txz[ix*n1+iz+2]   - txz[ix*n1+iz-1])  );
+						if (mod.iorder >= 6) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+								c3*(txx[(ix+2)*n1+iz] - txx[(ix-3)*n1+iz] +
+								    txz[ix*n1+iz+3]   - txz[ix*n1+iz-2])  );
+						if (mod.iorder >= 8) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+								c4*(txx[(ix+3)*n1+iz] - txx[(ix-4)*n1+iz] +
+								    txz[ix*n1+iz+4]   - txz[ix*n1+iz-3])  );
 						
 						vx[ix*n1+iz]   *= bnd.tapxz[(ibx-ix)*bnd.ntap+(iz-ibz)];
 					}
@@ -883,6 +943,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[(ix+1)*n1+iz] - txz[ix*n1+iz])  +
 								c2*(tzz[ix*n1+iz+1]   - tzz[ix*n1+iz-2] +
 									txz[(ix+2)*n1+iz] - txz[(ix-1)*n1+iz])  );
+					if (mod.iorder >= 6) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c3*(tzz[ix*n1+iz+2]   - tzz[ix*n1+iz-3] +
+								    txz[(ix+3)*n1+iz] - txz[(ix-2)*n1+iz])  );
+					if (mod.iorder >= 8) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c4*(tzz[ix*n1+iz+3]   - tzz[ix*n1+iz-4] +
+								    txz[(ix+4)*n1+iz] - txz[(ix-3)*n1+iz])  );
 
 					vz[ix*n1+iz] *= bnd.tapz[iz-ib];
 				}
@@ -902,6 +968,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[(ix+1)*n1+iz] - txz[ix*n1+iz])  +
 								c2*(tzz[ix*n1+iz+1]   - tzz[ix*n1+iz-2] +
 									txz[(ix+2)*n1+iz] - txz[(ix-1)*n1+iz])  );
+						if (mod.iorder >= 6) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c3*(tzz[ix*n1+iz+2]   - tzz[ix*n1+iz-3] +
+								    txz[(ix+3)*n1+iz] - txz[(ix-2)*n1+iz])  );
+						if (mod.iorder >= 8) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c4*(tzz[ix*n1+iz+3]   - tzz[ix*n1+iz-4] +
+								    txz[(ix+4)*n1+iz] - txz[(ix-3)*n1+iz])  );
 						
 						vz[ix*n1+iz]   *= bnd.tapxz[(ix-ibx)*bnd.ntap+(iz-ibz)];
 					}
@@ -922,6 +994,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[(ix+1)*n1+iz] - txz[ix*n1+iz])  +
 								c2*(tzz[ix*n1+iz+1]   - tzz[ix*n1+iz-2] +
 									txz[(ix+2)*n1+iz] - txz[(ix-1)*n1+iz])  );
+						if (mod.iorder >= 6) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c3*(tzz[ix*n1+iz+2]   - tzz[ix*n1+iz-3] +
+								    txz[(ix+3)*n1+iz] - txz[(ix-2)*n1+iz])  );
+						if (mod.iorder >= 8) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c4*(tzz[ix*n1+iz+3]   - tzz[ix*n1+iz-4] +
+								    txz[(ix+4)*n1+iz] - txz[(ix-3)*n1+iz])  );
 						
 						vz[ix*n1+iz]   *= bnd.tapxz[(ibx-ix)*bnd.ntap+(iz-ibz)];
 					}
@@ -997,6 +1075,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[ix*n1+iz+1]   - txz[ix*n1+iz])	+
 								c2*(txx[(ix+1)*n1+iz] - txx[(ix-2)*n1+iz] +
 									txz[ix*n1+iz+2]   - txz[ix*n1+iz-1])  );
+					if (mod.iorder >= 6) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+								c3*(txx[(ix+2)*n1+iz] - txx[(ix-3)*n1+iz] +
+								    txz[ix*n1+iz+3]   - txz[ix*n1+iz-2])  );
+					if (mod.iorder >= 8) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+								c4*(txx[(ix+3)*n1+iz] - txx[(ix-4)*n1+iz] +
+								    txz[ix*n1+iz+4]   - txz[ix*n1+iz-3])  );
 					
 					vx[ix*n1+iz]   *= bnd.tapx[ib-ix];
 				}
@@ -1018,6 +1102,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[(ix+1)*n1+iz] - txz[ix*n1+iz])  +
 								c2*(tzz[ix*n1+iz+1]   - tzz[ix*n1+iz-2] +
 									txz[(ix+2)*n1+iz] - txz[(ix-1)*n1+iz])  );
+					if (mod.iorder >= 6) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c3*(tzz[ix*n1+iz+2]   - tzz[ix*n1+iz-3] +
+								    txz[(ix+3)*n1+iz] - txz[(ix-2)*n1+iz])  );
+					if (mod.iorder >= 8) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c4*(tzz[ix*n1+iz+3]   - tzz[ix*n1+iz-4] +
+								    txz[(ix+4)*n1+iz] - txz[(ix-3)*n1+iz])  );
 					
 					vz[ix*n1+iz] *= bnd.tapz[ib-ix];
 				}
@@ -1090,6 +1180,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[ix*n1+iz+1]   - txz[ix*n1+iz])	+
 								c2*(txx[(ix+1)*n1+iz] - txx[(ix-2)*n1+iz] +
 									txz[ix*n1+iz+2]   - txz[ix*n1+iz-1])  );
+					if (mod.iorder >= 6) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+								c3*(txx[(ix+2)*n1+iz] - txx[(ix-3)*n1+iz] +
+								    txz[ix*n1+iz+3]   - txz[ix*n1+iz-2])  );
+					if (mod.iorder >= 8) vx[ix*n1+iz] -= rox[ix*n1+iz]*(
+								c4*(txx[(ix+3)*n1+iz] - txx[(ix-4)*n1+iz] +
+								    txz[ix*n1+iz+4]   - txz[ix*n1+iz-3])  );
 	
 					vx[ix*n1+iz]   *= bnd.tapx[ix-ib];
 				}
@@ -1110,6 +1206,12 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 									txz[(ix+1)*n1+iz] - txz[ix*n1+iz])  +
 								c2*(tzz[ix*n1+iz+1]   - tzz[ix*n1+iz-2] +
 									txz[(ix+2)*n1+iz] - txz[(ix-1)*n1+iz])  );
+					if (mod.iorder >= 6) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c3*(tzz[ix*n1+iz+2]   - tzz[ix*n1+iz-3] +
+								    txz[(ix+3)*n1+iz] - txz[(ix-2)*n1+iz])  );
+					if (mod.iorder >= 8) vz[ix*n1+iz] -= roz[ix*n1+iz]*(
+								c4*(tzz[ix*n1+iz+3]   - tzz[ix*n1+iz-4] +
+								    txz[(ix+4)*n1+iz] - txz[(ix-3)*n1+iz])  );
 	
 					vz[ix*n1+iz] *= bnd.tapz[ix-ib];
 				}

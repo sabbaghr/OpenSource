@@ -34,8 +34,13 @@ int acoustic6(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixs
 int elastic4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float *l2m, float *lam, float *mul, int verbose);
 int elastic6(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float *l2m, float *lam, float *mul, int verbose);
 
-/* Adjoint FD kernels (multicomponent source injection at correct time-step points) */
+/* Forward FD kernel (8th order) */
+int elastic8(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float *l2m, float *lam, float *mul, int verbose);
+
+/* Adjoint FD kernels (true discrete adjoint with material params inside derivatives) */
 int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float *l2m, float *lam, float *mul, int rec_delay, int rec_skipdt, int verbose);
+int elastic6_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float *l2m, float *lam, float *mul, int rec_delay, int rec_skipdt, int verbose);
+int elastic8_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float *l2m, float *lam, float *mul, int rec_delay, int rec_skipdt, int verbose);
 
 /* Checkpoint I/O (checkpoint.c) */
 int readCheckpoint(checkpointPar *chk, int isnap, wflPar *wfl);
@@ -65,6 +70,7 @@ static void callKernel(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 					wfl->vx, wfl->vz, wfl->tzz, mod->rox, mod->roz, mod->l2m, verbose);
 			break;
 		case 3:
+		case 5:
 			if (mod->iorder == 4)
 				elastic4(*mod, *src, *wav, *bnd, it, ixsrc, izsrc, src_nwav,
 					wfl->vx, wfl->vz, wfl->tzz, wfl->txx, wfl->txz,
@@ -73,10 +79,8 @@ static void callKernel(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 				elastic6(*mod, *src, *wav, *bnd, it, ixsrc, izsrc, src_nwav,
 					wfl->vx, wfl->vz, wfl->tzz, wfl->txx, wfl->txz,
 					mod->rox, mod->roz, mod->l2m, mod->lam, mod->muu, verbose);
-			break;
-		case 5:
-			if (mod->iorder == 4)
-				elastic4(*mod, *src, *wav, *bnd, it, ixsrc, izsrc, src_nwav,
+			else if (mod->iorder == 8)
+				elastic8(*mod, *src, *wav, *bnd, it, ixsrc, izsrc, src_nwav,
 					wfl->vx, wfl->vz, wfl->tzz, wfl->txx, wfl->txz,
 					mod->rox, mod->roz, mod->l2m, mod->lam, mod->muu, verbose);
 			break;
@@ -107,7 +111,16 @@ static void callAdjKernel(modPar *mod, adjSrcPar *adj, bndPar *bnd,
 					wfl->vx, wfl->vz, wfl->tzz, wfl->txx, wfl->txz,
 					mod->rox, mod->roz, mod->l2m, mod->lam, mod->muu,
 					rec_delay, rec_skipdt, verbose);
-			/* TODO: else if (mod->iorder == 6) elastic6_adj(...) */
+			else if (mod->iorder == 6)
+				elastic6_adj(*mod, *adj, *bnd, it,
+					wfl->vx, wfl->vz, wfl->tzz, wfl->txx, wfl->txz,
+					mod->rox, mod->roz, mod->l2m, mod->lam, mod->muu,
+					rec_delay, rec_skipdt, verbose);
+			else if (mod->iorder == 8)
+				elastic8_adj(*mod, *adj, *bnd, it,
+					wfl->vx, wfl->vz, wfl->tzz, wfl->txx, wfl->txz,
+					mod->rox, mod->roz, mod->l2m, mod->lam, mod->muu,
+					rec_delay, rec_skipdt, verbose);
 			break;
 	}
 }

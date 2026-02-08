@@ -220,6 +220,10 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
 		dispfactor = 5;
 		stabfactor = 0.606; /* courant number */
 	}
+	else if (mod->iorder == 8) {
+		dispfactor = 5;
+		stabfactor = 0.55; /* courant number for 8th order */
+	}
 	else if (mod->iorder == 16) {
 		dispfactor = 2;
 		stabfactor = 0.45; /* courant number */
