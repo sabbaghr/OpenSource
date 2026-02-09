@@ -20,18 +20,18 @@
  *   4. Each stress component couples to ONLY 1 velocity component
  *
  * Forward (elastic4.c):
- *   vx -= bx * [D-x(txx) + D+z(txz)]
- *   vz -= bz * [D+x(txz) + D-z(tzz)]
- *   txx -= l2m * D+x(vx) + lam * D+z(vz)
- *   tzz -= lam * D+x(vx) + l2m * D+z(vz)
- *   txz -= mul * [D-z(vx) + D-x(vz)]
+ *   vx -= rox * [D-x(txx) + D+z(txz)]           Step 1 / Phase F1
+ *   vz -= roz * [D+x(txz) + D-z(tzz)]           Step 1 / Phase F1
+ *   txx -= l2m * D+x(vx) + lam * D+z(vz)        Step 4 / Phase F2
+ *   tzz -= lam * D+x(vx) + l2m * D+z(vz)        Step 4 / Phase F2
+ *   txz -= mul * [D-z(vx) + D-x(vz)]             Step 4 / Phase F2
  *
  * TRUE ADJOINT (this file):
- *   vx += D-x(l2m*txx) + D-x(lam*tzz) + D+z(mul*txz)
- *   vz += D-z(lam*txx) + D-z(l2m*tzz) + D+x(mul*txz)
- *   txx += D+x(bx*vx)
- *   tzz += D+z(bz*vz)
- *   txz += D-z(bx*vx) + D-x(bz*vz)
+ *   vx += D-x(l2m*txx) + D-x(lam*tzz) + D+z(mul*txz)   Step 4^T / (F2)^T
+ *   vz += D-z(lam*txx) + D-z(l2m*tzz) + D+x(mul*txz)   Step 4^T / (F2)^T
+ *   txx += D+x(rox*vx)                                    Step 1^T / (F1)^T
+ *   tzz += D+z(roz*vz)                                    Step 1^T / (F1)^T
+ *   txz += D-z(rox*vx) + D-x(roz*vz)                     Step 1^T / (F1)^T
  *
  *   AUTHOR:
  *           FD stencils derived from elastic4.c by Jan Thorbecke
@@ -66,25 +66,23 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 	n1 = mod.naz;
 
 	/* ============================================================ */
-	/*  STEP 1: Adjoint Free Surface (reverse of forward Step 6)    */
+	/*  Step 6^T: Adjoint free surface (boundariesV_adj)            */
 	/*  Must act BEFORE the stencil reads stress at surface points. */
 	/* ============================================================ */
 	boundariesV_adj(mod, bnd, vx, vz, tzz, txx, txz, rox, roz, l2m, lam, mul, itime, verbose);
 
 	/* ============================================================ */
-	/*  STEP 2: Inject adjoint STRESS sources (reverse of fwd Step 5)*/
+	/*  Step 5^T: Inject adjoint stress sources                     */
 	/* ============================================================ */
 	applyAdjointSource(mod, adj, itime, vx, vz, tzz, txx, txz,
 		mul, rec_delay, rec_skipdt, /*phase=*/2, verbose);
 
 	/* ============================================================ */
-	/*  Phase 1: Adjoint velocity update from adjoint stresses      */
+	/*  Step 4^T / Phase A1 = (F2)^T: Adjoint velocity update      */
+	/*  vx += D-x(l2m*txx) + D-x(lam*tzz) + D+z(mul*txz)         */
 	/*                                                               */
-	/*  vx += D-x(l2m*txx) + D-x(lam*tzz) + D+z(mul*txz)          */
-	/*                                                               */
-	/*  Note: material params (l2m, lam, mul) are INSIDE the        */
-	/*  derivative -- this is the transpose of the forward stress   */
-	/*  update where they multiply OUTSIDE the derivative.           */
+	/*  Material params (l2m, lam, mul) INSIDE the derivative --    */
+	/*  transpose of fwd where they multiply OUTSIDE.                */
 	/* ============================================================ */
 #pragma omp for private (ix, iz) nowait schedule(guided,1)
 	for (ix=mod.ioXx; ix<mod.ieXx; ix++) {
@@ -100,9 +98,7 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 		}
 	}
 
-	/* ============================================================ */
-	/*  vz += D-z(lam*txx) + D-z(l2m*tzz) + D+x(mul*txz)          */
-	/* ============================================================ */
+	/* vz += D-z(lam*txx) + D-z(l2m*tzz) + D+x(mul*txz) */
 #pragma omp for private (ix, iz) schedule(guided,1)
 	for (ix=mod.ioZx; ix<mod.ieZx; ix++) {
 #pragma simd
@@ -118,25 +114,22 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 	}
 
 	/* ============================================================ */
-	/*  STEP 4: Adjoint velocity boundaries (reverse of fwd Step 3) */
+	/*  Step 3^T: Adjoint velocity boundaries (boundariesP_adj)     */
 	/* ============================================================ */
 	boundariesP_adj(mod, bnd, vx, vz, tzz, txx, txz, rox, roz, l2m, lam, mul, itime, verbose);
 
 	/* ============================================================ */
-	/*  STEP 5: Inject adjoint FORCE sources (reverse of fwd Step 2)*/
+	/*  Step 2^T: Inject adjoint force sources                      */
 	/* ============================================================ */
 	applyAdjointSource(mod, adj, itime, vx, vz, tzz, txx, txz,
 		mul, rec_delay, rec_skipdt, /*phase=*/1, verbose);
 
 	/* ============================================================ */
-	/*  Phase 2: Adjoint stress update from adjoint velocities      */
+	/*  Step 1^T / Phase A2 = (F1)^T: Adjoint stress update        */
+	/*  txx += D+x(rox*vx),  tzz += D+z(roz*vz)                   */
 	/*                                                               */
-	/*  txx += D+x(rox*vx)                                         */
-	/*  tzz += D+z(roz*vz)                                         */
-	/*                                                               */
-	/*  Note: buoyancy (rox, roz) is INSIDE the derivative --       */
-	/*  this is the transpose of the forward velocity update where  */
-	/*  buoyancy multiplies OUTSIDE the derivative.                  */
+	/*  Buoyancy (rox, roz) INSIDE the derivative -- transpose of   */
+	/*  fwd where they multiply OUTSIDE.                             */
 	/* ============================================================ */
 #pragma omp for private (ix, iz) nowait schedule(guided,1)
 	for (ix=mod.ioPx; ix<mod.iePx; ix++) {
@@ -151,9 +144,7 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 		}
 	}
 
-	/* ============================================================ */
-	/*  txz += D-z(rox*vx) + D-x(roz*vz)                           */
-	/* ============================================================ */
+	/* txz += D-z(rox*vx) + D-x(roz*vz) */
 #pragma omp for private (ix, iz) schedule(guided,1)
 	for (ix=mod.ioTx; ix<mod.ieTx; ix++) {
 #pragma simd
@@ -167,7 +158,7 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 	}
 
 	/* ============================================================ */
-	/*  Free surface txz correction: missing F1^T contributions     */
+	/*  Free surface txz correction (supplement to Step 1^T)        */
 	/*                                                               */
 	/*  Phase F1 vx at iz=surface reads txz[surface] and            */
 	/*  txz[surface-1] through D+z, but Phase A2 txz starts at     */
@@ -179,11 +170,9 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 		int izs = bnd.surface[mod.ioPx];
 #pragma omp for private (ix) schedule(guided,1)
 		for (ix=mod.ioTx; ix<mod.ieTx; ix++) {
-			/* adj_txz[surface]: from F1 vx at iz=s (c1) and iz=s+1 (c2) */
 			txz[ix*n1+izs] +=
 				c1*rox[ix*n1+izs]*vx[ix*n1+izs] +
 				c2*rox[ix*n1+izs+1]*vx[ix*n1+izs+1];
-			/* adj_txz[surface-1]: from F1 vx at iz=s (c2 arm) */
 			txz[ix*n1+izs-1] +=
 				c2*rox[ix*n1+izs]*vx[ix*n1+izs];
 		}

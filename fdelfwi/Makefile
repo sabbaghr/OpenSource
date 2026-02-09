@@ -53,6 +53,7 @@ SRCC	= fdfwimodc.c \
 		readResidual.c  \
 		checkpoint.c  \
 		adj_shot.c  \
+		fwi_gradient.c  \
 		applyAdjointSource.c  \
 		elastic4_adj.c  \
 		elastic6_adj.c  \
@@ -109,78 +110,16 @@ $(PRG6):	$(OBJC) fdelfwi.h
 	$(CC) $(CFLAGS) $(OPTC) -c test_dotproduct.c
 	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG6) test_dotproduct.o $(OBJC) fileOpen.o writeRec.o $(LIBS)
 
-# MPI driver: recompile sources with MPI compiler and -DUSE_MPI
-# Object files are named *_mpi.o to avoid conflict with serial objects
-OBJC_MPI = $(SRCC:%.c=%_mpi.o)
-
-%_mpi.o: %.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o $@ $<
-
-$(PRG4):	fdelfwi.h
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o fileOpen_mpi.o fileOpen.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o writeRec_mpi.o writeRec.c
+# MPI driver: only fwi_driver.c needs MPI (-DUSE_MPI).
+# All other sources (elastic4, boundaries, adj_shot, etc.) have no MPI calls --
+# MPI parallelization is over shots in the driver, not within a single shot.
+# We reuse the serial $(OBJC) objects and link with mpicc to pull in MPI libs.
+$(PRG4):	$(OBJC) fdelfwi.h
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
 	$(MPICC) -c $(CFLAGS) $(OPTC) -DUSE_MPI -o fwi_driver_mpi.o fwi_driver.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o fdfwimodc_mpi.o fdfwimodc.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o acoustic2_mpi.o acoustic2.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o acoustic4_mpi.o acoustic4.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o acousticSH4_mpi.o acousticSH4.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o acoustic4_qr_mpi.o acoustic4_qr.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o acoustic6_mpi.o acoustic6.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o acoustic16_mpi.o acoustic16.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o viscoacoustic4_mpi.o viscoacoustic4.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o elastic4_mpi.o elastic4.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o elastic4dc_mpi.o elastic4dc.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o elastic6_mpi.o elastic6.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o elastic8_mpi.o elastic8.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o viscoelastic4_mpi.o viscoelastic4.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o defineSource_mpi.o defineSource.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o getParameters_mpi.o getParameters.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o getWaveletInfo_mpi.o getWaveletInfo.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o getModelInfo_mpi.o getModelInfo.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o applySource_mpi.o applySource.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o getRecTimes_mpi.o getRecTimes.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o getBeamTimes_mpi.o getBeamTimes.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o writeSnapTimes_mpi.o writeSnapTimes.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o writeSrcRecPos_mpi.o writeSrcRecPos.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o decomposition_mpi.o decomposition.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o recvPar_mpi.o recvPar.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o readModel_mpi.o readModel.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o readResidual_mpi.o readResidual.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o checkpoint_mpi.o checkpoint.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o adj_shot_mpi.o adj_shot.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o applyAdjointSource_mpi.o applyAdjointSource.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o elastic4_adj_mpi.o elastic4_adj.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o elastic6_adj_mpi.o elastic6_adj.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o elastic8_adj_mpi.o elastic8_adj.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o computeResidual_mpi.o computeResidual.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o sourceOnSurface_mpi.o sourceOnSurface.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o getWaveletHeaders_mpi.o getWaveletHeaders.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o boundaries_mpi.o boundaries.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o boundaries_adj_mpi.o boundaries_adj.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o verbosepkg_mpi.o verbosepkg.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o writesufile_mpi.o writesufile.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o gaussGen_mpi.o gaussGen.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o spline3_mpi.o spline3.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o CMWC4096_mpi.o CMWC4096.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o wallclock_time_mpi.o wallclock_time.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o name_ext_mpi.o name_ext.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o atopkge_mpi.o atopkge.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o docpkge_mpi.o docpkge.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o threadAffinity_mpi.o threadAffinity.c
-	$(MPICC) -c $(CFLAGS) $(OPTC) -o getpars_mpi.o getpars.c
 	$(MPICC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG4) fwi_driver_mpi.o \
-		fdfwimodc_mpi.o acoustic2_mpi.o acoustic4_mpi.o acousticSH4_mpi.o \
-		acoustic4_qr_mpi.o acoustic6_mpi.o acoustic16_mpi.o viscoacoustic4_mpi.o \
-		elastic4_mpi.o elastic4dc_mpi.o elastic6_mpi.o elastic8_mpi.o viscoelastic4_mpi.o \
-		defineSource_mpi.o getParameters_mpi.o getWaveletInfo_mpi.o getModelInfo_mpi.o \
-		applySource_mpi.o getRecTimes_mpi.o getBeamTimes_mpi.o writeSnapTimes_mpi.o \
-		writeSrcRecPos_mpi.o decomposition_mpi.o recvPar_mpi.o readModel_mpi.o \
-		readResidual_mpi.o checkpoint_mpi.o adj_shot_mpi.o applyAdjointSource_mpi.o \
-		elastic4_adj_mpi.o elastic6_adj_mpi.o elastic8_adj_mpi.o computeResidual_mpi.o sourceOnSurface_mpi.o \
-		getWaveletHeaders_mpi.o boundaries_mpi.o boundaries_adj_mpi.o verbosepkg_mpi.o writesufile_mpi.o \
-		gaussGen_mpi.o spline3_mpi.o CMWC4096_mpi.o wallclock_time_mpi.o \
-		name_ext_mpi.o atopkge_mpi.o docpkge_mpi.o threadAffinity_mpi.o getpars_mpi.o \
-		fileOpen_mpi.o writeRec_mpi.o $(LIBS)
+		$(OBJC) fileOpen.o writeRec.o $(LIBS)
 
 install: $(PRG1) $(PRG2) $(PRG4)
 	cp $(PRG1) $B

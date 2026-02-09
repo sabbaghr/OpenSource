@@ -22,48 +22,26 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 *l2m, float *lam, float *mul, int verbose)
 {
 /*********************************************************************
-       COMPUTATIONAL OVERVIEW OF THE 4th ORDER STAGGERED GRID: 
 
-  The captial symbols T (=Txx,Tzz) Txz,Vx,Vz represent the actual grid
-  The indices ix,iz are related to the T grid, so the capital T 
-  symbols represent the actual modelled grid.
+  Forward 6th-order elastic staggered-grid FD kernel.
 
-  one cel (iz,ix)
-       |
-       V                              extra column of vx,txz
-                                                      |
-    -------                                           V
-   | txz vz| txz vz  txz vz  txz vz  txz vz  txz vz txz
-   |       |      
-   | vx  t | vx  t   vx  t   vx  t   vx  t   vx  t  vx
-    -------
-     txz vz  txz vz  txz vz  txz vz  txz vz  txz vz  txz
+  Forward operator (this file):
+    vx -= rox * [D-x(txx) + D+z(txz)]           Step 1 / Phase F1
+    vz -= roz * [D+x(txz) + D-z(tzz)]           Step 1 / Phase F1
+    txx -= l2m * D+x(vx) + lam * D+z(vz)        Step 4 / Phase F2
+    tzz -= lam * D+x(vx) + l2m * D+z(vz)        Step 4 / Phase F2
+    txz -= mul * [D-z(vx) + D-x(vz)]             Step 4 / Phase F2
 
-     vx  t   vx  T---Vx--T---Vx--T---Vx--T   vx  t   vx
-                 |   |   |   |   |   |   | 
-     txz vz  txz Vz--Txz-Vz--Txz-Vz  Txz-Vz  txz vz  txz
-                 |   |   |   |   |   |   |
-     vx  t   vx  T---Vx--T---Vx--T---Vx--T   vx  t   vx
-                 |   |   |   |   |   |   |
-     txz vz  txz Vz  Txz-Vz  Txz-Vz  Txz-Vz  txz vz  txz
-                 |   |   |   |   |   |   |
-     vx  t   vx  T---Vx--T---Vx--T---Vx--T   vx  t   vx
-                 |   |   |   |   |   |   |
-     txz vz  txz Vz  Txz-Vz  Txz-Vz  Txz-Vz  txz vz  txz
-                 |   |   |   |   |   |   |
-     vx  t   vx  T---Vx--T---Vx--T---Vx--T   vx  t   vx
-
-     txz vz  txz vz  txz vz  txz vz  txz vz  txz vz  txz
-
-     vx  t   vx  t   vx  t   vx  t   vx  t   vx  t  vx
-
-     txz vz  txz vz  txz vz  txz vz  txz vz  txz vz  txz  <--| 
-                                                             |
-                                         extra row of txz/vz |
+  TRUE ADJOINT (see elastic6_adj.c):
+    vx += D-x(l2m*txx) + D-x(lam*tzz) + D+z(mul*txz)   Step 4^T / (F2)^T
+    vz += D-z(lam*txx) + D-z(l2m*tzz) + D+x(mul*txz)   Step 4^T / (F2)^T
+    txx += D+x(rox*vx)                                    Step 1^T / (F1)^T
+    tzz += D+z(roz*vz)                                    Step 1^T / (F1)^T
+    txz += D-z(rox*vx) + D-x(roz*vz)                     Step 1^T / (F1)^T
 
    AUTHOR:
            Jan Thorbecke (janth@xs4all.nl)
-           The Netherlands 
+           The Netherlands
 
 ***********************************************************************/
 
@@ -91,7 +69,10 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 	ioTx=mod.iorder/2;
 	ioTz=ioTx;
 
-	/* calculate vx for all grid points except on the virtual boundary*/
+	/* ============================================================ */
+	/*  Step 1 / Phase F1: Velocity update                          */
+	/*  vx -= rox * [D-x(txx) + D+z(txz)]                         */
+	/* ============================================================ */
 #pragma omp for private (ix, iz) nowait
 	for (ix=mod.ioXx; ix<mod.ieXx; ix++) {
 #pragma simd
@@ -106,8 +87,8 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 		}
 	}
 
-	/* calculate vz for all grid points except on the virtual boundary */
-#pragma omp for private (ix, iz) 
+	/* vz -= roz * [D+x(txz) + D-z(tzz)] */
+#pragma omp for private (ix, iz)
 	for (ix=mod.ioZx; ix<mod.ieZx; ix++) {
 #pragma simd
 		for (iz=mod.ioZz; iz<mod.ieZz; iz++) {
@@ -118,27 +99,33 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 							txz[(ix+2)*n1+iz] - txz[(ix-1)*n1+iz]) +
                         c3*(tzz[ix*n1+iz+2]   - tzz[ix*n1+iz-3]    +
                             txz[(ix+3)*n1+iz] - txz[(ix-2)*n1+iz])  );
-            
-            
 		}
 	}
 
-	/* Add force source */
+	/* ============================================================ */
+	/*  Step 2: Force source injection (src_type > 5)               */
+	/* ============================================================ */
 	if (src.type > 5) {
 		 applySource(mod, src, wav, bnd, itime, ixsrc, izsrc, vx, vz, tzz, txx, txz, rox, roz, l2m, src_nwav, verbose);
 	}
 
-    /* boundary condition clears velocities on boundaries */
+	/* ============================================================ */
+	/*  Step 3: Velocity boundary conditions (boundariesP / taper)  */
+	/* ============================================================ */
 	boundariesP(mod, bnd, vx, vz, tzz, txx, txz, rox, roz, l2m, lam, mul, itime, verbose);
 
-	/* calculate Txx/tzz for all grid points except on the virtual boundary */
+	/* ============================================================ */
+	/*  Step 4 / Phase F2: Stress update                            */
+	/*  txx -= l2m * D+x(vx) + lam * D+z(vz)                      */
+	/*  tzz -= lam * D+x(vx) + l2m * D+z(vz)                      */
+	/* ============================================================ */
 #pragma omp	for private (ix, iz, dvx, dvz) nowait
 	for (ix=mod.ioPx; ix<mod.iePx; ix++) {
 #pragma simd
 		for (iz=mod.ioPz; iz<mod.iePz; iz++) {
 			dvx = c1*(vx[(ix+1)*n1+iz] - vx[ix*n1+iz]) +
 			      c2*(vx[(ix+2)*n1+iz] - vx[(ix-1)*n1+iz]) +
-                  c3*(vx[(ix+3)*n1+iz] - vx[(ix-2)*n1+iz]);  
+                  c3*(vx[(ix+3)*n1+iz] - vx[(ix-2)*n1+iz]);
 			dvz = c1*(vz[ix*n1+iz+1]   - vz[ix*n1+iz]) +
 			      c2*(vz[ix*n1+iz+2]   - vz[ix*n1+iz-1]) +
                   c3*(vz[ix*n1+iz+3]   - vz[ix*n1+iz-2]);
@@ -147,8 +134,8 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 		}
 	}
 
-	/* calculate Txz for all grid points except on the virtual boundary */
-#pragma omp	for private (ix, iz) 
+	/* txz -= mul * [D-z(vx) + D-x(vz)] */
+#pragma omp	for private (ix, iz)
 	for (ix=mod.ioTx; ix<mod.ieTx; ix++) {
 #pragma simd
 		for (iz=mod.ioTz; iz<mod.ieTz; iz++) {
@@ -159,24 +146,23 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 						vz[(ix+1)*n1+iz] - vz[(ix-2)*n1+iz]) +
                     c3*(vx[ix*n1+iz+2]   - vx[ix*n1+iz-3] +
                         vz[(ix+2)*n1+iz] - vz[(ix-3)*n1+iz]) );
-
 		}
 	}
 
-	/* Add stress source */
+	/* ============================================================ */
+	/*  Step 5: Stress source injection (src_type < 6)              */
+	/* ============================================================ */
 	if (src.type < 6) {
 		 applySource(mod, src, wav, bnd, itime, ixsrc, izsrc, vx, vz, tzz, txx, txz, rox, roz, l2m, src_nwav, verbose);
 	}
 
-
-	/* check if there are sources placed on the free surface */
+	/* ============================================================ */
+	/*  Step 6: Free surface boundary conditions                    */
+	/*  storeSourceOnSurface -> boundariesV -> reStoreSource        */
+	/* ============================================================ */
     storeSourceOnSurface(mod, src, bnd, ixsrc, izsrc, vx, vz, tzz, txx, txz, verbose);
-
-    /* Free surface: calculate free surface conditions for stresses */
     boundariesV(mod, bnd, vx, vz, tzz, txx, txz, rox, roz, l2m, lam, mul, itime, verbose);
-
-	/* restore source positions on the edge */
 	reStoreSourceOnSurface(mod, src, bnd, ixsrc, izsrc, vx, vz, tzz, txx, txz, verbose);
 
-      return 0;
+    return 0;
 }
