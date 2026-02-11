@@ -151,8 +151,12 @@ void accumGradient(modPar *mod, bndPar *bnd,
 	if (ieTz > n1 - half) ieTz = n1 - half;
 
 	/* --- Density gradient bounds (Vx and Vz grids) ---
-	 * Note: mod->ioXx, ioXz, ioZx, ioZz are ALREADY adjusted for ntap in
-	 * getParameters.c, so we only need to adjust the END indices.
+	 * In getParameters.c, the velocity grid io/ie indices are BOTH shifted
+	 * by ntap for top/left absorbing boundaries.  Unlike the P grid (where
+	 * ioPx is NOT shifted but iePx includes ALL ntap shifts), the velocity
+	 * grid ie values do NOT include the right/bottom taper padding.
+	 * Therefore: io already skips left/top taper, ie already stops at the
+	 * physical domain edge.  No further ntap adjustments are needed.
 	 */
 	ibVx_x = mod->ioXx;
 	ieVx_x = mod->ieXx;
@@ -162,10 +166,6 @@ void accumGradient(modPar *mod, bndPar *bnd,
 	ieVz_x = mod->ieZx;
 	ibVz_z = mod->ioZz;
 	ieVz_z = mod->ieZz;
-
-	/* Absorbing boundary adjustments for END indices only */
-	if (bnd->rig == 4 || bnd->rig == 2) { ieVx_x -= bnd->ntap; ieVz_x -= bnd->ntap; }
-	if (bnd->bot == 4 || bnd->bot == 2) { ieVx_z -= bnd->ntap; ieVz_z -= bnd->ntap; }
 
 	/* ================================================================
 	 * Lambda gradient at P grid (where txx, tzz are defined)
