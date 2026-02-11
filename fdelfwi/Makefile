@@ -16,6 +16,7 @@ driver: fwi_driver
 mpi: fwi_mpi_driver
 test_wave_op_dp: $(PRG5)
 test_dotproduct: $(PRG6)
+test_taylor: $(PRG7)
 
 PRG1 = test_fdfwimodc
 PRG2 = test_fwi_gradient
@@ -23,6 +24,7 @@ PRG3 = fwi_driver
 PRG4 = fwi_mpi_driver
 PRG5 = test_wave_op_dp
 PRG6 = test_dotproduct
+PRG7 = test_taylor
 
 # Library sources (no test drivers -- those have main())
 SRCC	= fdfwimodc.c \
@@ -110,6 +112,13 @@ $(PRG6):	$(OBJC) fdelfwi.h
 	$(CC) $(CFLAGS) $(OPTC) -c test_dotproduct.c
 	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG6) test_dotproduct.o $(OBJC) fileOpen.o writeRec.o $(LIBS)
 
+# Taylor gradient verification test
+$(PRG7):	$(OBJC) fdelfwi.h
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -c test_taylor.c
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG7) test_taylor.o $(OBJC) fileOpen.o writeRec.o $(LIBS)
+
 # MPI driver: only fwi_driver.c needs MPI (-DUSE_MPI).
 # All other sources (elastic4, boundaries, adj_shot, etc.) have no MPI calls --
 # MPI parallelization is over shots in the driver, not within a single shot.
@@ -127,7 +136,7 @@ install: $(PRG1) $(PRG2) $(PRG4)
 	cp $(PRG4) $B
 
 clean:
-		rm -f core $(OBJC) *_mpi.o fileOpen.o writeRec.o test_fdfwimodc.o test_fwi_gradient.o fwi_driver.o fwi_driver_mpi.o test_wave_op_dp.o test_dotproduct.o $(PRG1) $(PRG2) $(PRG3) $(PRG4) $(PRG5) $(PRG6)
+		rm -f core $(OBJC) *_mpi.o fileOpen.o writeRec.o test_fdfwimodc.o test_fwi_gradient.o fwi_driver.o fwi_driver_mpi.o test_wave_op_dp.o test_dotproduct.o test_taylor.o $(PRG1) $(PRG2) $(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7)
 
 realclean:
 		rm -f core $(OBJC) fileOpen.o writeRec.o test_fdfwimodc.o test_fwi_gradient.o fwi_driver.o $(PRG1) $(PRG2) $(PRG3) $B/$(PRG1) $B/$(PRG2) $B/$(PRG3)

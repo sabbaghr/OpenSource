@@ -52,6 +52,17 @@ int writeSnapTimes(modPar mod, snaPar sna, bndPar bnd, wavPar wav,
                    int verbose);
 void writeSnapTimesReset(void);
 
+/* Gradient cross-correlation and parameterization (fwi_gradient.c) */
+void accumGradient(modPar *mod, bndPar *bnd,
+                   float *fwd_vx, float *fwd_vz,
+                   float *fwd_vx_prev, float *fwd_vz_prev,
+                   wflPar *wfl_adj,
+                   float dt,
+                   float *grad_lam, float *grad_muu, float *grad_rho);
+void convertGradientToVelocity(float *grad1, float *grad2, float *grad3,
+                               float *cp, float *cs, float *rho,
+                               size_t sizem);
+
 
 /***********************************************************************
  * callKernel -- Dispatch to the appropriate FD kernel.
@@ -127,246 +138,6 @@ static void callAdjKernel(modPar *mod, adjSrcPar *adj, bndPar *bnd,
 
 
 /***********************************************************************
- * accumGradient -- Cross-correlate forward/adjoint wavefields (ELASTIC ONLY).
- *
- * Accumulates gradient contributions for one time step using the
- * rigorous formulas from the adjoint-state method (Métivier & Brossier).
- *
- * NOTE: This implementation is for ELASTIC FWI only (ischeme=3).
- *       Acoustic FWI would require different gradient formulas.
- *
- * Gradient formulas (velocity-stress formulation):
- *
- *   Lambda (Eq. 51):  g_λ = ∫ tr(σ_adj)(∇·v_fwd) dt
- *                         = ∫ (σxx_adj + σzz_adj)(∂vx/∂x + ∂vz/∂z) dt
- *                    Computed at P grid (where txx, tzz are defined)
- *
- *   Mu (Eq. 54):      g_μ = ∫ 2 σ_adj : ε̇_fwd dt
- *                         = ∫ 2(σxx_adj·ε̇xx + σzz_adj·ε̇zz + 2·σxz_adj·ε̇xz) dt
- *                    Computed at Txz grid (where muu is defined)
- *                    Diagonal terms interpolated from P grid to Txz grid
- *
- *   Density (Eq. 21): g_ρ = ∫ v_adj · (∂v_fwd/∂t) dt
- *
- * Boundary handling:
- *   - Absorbing boundaries (type 2,4): skip taper zone (ntap points)
- *   - Free surface (type 1): skip 1 point below surface for stress gradients
- *   - FD stencil requirements: 4th-order needs 2 points margin for ix±2, iz±2
- *   - Interpolation in mu gradient needs ix-1, iz-1 access
- *
- ***********************************************************************/
-static void accumGradient(modPar *mod, bndPar *bnd,
-                          float *fwd_vx, float *fwd_vz,
-                          float *fwd_vx_prev, float *fwd_vz_prev,
-                          wflPar *wfl_adj,
-                          float dt,
-                          float *grad_lam, float *grad_muu, float *grad_rho)
-{
-	int ix, iz, n1, nax;
-	int ibPx, iePx, ibPz, iePz;
-	int ibTx, ieTx, ibTz, ieTz;
-	int ibVx_x, ieVx_x, ibVx_z, ieVx_z;
-	int ibVz_x, ieVz_x, ibVz_z, ieVz_z;
-	float sdx, sdz;
-	float c1, c2;
-
-	/* Only for elastic (ischeme > 2) */
-	if (mod->ischeme <= 2) return;
-
-	n1  = mod->naz;
-	nax = mod->nax;
-	sdx = 1.0f / mod->dx;
-	sdz = 1.0f / mod->dz;
-
-	/* FD coefficients for 4th order */
-	c1 = 9.0f/8.0f;
-	c2 = -1.0f/24.0f;
-
-	/* ================================================================
-	 * Compute safe loop bounds for each gradient type.
-	 * Start with kernel loop bounds, then adjust for:
-	 *   1. Absorbing boundaries: skip ntap points
-	 *   2. Free surface: skip 1 point below surface
-	 *   3. FD stencil requirements: ensure ix±2, iz±2 are valid
-	 *   4. Interpolation margin for mu gradient
-	 * ================================================================ */
-
-	/* --- Lambda gradient bounds (P grid) --- */
-	ibPx = mod->ioPx;
-	iePx = mod->iePx;
-	ibPz = mod->ioPz;
-	iePz = mod->iePz;
-
-	/* Absorbing boundary adjustments */
-	if (bnd->lef == 4 || bnd->lef == 2) ibPx += bnd->ntap;
-	if (bnd->rig == 4 || bnd->rig == 2) iePx -= bnd->ntap;
-	if (bnd->top == 4 || bnd->top == 2) ibPz += bnd->ntap;
-	if (bnd->bot == 4 || bnd->bot == 2) iePz -= bnd->ntap;
-
-	/* Free surface: skip gradient at surface row (stress BC artifacts) */
-	if (bnd->top == 1) ibPz = MAX(ibPz, mod->ioPz + 1);
-
-	/* FD stencil safety: need ix-1, ix+2, iz-1, iz+2 valid */
-	ibPx = MAX(ibPx, 1);
-	iePx = MAX(ibPx, iePx);  /* ensure iePx >= ibPx */
-	if (iePx > nax - 2) iePx = nax - 2;
-	ibPz = MAX(ibPz, 1);
-	iePz = MAX(ibPz, iePz);
-	if (iePz > n1 - 2) iePz = n1 - 2;
-
-	/* --- Mu gradient bounds (Txz grid) --- */
-	ibTx = mod->ioTx;
-	ieTx = mod->ieTx;
-	ibTz = mod->ioTz;
-	ieTz = mod->ieTz;
-
-	/* Absorbing boundary adjustments */
-	if (bnd->lef == 4 || bnd->lef == 2) ibTx += bnd->ntap;
-	if (bnd->rig == 4 || bnd->rig == 2) ieTx -= bnd->ntap;
-	if (bnd->top == 4 || bnd->top == 2) ibTz += bnd->ntap;
-	if (bnd->bot == 4 || bnd->bot == 2) ieTz -= bnd->ntap;
-
-	/* Free surface: skip gradient near surface (txz=0 BC and interpolation) */
-	if (bnd->top == 1) ibTz = MAX(ibTz, mod->ioTz + 1);
-
-	/* FD stencil + interpolation safety:
-	 * - Interpolation needs ix-1, iz-1
-	 * - Stencil for dvxdx_00 etc needs ix-2, iz-2 and ix+2, iz+2 */
-	ibTx = MAX(ibTx, 2);
-	ieTx = MAX(ibTx, ieTx);
-	if (ieTx > nax - 2) ieTx = nax - 2;
-	ibTz = MAX(ibTz, 2);
-	ieTz = MAX(ibTz, ieTz);
-	if (ieTz > n1 - 2) ieTz = n1 - 2;
-
-	/* --- Density gradient bounds (Vx and Vz grids) ---
-	 * Note: mod->ioXx, ioXz, ioZx, ioZz are ALREADY adjusted for ntap in
-	 * getParameters.c (lines 488-489, 508-509), so we only need to adjust
-	 * the END indices for right/bottom absorbing boundaries.
-	 */
-	ibVx_x = mod->ioXx;
-	ieVx_x = mod->ieXx;
-	ibVx_z = mod->ioXz;
-	ieVx_z = mod->ieXz;
-	ibVz_x = mod->ioZx;
-	ieVz_x = mod->ieZx;
-	ibVz_z = mod->ioZz;
-	ieVz_z = mod->ieZz;
-
-	/* Absorbing boundary adjustments for END indices only (start already adjusted) */
-	if (bnd->rig == 4 || bnd->rig == 2) { ieVx_x -= bnd->ntap; ieVz_x -= bnd->ntap; }
-	if (bnd->bot == 4 || bnd->bot == 2) { ieVx_z -= bnd->ntap; ieVz_z -= bnd->ntap; }
-
-	/* ================================================================
-	 * Lambda gradient at P grid (where txx, tzz are defined)
-	 * g_λ = ∫ tr(σ_adj)(∇·v_fwd) dt  (Eq. 51)
-	 * ================================================================ */
-	if (grad_lam) {
-		for (ix = ibPx; ix < iePx; ix++) {
-			for (iz = ibPz; iz < iePz; iz++) {
-				float dvxdx_f, dvzdz_f;
-
-				/* Forward velocity divergence at P grid */
-				dvxdx_f = sdx*(c1*(fwd_vx[(ix+1)*n1+iz]-fwd_vx[ix*n1+iz])
-				              +c2*(fwd_vx[(ix+2)*n1+iz]-fwd_vx[(ix-1)*n1+iz]));
-				dvzdz_f = sdz*(c1*(fwd_vz[ix*n1+iz+1]-fwd_vz[ix*n1+iz])
-				              +c2*(fwd_vz[ix*n1+iz+2]-fwd_vz[ix*n1+iz-1]));
-
-				/* g_λ = tr(σ_adj) * div(v_fwd) */
-				grad_lam[ix*n1+iz] -= dt*(wfl_adj->txx[ix*n1+iz] + wfl_adj->tzz[ix*n1+iz])
-				                        *(dvxdx_f + dvzdz_f);
-			}
-		}
-	}
-
-	/* ================================================================
-	 * Mu gradient at Txz grid (where muu is defined in staggered grid)
-	 * g_μ = ∫ 2 σ_adj : ε̇_fwd dt  (Eq. 54)
-	 * All terms interpolated to Txz grid position for consistency
-	 * ================================================================ */
-	if (grad_muu) {
-		for (ix = ibTx; ix < ieTx; ix++) {
-			for (iz = ibTz; iz < ieTz; iz++) {
-				float txx_interp, tzz_interp;
-				float dvxdx_interp, dvzdz_interp;
-				float dvxdz_f, dvzdx_f;
-
-				/* Interpolate txx, tzz from P grid to Txz grid (4-point average) */
-				txx_interp = 0.25f*(wfl_adj->txx[ix*n1+iz] + wfl_adj->txx[(ix-1)*n1+iz]
-				                  + wfl_adj->txx[ix*n1+iz-1] + wfl_adj->txx[(ix-1)*n1+iz-1]);
-				tzz_interp = 0.25f*(wfl_adj->tzz[ix*n1+iz] + wfl_adj->tzz[(ix-1)*n1+iz]
-				                  + wfl_adj->tzz[ix*n1+iz-1] + wfl_adj->tzz[(ix-1)*n1+iz-1]);
-
-				/* Interpolate dvx/dx from P grid to Txz grid */
-				{
-					float dvxdx_00, dvxdx_10, dvxdx_01, dvxdx_11;
-					dvxdx_00 = sdx*(c1*(fwd_vx[ix*n1+iz-1]-fwd_vx[(ix-1)*n1+iz-1])
-					              +c2*(fwd_vx[(ix+1)*n1+iz-1]-fwd_vx[(ix-2)*n1+iz-1]));
-					dvxdx_10 = sdx*(c1*(fwd_vx[(ix+1)*n1+iz-1]-fwd_vx[ix*n1+iz-1])
-					              +c2*(fwd_vx[(ix+2)*n1+iz-1]-fwd_vx[(ix-1)*n1+iz-1]));
-					dvxdx_01 = sdx*(c1*(fwd_vx[ix*n1+iz]-fwd_vx[(ix-1)*n1+iz])
-					              +c2*(fwd_vx[(ix+1)*n1+iz]-fwd_vx[(ix-2)*n1+iz]));
-					dvxdx_11 = sdx*(c1*(fwd_vx[(ix+1)*n1+iz]-fwd_vx[ix*n1+iz])
-					              +c2*(fwd_vx[(ix+2)*n1+iz]-fwd_vx[(ix-1)*n1+iz]));
-					dvxdx_interp = 0.25f*(dvxdx_00 + dvxdx_10 + dvxdx_01 + dvxdx_11);
-				}
-
-				/* Interpolate dvz/dz from P grid to Txz grid */
-				{
-					float dvzdz_00, dvzdz_10, dvzdz_01, dvzdz_11;
-					dvzdz_00 = sdz*(c1*(fwd_vz[(ix-1)*n1+iz]-fwd_vz[(ix-1)*n1+iz-1])
-					              +c2*(fwd_vz[(ix-1)*n1+iz+1]-fwd_vz[(ix-1)*n1+iz-2]));
-					dvzdz_10 = sdz*(c1*(fwd_vz[ix*n1+iz]-fwd_vz[ix*n1+iz-1])
-					              +c2*(fwd_vz[ix*n1+iz+1]-fwd_vz[ix*n1+iz-2]));
-					dvzdz_01 = sdz*(c1*(fwd_vz[(ix-1)*n1+iz+1]-fwd_vz[(ix-1)*n1+iz])
-					              +c2*(fwd_vz[(ix-1)*n1+iz+2]-fwd_vz[(ix-1)*n1+iz-1]));
-					dvzdz_11 = sdz*(c1*(fwd_vz[ix*n1+iz+1]-fwd_vz[ix*n1+iz])
-					              +c2*(fwd_vz[ix*n1+iz+2]-fwd_vz[ix*n1+iz-1]));
-					dvzdz_interp = 0.25f*(dvzdz_00 + dvzdz_10 + dvzdz_01 + dvzdz_11);
-				}
-
-				/* Shear strain rate at Txz grid (native position) */
-				dvxdz_f = sdz*(c1*(fwd_vx[ix*n1+iz]-fwd_vx[ix*n1+iz-1])
-				              +c2*(fwd_vx[ix*n1+iz+1]-fwd_vx[ix*n1+iz-2]));
-				dvzdx_f = sdx*(c1*(fwd_vz[ix*n1+iz]-fwd_vz[(ix-1)*n1+iz])
-				              +c2*(fwd_vz[(ix+1)*n1+iz]-fwd_vz[(ix-2)*n1+iz]));
-
-				/* g_μ = 2(σxx·ε̇xx + σzz·ε̇zz + 2·σxz·ε̇xz)
-				 * Note: ε̇xz = 0.5*(dvx/dz + dvz/dx), so 2·ε̇xz = (dvx/dz + dvz/dx) */
-				grad_muu[ix*n1+iz] -= dt*2.0f*(txx_interp*dvxdx_interp
-				                             + tzz_interp*dvzdz_interp
-				                             + wfl_adj->txz[ix*n1+iz]*(dvxdz_f + dvzdx_f));
-			}
-		}
-	}
-
-	/* ================================================================
-	 * Density gradient (Eq. 21): g_ρ = ∫ v_adj · (∂v_fwd/∂t) dt
-	 * Time derivative approximated as (v[t] - v[t-dt]) / dt
-	 * ================================================================ */
-	if (grad_rho && fwd_vx_prev && fwd_vz_prev) {
-		float dvx_dt, dvz_dt;
-		float sdt = 1.0f / dt;
-
-		/* Vx contribution */
-		for (ix = ibVx_x; ix < ieVx_x; ix++) {
-			for (iz = ibVx_z; iz < ieVx_z; iz++) {
-				dvx_dt = (fwd_vx[ix*n1+iz] - fwd_vx_prev[ix*n1+iz]) * sdt;
-				grad_rho[ix*n1+iz] -= dt * wfl_adj->vx[ix*n1+iz] * dvx_dt;
-			}
-		}
-		/* Vz contribution */
-		for (ix = ibVz_x; ix < ieVz_x; ix++) {
-			for (iz = ibVz_z; iz < ieVz_z; iz++) {
-				dvz_dt = (fwd_vz[ix*n1+iz] - fwd_vz_prev[ix*n1+iz]) * sdt;
-				grad_rho[ix*n1+iz] -= dt * wfl_adj->vz[ix*n1+iz] * dvz_dt;
-			}
-		}
-	}
-}
-
-
-/***********************************************************************
  * adj_shot -- Adjoint backpropagation with re-propagation for one shot.
  *
  * Computes the FWI gradient contribution by processing checkpoint
@@ -411,7 +182,7 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 	float *buf_vx, *buf_vz;
 	float *grad_lam, *grad_muu, *grad_rho;  /* Internal Lamé gradient pointers */
 	int k, j, it, seg_start, seg_end, nsteps, max_nsteps;
-	size_t sizem, i;
+	size_t sizem;
 	int it1;
 	float dt;
 	double t0_wall;
@@ -493,7 +264,18 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 	}
 
 	/* ------------------------------------------------------------ */
-	/* 4. Process segments in reverse order                         */
+	/* 4. Negate residual: ψ is driven by −residual (Lagrangian    */
+	/*    convention ψ = −∂J/∂u).  applyAdjointSource uses +=,     */
+	/*    so we negate the data here to get −residual injection.    */
+	/* ------------------------------------------------------------ */
+	{
+		size_t i, ntotal = (size_t)adj->nsrc * adj->nt;
+		for (i = 0; i < ntotal; i++)
+			adj->wav[i] = -adj->wav[i];
+	}
+
+	/* ------------------------------------------------------------ */
+	/* 5. Process segments in reverse order                         */
 	/* ------------------------------------------------------------ */
 
 	/* Reset snapshot file state so adjoint snapshots get their own files */
@@ -533,6 +315,18 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 		for (j = nsteps - 1; j >= 0; j--) {
 			it = seg_start + j;
 
+			/* Lambda/mu gradient: needs ψ_σ BEFORE callAdjKernel.
+			 * This is ψ^{n+1}_σ (adjoint stress at the output of
+			 * forward step n), which is the correct Lagrangian
+			 * multiplier for the F2 (stress update) constraint.
+			 * Pass NULL for density (accumulated after adjoint step). */
+			accumGradient(mod, bnd,
+				buf_vx + (size_t)j * sizem,
+				buf_vz + (size_t)j * sizem,
+				NULL, NULL,  /* no density here */
+				&wfl_adj, dt,
+				grad_lam, grad_muu, NULL);
+
 			/* Advance adjoint wavefield with multicomponent source injection.
 			 * The adjoint kernel injects force residuals (Fx,Fz) at the
 			 * velocity-update point and stress residuals (P,Txx,Tzz,Txz)
@@ -543,10 +337,25 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 				rec->delay, rec->skipdt, verbose);
 }
 
-			/* Write adjoint wavefield snapshot if requested.
-			 * Check snapshot timing manually and remap to sequential
-			 * itime so that writeSnapTimes produces headers with
-			 * fldr=1,2,3,... in write order (required for suxmovie). */
+			/* Density gradient: needs ψ_v AFTER callAdjKernel.
+			 * Phase A2 (stress backward) inside callAdjKernel does NOT
+			 * modify ψ_v, so ψ_v after callAdjKernel = ψ_v_mid
+			 * (after Phase A1 + velocity source injection), which is
+			 * the correct multiplier for the F1 (velocity update).
+			 * For j=0, we don't have v_prev, so pass NULL to skip. */
+			{
+				float *vx_prev = (j > 0) ? buf_vx + (size_t)(j-1) * sizem : NULL;
+				float *vz_prev = (j > 0) ? buf_vz + (size_t)(j-1) * sizem : NULL;
+
+				accumGradient(mod, bnd,
+					buf_vx + (size_t)j * sizem,
+					buf_vz + (size_t)j * sizem,
+					vx_prev, vz_prev,
+					&wfl_adj, dt,
+					NULL, NULL, grad_rho);
+			}
+
+			/* Write adjoint wavefield snapshot if requested. */
 			if (sna && sna->nsnap > 0 &&
 			    (it >= sna->delay) &&
 			    (it <= sna->delay + (sna->nsnap - 1) * sna->skipdt) &&
@@ -557,31 +366,25 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 					verbose);
 				adj_snap_count++;
 			}
-
-			/* Cross-correlate for gradient.
-			 * For density gradient, we need the time derivative of forward velocity,
-			 * which requires the previous time step. For j=0, we don't have it
-			 * (would need previous checkpoint), so pass NULL to skip density. */
-			{
-				float *vx_prev = (j > 0) ? buf_vx + (size_t)(j-1) * sizem : NULL;
-				float *vz_prev = (j > 0) ? buf_vz + (size_t)(j-1) * sizem : NULL;
-
-				accumGradient(mod, bnd,
-					buf_vx + (size_t)j * sizem,
-					buf_vz + (size_t)j * sizem,
-					vx_prev, vz_prev,
-					&wfl_adj, dt,
-					grad_lam, grad_muu, grad_rho);
-			}
 		}
 
 	} /* end segment loop */
+
+	/* ------------------------------------------------------------ */
+	/* 6. Restore residual (undo negation so caller's data is       */
+	/*    unchanged).                                                */
+	/* ------------------------------------------------------------ */
+	{
+		size_t i, ntotal = (size_t)adj->nsrc * adj->nt;
+		for (i = 0; i < ntotal; i++)
+			adj->wav[i] = -adj->wav[i];
+	}
 
 	if (verbose)
 		vmess("adj_shot: Completed gradient accumulation in %.2f s.", wallclock_time() - t0_wall);
 
 	/* ------------------------------------------------------------ */
-	/* 5. Convert to velocity parameterization if param=2           */
+	/* 7. Convert to velocity parameterization if param=2           */
 	/*                                                               */
 	/* Chain rule for velocity parameterization:                     */
 	/*   λ = ρ(Vp² - 2Vs²),  μ = ρVs²                               */
@@ -590,40 +393,14 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 	/*   g_ρ  = g_ρ(direct) + g_λ(Vp² - 2Vs²) + g_μ(Vs²)           */
 	/* ------------------------------------------------------------ */
 	if (param == 2 && mod->ischeme > 2) {
-		float *cp_arr = mod->cp;   /* Vp array */
-		float *cs_arr = mod->cs;   /* Vs array */
-		float *ro_arr = mod->rho;  /* density array */
-
 		if (verbose)
 			vmess("adj_shot: Converting to velocity parameterization (Vp, Vs, rho)");
-
-		/* Convert in-place: grad1,2,3 contain Lamé gradients, will become velocity gradients.
-		 * Must do all three simultaneously since they depend on each other. */
-		for (i = 0; i < sizem; i++) {
-			float g_lam = grad1 ? grad1[i] : 0.0f;
-			float g_muu = grad2 ? grad2[i] : 0.0f;
-			float g_rho_direct = grad3 ? grad3[i] : 0.0f;
-
-			float rho = ro_arr[i];
-			float vp  = cp_arr[i];
-			float vs  = cs_arr[i];
-			float vp2 = vp * vp;
-			float vs2 = vs * vs;
-
-			/* Apply chain rule */
-			float g_vp = g_lam * 2.0f * rho * vp;
-			float g_vs = 2.0f * rho * vs * (g_muu - 2.0f * g_lam);
-			float g_rho_full = g_rho_direct + g_lam * (vp2 - 2.0f * vs2) + g_muu * vs2;
-
-			/* Store converted gradients */
-			if (grad1) grad1[i] = g_vp;
-			if (grad2) grad2[i] = g_vs;
-			if (grad3) grad3[i] = g_rho_full;
-		}
+		convertGradientToVelocity(grad1, grad2, grad3,
+		                          mod->cp, mod->cs, mod->rho, sizem);
 	}
 
 	/* ------------------------------------------------------------ */
-	/* 6. Free                                                       */
+	/* 8. Free                                                       */
 	/* ------------------------------------------------------------ */
 	free(buf_vx);
 	free(buf_vz);

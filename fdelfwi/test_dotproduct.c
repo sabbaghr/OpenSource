@@ -64,6 +64,10 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              float *grad1, float *grad2, float *grad3,
              int param, int verbose);
 
+void convertGradientToVelocity(float *grad1, float *grad2, float *grad3,
+                               float *cp, float *cs, float *rho,
+                               size_t sizem);
+
 int writesufile(char *filename, float *data, size_t n1, size_t n2,
                 float f1, float f2, float d1, float d2);
 
@@ -304,9 +308,9 @@ int main(int argc, char **argv)
 
 	/* Test parameters */
 	char  *chk_base, *comp_str;
-	int    chk_skipdt, seed;
+	int    chk_skipdt, seed, test_param;
 	float  pert_pct;
-	float *grad_lam, *grad_muu, *grad_rho;
+	float *grad_vp, *grad_vs, *grad_rho;
 
 	/* Dot product variables */
 	float *d0_data, *d1_data, *y_data;
@@ -344,6 +348,7 @@ int main(int argc, char **argv)
 	if (!getparint("seed", &seed)) seed = 12345;
 	if (!getparfloat("pert_pct", &pert_pct)) pert_pct = 0.01f;
 	if (!getparstring("comp", &comp_str)) comp_str = "_rvz";
+	if (!getparint("test_param", &test_param)) test_param = 0;
 
 	/* Standard setup (same as test_fwi_gradient.c) */
 	getParameters(&mod, &rec, &sna, &wav, &src, &shot, &bnd, verbose);
@@ -448,8 +453,93 @@ int main(int argc, char **argv)
 				delta_ro[idx] = pert_pct * ro0 * (float)(drand48() * 2.0 - 1.0);
 			}
 		}
+		/* Zero out perturbations based on test_param:
+		 * 0=all, 1=Vp only (tests g_Vp), 2=Vs only (tests g_Vs),
+		 * 3=rho only (tests g_rho_full) */
+		if (test_param == 1) {
+			memset(delta_cs, 0, (size_t)mod.nx * mod.nz * sizeof(float));
+			memset(delta_ro, 0, (size_t)mod.nx * mod.nz * sizeof(float));
+			vmess("test_param=1: Vp perturbation only (tests g_Vp)");
+		} else if (test_param == 2) {
+			memset(delta_cp, 0, (size_t)mod.nx * mod.nz * sizeof(float));
+			memset(delta_ro, 0, (size_t)mod.nx * mod.nz * sizeof(float));
+			vmess("test_param=2: Vs perturbation only (tests g_Vs)");
+		} else if (test_param == 3) {
+			memset(delta_cp, 0, (size_t)mod.nx * mod.nz * sizeof(float));
+			memset(delta_cs, 0, (size_t)mod.nx * mod.nz * sizeof(float));
+			vmess("test_param=3: rho perturbation only (tests g_rho_full)");
+		}
+
 		vmess("Perturbation amplitudes: dcp_max=%.1f  dcs_max=%.1f  dro_max=%.1f",
 			pert_pct * cp0, pert_pct * cs0, pert_pct * ro0);
+
+		/* ---- Zero perturbation outside the gradient accumulation region ----
+		 * The gradient is NOT accumulated in the taper-adjacent physical
+		 * boundary strip (ntap points on each absorbing side, 1 point for
+		 * free surface).  readModel also EXTENDS boundary values into the
+		 * taper zone, so any perturbation at the physical edge creates
+		 * Born scattering in the taper that the gradient cannot capture.
+		 * Zeroing the perturbation here ensures domain consistency. */
+		{
+			int margin_lef = 0, margin_rig = 0, margin_top = 0, margin_bot = 0;
+			int half_fd = mod.iorder / 2;
+
+			/* Absorbing taper margins */
+			if (bnd.lef == 4 || bnd.lef == 2) margin_lef = bnd.ntap;
+			if (bnd.rig == 4 || bnd.rig == 2) margin_rig = bnd.ntap;
+			if (bnd.top == 4 || bnd.top == 2) margin_top = bnd.ntap;
+			if (bnd.bot == 4 || bnd.bot == 2) margin_bot = bnd.ntap;
+
+			/* Free surface margin (skip 1 point) */
+			if (bnd.top == 1 && margin_top < 1) margin_top = 1;
+
+			/* FD stencil safety (half points for spatial derivatives) */
+			if (margin_lef < half_fd) margin_lef = half_fd;
+			if (margin_rig < half_fd) margin_rig = half_fd;
+			if (margin_top < half_fd) margin_top = half_fd;
+			if (margin_bot < half_fd) margin_bot = half_fd;
+
+			for (ix = 0; ix < mod.nx; ix++) {
+				for (iz = 0; iz < mod.nz; iz++) {
+					if (ix < margin_lef || ix >= mod.nx - margin_rig ||
+					    iz < margin_top  || iz >= mod.nz - margin_bot) {
+						int idx2 = ix * mod.nz + iz;
+						delta_cp[idx2] = 0.0f;
+						delta_cs[idx2] = 0.0f;
+						delta_ro[idx2] = 0.0f;
+					}
+				}
+			}
+			vmess("Zeroed perturbation in boundary margin (l=%d r=%d t=%d b=%d)",
+				margin_lef, margin_rig, margin_top, margin_bot);
+			vmess("Active perturbation region: %d x %d of %d x %d physical grid",
+				mod.nx - margin_lef - margin_rig,
+				mod.nz - margin_top - margin_bot,
+				mod.nx, mod.nz);
+		}
+
+		/* ---- Zero perturbation near source injection point ----
+		 * applySource uses material parameters (rox/roz, l2m) at
+		 * the source grid point, so model perturbation there changes
+		 * the effective source amplitude.  The gradient does not
+		 * include this source sensitivity, so zero δm near the
+		 * source to prevent this term from contaminating the test. */
+		{
+			int src_margin = 3;  /* covers stagger averaging */
+			int iix, iiz;
+			for (iix = ixsrc - src_margin; iix <= ixsrc + src_margin; iix++) {
+				for (iiz = izsrc - src_margin; iiz <= izsrc + src_margin; iiz++) {
+					if (iix >= 0 && iix < mod.nx && iiz >= 0 && iiz < mod.nz) {
+						int idx2 = iix * mod.nz + iiz;
+						delta_cp[idx2] = 0.0f;
+						delta_cs[idx2] = 0.0f;
+						delta_ro[idx2] = 0.0f;
+					}
+				}
+			}
+			vmess("Zeroed perturbation near source (ix=%d, iz=%d) +/- %d",
+				ixsrc, izsrc, src_margin);
+		}
 	}
 
 	/* ============================================================ */
@@ -494,25 +584,19 @@ int main(int argc, char **argv)
 		float *ro_base = (float *)malloc((size_t)mod.nx * mod.nz * sizeof(float));
 
 		/* Extract base model from padded arrays */
-		/* cp = sqrt(l2m / rho), cs = sqrt(muu / rho) */
 		for (ix = 0; ix < mod.nx; ix++) {
 			for (iz = 0; iz < mod.nz; iz++) {
 				int ig = (ix + ioPx) * mod.naz + iz + ioPz;
 				int idx = ix * mod.nz + iz;
-				float rho_val, l2m_val, muu_val;
 
-				/* Use the stored cp, cs, rho arrays if available */
 				if (mod.cp && mod.cs && mod.rho) {
 					cp_base[idx] = mod.cp[ig];
 					cs_base[idx] = mod.cs[ig];
 					ro_base[idx] = mod.rho[ig];
 				} else {
-					/* Reconstruct from Lame parameters */
-					rho_val = 1.0f / mod.rox[ig];  /* approximate */
-					l2m_val = mod.l2m[ig];
-					muu_val = mod.muu[ig];
-					cp_base[idx] = sqrtf(l2m_val / rho_val);
-					cs_base[idx] = sqrtf(muu_val / rho_val);
+					float rho_val = 1.0f / mod.rox[ig];
+					cp_base[idx] = sqrtf(mod.l2m[ig] / rho_val);
+					cs_base[idx] = sqrtf(mod.muu[ig] / rho_val);
 					ro_base[idx] = rho_val;
 				}
 
@@ -661,12 +745,14 @@ int main(int argc, char **argv)
 			max_d0, max_d1, max_diff);
 	}
 
-	/* Compute forward dot product: y^T(Ax) = sum y * (d1 - d0) * dt */
+	/* Compute forward dot product: y^T(Ax) = sum y * (d1 - d0)
+	 * Pure algebraic dot product (no dt weight). */
 	forward_dot = 0.0;
 	for (i = 0; i < ntr_d0 * ns_d0; i++)
-		forward_dot += (double)y_data[i] * (double)(d1_data[i] - d0_data[i]) * (double)dt_sec;
+		forward_dot += (double)y_data[i] * (double)(d1_data[i] - d0_data[i]);
 
-	vmess("y^T A x = %.10e", forward_dot);
+	vmess("y^T A x (pure) = %.10e", forward_dot);
+	vmess("y^T A x (with dt_rcv=%.6f) = %.10e", dt_sec, forward_dot * dt_sec);
 
 	/* ============================================================ */
 	/* Step 3: Adjoint side -- compute x^T(A^T y)                   */
@@ -701,21 +787,18 @@ int main(int argc, char **argv)
 	readResidual("residual_dp.su", &adj, &mod, &bnd);
 	vmess("Loaded %d adjoint source traces, nt=%d", adj.nsrc, adj.nt);
 
-	/* Allocate gradient arrays (Lame parameterization) */
-	grad_lam = (float *)calloc(sizem, sizeof(float));
-	grad_muu = (float *)calloc(sizem, sizeof(float));
+	/* Allocate gradient arrays (velocity parameterization via param=2) */
+	grad_vp  = (float *)calloc(sizem, sizeof(float));
+	grad_vs  = (float *)calloc(sizem, sizeof(float));
 	grad_rho = (float *)calloc(sizem, sizeof(float));
 
-	/* Run adjoint backpropagation with param=1 (Lame).
-	 * If snapshots were requested (sna.nsnap > 0), pass a copy of sna
-	 * with file_snap overridden to "adj_snap" so adjoint snapshots
-	 * are written to adj_snap_svz.su, adj_snap_svx.su, etc. */
+	/* Run adjoint backpropagation with param=1 (Lamé) first for diagnostics,
+	 * then convert to velocity space manually. */
 	{
 		snaPar sna_adj;
 		if (sna.nsnap > 0) {
 			sna_adj = sna;
 			sna_adj.file_snap = "adj_snap";
-			/* Enable all 5 elastic wavefield components for visualization */
 			sna_adj.type.vz  = 1;
 			sna_adj.type.vx  = 1;
 			sna_adj.type.txx = 1;
@@ -728,67 +811,87 @@ int main(int argc, char **argv)
 			memset(&sna_adj, 0, sizeof(snaPar));
 		}
 
+		/* param=1: returns (g_lambda, g_mu, g_rho_direct) */
 		adj_shot(&mod, &src, &wav, &bnd, &rec, &adj,
 			ixsrc, izsrc, src_nwav, &chk, &sna_adj,
-			grad_lam, grad_muu, grad_rho, 1, verbose);
+			grad_vp, grad_vs, grad_rho, 1, verbose);
 	}
 
-	vmess("Adjoint backpropagation complete.");
+	vmess("Adjoint backpropagation complete (Lamé space).");
+
+	/* --- Lamé-space dot product diagnostic ---
+	 * grad_vp=g_λ, grad_vs=g_μ, grad_rho=g_ρ_direct (from param=1).
+	 *
+	 * In Lame mode: delta_cp=δλ, delta_cs=δμ, delta_ro=δρ (direct).
+	 * In velocity mode: transform (δVp,δVs,δρ) → (δλ,δμ,δρ) via chain rule:
+	 *   δλ = 2ρVp·δVp + (-4ρVs)·δVs + (Vp²-2Vs²)·δρ
+	 *   δμ = 2ρVs·δVs + Vs²·δρ
+	 *   δρ_direct = δρ */
+	{
+		double dot_lam = 0.0, dot_muu = 0.0, dot_rho_d = 0.0;
+		for (ix = 0; ix < mod.nx; ix++) {
+			for (iz = 0; iz < mod.nz; iz++) {
+				int idx = ix * mod.nz + iz;
+				int ig  = (ix + ioPx) * mod.naz + iz + ioPz;
+				double dlam, dmuu, drho;
+
+				/* Velocity → Lamé perturbation */
+				float rho_val = mod.rho[ig];
+				float vp = mod.cp[ig], vs = mod.cs[ig];
+				float vp2 = vp*vp, vs2 = vs*vs;
+				dlam = 2.0*rho_val*vp*delta_cp[idx]
+				     + (-4.0*rho_val*vs)*delta_cs[idx]
+				     + (vp2 - 2.0*vs2)*delta_ro[idx];
+				dmuu = 2.0*rho_val*vs*delta_cs[idx]
+				     + vs2*delta_ro[idx];
+				drho = delta_ro[idx];
+				dot_lam  += dlam * (double)grad_vp[ig];
+				dot_muu  += dmuu * (double)grad_vs[ig];
+				dot_rho_d += drho * (double)grad_rho[ig];
+			}
+		}
+		vmess("DIAG Lame decomposition: dlam*g_lam=%.6e  dmuu*g_muu=%.6e  drho*g_rho=%.6e",
+			dot_lam, dot_muu, dot_rho_d);
+		vmess("DIAG Lame total: %.6e", dot_lam + dot_muu + dot_rho_d);
+	}
+
+	/* Convert to velocity space for the standard dot product */
+	convertGradientToVelocity(grad_vp, grad_vs, grad_rho,
+	                          mod.cp, mod.cs, mod.rho, sizem);
 
 	/* ============================================================ */
-	/* Step 3b: Compute x^T(A^T y) in Lame space                   */
+	/* Step 3b: Model-space dot product in velocity space           */
 	/*                                                               */
-	/* Convert delta_cp, delta_cs, delta_ro to delta_lam, delta_muu */
-	/* using the chain rule:                                         */
-	/*   lam = rho*(cp^2 - 2*cs^2),  muu = rho*cs^2                */
-	/*   d(lam)/d(cp) = 2*rho*cp                                    */
-	/*   d(lam)/d(cs) = -4*rho*cs                                   */
-	/*   d(lam)/d(rho) = cp^2 - 2*cs^2                              */
-	/*   d(muu)/d(cp) = 0                                            */
-	/*   d(muu)/d(cs) = 2*rho*cs                                    */
-	/*   d(muu)/d(rho) = cs^2                                        */
+	/* adj_shot(param=2) returns gradients in velocity space:        */
+	/*   grad_vp  = g_Vp   (sensitivity to Vp)                      */
+	/*   grad_vs  = g_Vs   (sensitivity to Vs)                      */
+	/*   grad_rho = g_rho_full (includes chain rule contributions)   */
+	/*                                                               */
+	/* Simple direct dot: x^T(A^T y) = <δVp, g_Vp> + <δVs, g_Vs>   */
+	/*                                + <δρ, g_ρ_full>               */
 	/* ============================================================ */
-	vmess("--- Step 3b: Compute model-space dot product ---");
+	vmess("--- Step 3b: Compute model-space dot product (velocity space) ---");
 
 	adjoint_dot = 0.0;
 	{
-		int ibndx = mod.ioPx;
-		int ibndz = mod.ioPz;
-		if (bnd.lef == 4 || bnd.lef == 2) ibndx += bnd.ntap;
-		if (bnd.top == 4 || bnd.top == 2) ibndz += bnd.ntap;
+		double dot_p1 = 0.0, dot_p2 = 0.0, dot_rho = 0.0;
 
 		for (ix = 0; ix < mod.nx; ix++) {
 			for (iz = 0; iz < mod.nz; iz++) {
 				int idx = ix * mod.nz + iz;
-				int ig = (ix + ibndx) * mod.naz + iz + ibndz;
-				float cp_val, cs_val, rho_val;
-				float d_lam, d_muu;
-
-				/* Get base model values at this point */
-				if (mod.cp && mod.cs && mod.rho) {
-					cp_val  = mod.cp[ig];
-					cs_val  = mod.cs[ig];
-					rho_val = mod.rho[ig];
-				} else {
-					rho_val = 1.0f / mod.rox[ig];
-					cp_val  = sqrtf(mod.l2m[ig] / rho_val);
-					cs_val  = sqrtf(mod.muu[ig] / rho_val);
-				}
-
-				/* Chain rule: convert (dcp, dcs, dro) to (dlam, dmuu) */
-				d_lam = 2.0f * rho_val * cp_val * delta_cp[idx]
-				      - 4.0f * rho_val * cs_val * delta_cs[idx]
-				      + (cp_val*cp_val - 2.0f*cs_val*cs_val) * delta_ro[idx];
-
-				d_muu = 2.0f * rho_val * cs_val * delta_cs[idx]
-				      + cs_val * cs_val * delta_ro[idx];
-
-				/* Dot product: <delta_m, gradient> in Lame space */
-				adjoint_dot += (double)d_lam * (double)grad_lam[ig]
-				             + (double)d_muu * (double)grad_muu[ig]
-				             + (double)delta_ro[idx] * (double)grad_rho[ig];
+				int ig  = (ix + ioPx) * mod.naz + iz + ioPz;
+				dot_p1  += (double)delta_cp[idx] * (double)grad_vp[ig];
+				dot_p2  += (double)delta_cs[idx] * (double)grad_vs[ig];
+				dot_rho += (double)delta_ro[idx] * (double)grad_rho[ig];
 			}
 		}
+		adjoint_dot = dot_p1 + dot_p2 + dot_rho;
+		vmess("DIAG velocity decomposition: vp=%.6e  vs=%.6e  rho=%.6e",
+			dot_p1, dot_p2, dot_rho);
+		vmess("DIAG per-component ratio: vp=%.6f  vs=%.6f  rho=%.6f",
+			(fabs(forward_dot) > 0.0 && fabs(dot_p1) > 0.0) ? dot_p1/forward_dot : 0.0,
+			(fabs(forward_dot) > 0.0 && fabs(dot_p2) > 0.0) ? dot_p2/forward_dot : 0.0,
+			(fabs(forward_dot) > 0.0 && fabs(dot_rho) > 0.0) ? dot_rho/forward_dot : 0.0);
 	}
 
 	vmess("x^T A^T y = %.10e", adjoint_dot);
@@ -823,8 +926,8 @@ int main(int argc, char **argv)
 	cleanCheckpoints(&chk);
 	freeResidual(&adj);
 
-	free(grad_lam);
-	free(grad_muu);
+	free(grad_vp);
+	free(grad_vs);
 	free(grad_rho);
 	free(delta_cp);
 	free(delta_cs);

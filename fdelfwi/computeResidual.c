@@ -218,10 +218,12 @@ float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
 				      "obs(gx=%d,gelev=%d) vs syn(gx=%d,gelev=%d)",
 				      k, itr, hdr_obs.gx, hdr_obs.gelev, hdr_syn.gx, hdr_syn.gelev);
 
-			/* Compute adjoint source and misfit (L2) */
+			/* Compute adjoint source and misfit (L2)
+			 * Misfit uses discrete norm J = 0.5*sum(r^2) so that the
+			 * adjoint source dJ/dd = r is consistent without dt_rec. */
 			for (isamp = 0; isamp < ns; isamp++) {
 				float r = buf_syn[isamp] - buf_obs[isamp];
-				misfit += 0.5f * r * r * dt_sec;
+				misfit += 0.5f * r * r;
 				buf_obs[isamp] = r;  /* reuse buffer for residual */
 			}
 

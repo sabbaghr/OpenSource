@@ -182,8 +182,15 @@ int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd)
 
 		/* Map to staggered grid: types 2,7 (Txz,Fz) use Vz grid
 		 * (ioZz already includes ntap from getParameters).
-		 * All others use P/Txx/Tzz grid (ibndz = ioPz + ntap). */
-		if (adj->typ[isrc] == 2 || adj->typ[isrc] == 7)
+		 * All others use P/Txx/Tzz grid (ibndz = ioPz + ntap).
+		 *
+		 * For type 7 (Fz/Vz): getRecTimes records vz at iz2=iz+1
+		 * where iz = ibndz + grid_z.  The +1 is the Vz stagger
+		 * (Vz lives at z+0.5*dz on the staggered grid).
+		 * ioZz == ibndz, so we need ioZz + grid_z + 1 to match. */
+		if (adj->typ[isrc] == 7)
+			adj->zi[isrc] = mod->ioZz + (size_t)grid_z + 1;
+		else if (adj->typ[isrc] == 2)
 			adj->zi[isrc] = mod->ioZz + (size_t)grid_z;
 		else
 			adj->zi[isrc] = ibndz + (size_t)grid_z;
