@@ -112,6 +112,7 @@ char *sdoc[] = {
 "   res_taper=100 cosine taper length for residual traces",
 "   snap_shot=-1  shot index to save forward+adjoint snapshots (-1=none)",
 "   file_snap_adj= adjoint snapshot base name (default adj_snap)",
+"   file_res=      residual output base name for snap_shot (default residual)",
 " ",
 NULL};
 
@@ -287,9 +288,10 @@ int main(int argc, char **argv)
 
 	/* Snapshot for a specific shot (-1 = disabled) */
 	int snap_shot;
-	char *file_snap_adj;
+	char *file_snap_adj, *file_res;
 	if (!getparint("snap_shot", &snap_shot)) snap_shot = -1;
 	if (!getparstring("file_snap_adj", &file_snap_adj)) file_snap_adj = "adj_snap";
+	if (!getparstring("file_res", &file_res)) file_res = "residual";
 
 	/* ============================================================ */
 	/* Standard setup                                                */
@@ -487,6 +489,23 @@ int main(int argc, char **argv)
 			snprintf(res_file, sizeof(res_file), "%s/residual.su", work_dir);
 			misfit = computeResidual(ncomp, obs_arr, syn_arr, res_file, MISFIT_L2, 0);
 			total_misfit += misfit;
+
+			/* Save residual for the snapshot shot */
+			if (ishot == snap_shot) {
+				char res_save[512];
+				snprintf(res_save, sizeof(res_save), "%s.su", file_res);
+				FILE *fin = fopen(res_file, "r");
+				FILE *fout = fopen(res_save, "w");
+				if (fin && fout) {
+					char buf[4096];
+					size_t n;
+					while ((n = fread(buf, 1, sizeof(buf), fin)) > 0)
+						fwrite(buf, 1, n, fout);
+				}
+				if (fin) fclose(fin);
+				if (fout) fclose(fout);
+				vmess("Saved residual for shot %d to %s", ishot, res_save);
+			}
 
 			/* -------------------------------------------------------- */
 			/* Step 3: Read residuals and apply taper                   */
