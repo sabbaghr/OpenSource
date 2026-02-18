@@ -85,6 +85,7 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 int writesufile(char *filename, float *data, size_t n1, size_t n2,
                 float f1, float f2, float d1, float d2);
 
+void writeSnapTimesReset(void);
 void vmess(char *fmt, ...);
 void verr(char *fmt, ...);
 
@@ -109,6 +110,8 @@ char *sdoc[] = {
 "   comp=         comma-separated component suffixes (_rvz)",
 "   param=1       parameterization: 1=Lame (lambda,mu,rho), 2=velocity (Vp,Vs,rho)",
 "   res_taper=100 cosine taper length for residual traces",
+"   snap_shot=-1  shot index to save forward+adjoint snapshots (-1=none)",
+"   file_snap_adj= adjoint snapshot base name (default adj_snap)",
 " ",
 NULL};
 
@@ -282,6 +285,12 @@ int main(int argc, char **argv)
 	if (param < 1 || param > 2)
 		verr("param must be 1 (Lame) or 2 (velocity)");
 
+	/* Snapshot for a specific shot (-1 = disabled) */
+	int snap_shot;
+	char *file_snap_adj;
+	if (!getparint("snap_shot", &snap_shot)) snap_shot = -1;
+	if (!getparstring("file_snap_adj", &file_snap_adj)) file_snap_adj = "adj_snap";
+
 	/* ============================================================ */
 	/* Standard setup                                                */
 	/* ============================================================ */
@@ -429,11 +438,11 @@ int main(int argc, char **argv)
 		/* -------------------------------------------------------- */
 		initCheckpoints(&chk, &mod, chk_skipdt, 0, chk_path);
 
-		/* Disable snapshot output for parallel runs */
-		snaPar sna_off = sna;
-		sna_off.nsnap = 0;
+		/* Enable snapshots only for the selected shot */
+		snaPar sna_fwd = sna;
+		if (ishot != snap_shot) sna_fwd.nsnap = 0;
 
-		fdfwimodc(&mod, &src, &wav, &bnd, &rec, &sna_off,
+		fdfwimodc(&mod, &src, &wav, &bnd, &rec, &sna_fwd,
 			ixsrc, izsrc, src_nwav, ishot, shot.n, fileno, &chk, verbose);
 
 		/* Compute synthetic hydrophone for elastic */
@@ -489,8 +498,17 @@ int main(int argc, char **argv)
 			/* -------------------------------------------------------- */
 			/* Step 4: Adjoint backpropagation                          */
 			/* -------------------------------------------------------- */
+			snaPar *sna_adj_ptr = NULL;
+			snaPar sna_adj;
+			if (ishot == snap_shot) {
+				sna_adj = sna;
+				sna_adj.file_snap = file_snap_adj;
+				writeSnapTimesReset();
+				sna_adj_ptr = &sna_adj;
+			}
+
 			adj_shot(&mod, &src, &wav, &bnd, &rec, &adj,
-				ixsrc, izsrc, src_nwav, &chk, NULL,
+				ixsrc, izsrc, src_nwav, &chk, sna_adj_ptr,
 				shot_grad1, shot_grad2, shot_grad3, param, 0);
 
 			freeResidual(&adj);
