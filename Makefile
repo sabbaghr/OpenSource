@@ -15,6 +15,7 @@ all: mkdirs
 	cd vmar			; $(MAKE) install
 	cd extrap		; $(MAKE) install
 ifneq ($(strip $(MKLROOT)),)
+	cd optimization	; $(MAKE)
 	cd fdacrtmc	    ; $(MAKE) install
 	cd fdelfwi	    ; $(MAKE) install
 else
@@ -41,6 +42,7 @@ clean:
 	cd corrvir		; $(MAKE) $@
 	cd raytime		; $(MAKE) $@
 	cd extrap		; $(MAKE) $@
+	cd optimization	; $(MAKE) $@
 	cd fdacrtmc		; $(MAKE) $@
 	cd fdelfwi		; $(MAKE) $@
 	cd zfp			; $(MAKE) $@
@@ -57,6 +59,7 @@ realclean:
 	cd corrvir		; $(MAKE) $@
 	cd raytime		; $(MAKE) $@
 	cd extrap		; $(MAKE) $@
+	cd optimization	; $(MAKE) $@
 	cd fdacrtmc		; $(MAKE) $@
 	cd fdelfwi		; $(MAKE) $@
 	cd zfp			; $(MAKE) $@
