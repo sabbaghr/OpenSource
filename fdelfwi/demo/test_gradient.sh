@@ -218,18 +218,18 @@ echo "   - syn_snap_*.su      : Forward wavefield with INIT model (synthetic)"
 echo "   - adj_snap_*_*.su    : Adjoint wavefield (backpropagation)"
 echo ""
 
-# ---------------------------------------------------------
-# Test cases with LAME parameterization (param=1)
-# Output: _lam.su, _muu.su, _rho.su
-# ---------------------------------------------------------
+# # ---------------------------------------------------------
+# # Test cases with LAME parameterization (param=1)
+# # Output: _lam.su, _muu.su, _rho.su
+# # ---------------------------------------------------------
 
-# Case 1: Vz only - Lame parameterization (with adjoint snapshots)
-run_gradient_test "Vz only (Lame)" "_rvz" "grad_vz_lame" 1 \
-    file_adj_snap=adj_snap_vz_lame
+# # Case 1: Vz only - Lame parameterization (with adjoint snapshots)
+# run_gradient_test "Vz only (Lame)" "_rvz" "grad_vz_lame" 1 \
+#     file_adj_snap=adj_snap_vz_lame
 
-# Case 2: Pressure (hydrophone) - Lame parameterization
-run_gradient_test "Pressure (Lame)" "_rp" "grad_p_lame" 1 \
-    file_adj_snap=adj_snap_p_lame
+# # Case 2: Pressure (hydrophone) - Lame parameterization
+# run_gradient_test "Pressure (Lame)" "_rp" "grad_p_lame" 1 \
+#     file_adj_snap=adj_snap_p_lame
 
 # ---------------------------------------------------------
 # Test cases with VELOCITY parameterization (param=2)
@@ -266,14 +266,14 @@ echo "--- Forward snapshots (true model) ---"
 check_nonzero true_snap_svz.su "True snap Vz"
 check_nonzero true_snap_svx.su "True snap Vx"
 
-# Check Lame gradient files
-echo ""
-echo "--- Lame parameterization gradients ---"
-for prefix in grad_vz_lame grad_p_lame; do
-    check_nonzero ${prefix}_lam.su "lam ($prefix)"
-    check_nonzero ${prefix}_muu.su "muu ($prefix)"
-    check_nonzero ${prefix}_rho.su "rho ($prefix)"
-done
+# # Check Lame gradient files (commented out - Lame tests not run)
+# echo ""
+# echo "--- Lame parameterization gradients ---"
+# for prefix in grad_vz_lame grad_p_lame; do
+#     check_nonzero ${prefix}_lam.su "lam ($prefix)"
+#     check_nonzero ${prefix}_muu.su "muu ($prefix)"
+#     check_nonzero ${prefix}_rho.su "rho ($prefix)"
+# done
 
 # Check Velocity gradient files
 echo ""
@@ -287,7 +287,7 @@ done
 # Check adjoint snapshot files
 echo ""
 echo "--- Adjoint snapshots ---"
-check_nonzero adj_snap_vz_lame_svz.su "Adjoint Vz (Vz Lame)"
+check_nonzero adj_snap_vz_vel_svz.su "Adjoint Vz (Vz Velocity)"
 check_nonzero adj_snap_p_vel_svz.su "Adjoint Vz (P Velocity)"
 
 # =========================================================

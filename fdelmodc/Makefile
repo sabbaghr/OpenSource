@@ -38,6 +38,7 @@ SRCC	= $(PRG).c \
 		elastic4.c \
 		elastic4dc.c \
 		elastic6.c \
+		elastic8.c \
 		viscoelastic4.c \
 		defineSource.c  \
 		getParameters.c  \

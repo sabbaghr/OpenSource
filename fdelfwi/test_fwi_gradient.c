@@ -352,14 +352,19 @@ int main(int argc, char **argv)
 	t1 = wallclock_time();
 	vmess("Forward modeling completed in %.2f s", t1 - t0 - tinit);
 
+	/* writeRec appends _%03d shot number to file_rcv when fileno >= 0.
+	 * Build the actual base name used for synthetic output files. */
+	char syn_base[1024];
+	snprintf(syn_base, sizeof(syn_base), "%s_%03d", rec.file_rcv, fileno);
+
 	/* Compute synthetic hydrophone (pressure) for elastic modeling.
 	 * For elastic (ischeme > 2), pressure is P = 0.5*(Tzz + Txx).
 	 * fdelmodc records Tzz and Txx separately, so we compute P here. */
 	if (mod.ischeme > 2) {
 		char syn_tzz[1024], syn_txx[1024], syn_p[1024];
-		snprintf(syn_tzz, sizeof(syn_tzz), "%s_rtzz.su", rec.file_rcv);
-		snprintf(syn_txx, sizeof(syn_txx), "%s_rtxx.su", rec.file_rcv);
-		snprintf(syn_p, sizeof(syn_p), "%s_rp.su", rec.file_rcv);
+		snprintf(syn_tzz, sizeof(syn_tzz), "%s_rtzz.su", syn_base);
+		snprintf(syn_txx, sizeof(syn_txx), "%s_rtxx.su", syn_base);
+		snprintf(syn_p, sizeof(syn_p), "%s_rp.su", syn_base);
 		vmess("Computing synthetic hydrophone: P = 0.5*(Tzz + Txx)");
 		computeHydrophone(syn_tzz, syn_txx, syn_p, verbose);
 	}
@@ -395,7 +400,7 @@ int main(int argc, char **argv)
 
 			for (k = 0; k < ncomp; k++) {
 				snprintf(obs_names[k], sizeof(obs_names[k]), "%s%s.su", file_obs, comp_suffixes[k]);
-				snprintf(syn_names[k], sizeof(syn_names[k]), "%s%s.su", rec.file_rcv, comp_suffixes[k]);
+				snprintf(syn_names[k], sizeof(syn_names[k]), "%s%s.su", syn_base, comp_suffixes[k]);
 				obs_arr[k] = obs_names[k];
 				syn_arr[k] = syn_names[k];
 				vmess("  Component %d: obs=%s  syn=%s", k + 1, obs_arr[k], syn_arr[k]);

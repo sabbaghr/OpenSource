@@ -258,9 +258,21 @@ typedef struct _adjSrcPar {
 } adjSrcPar;
 
 
+/* --- updateModel.c: Model vector / FD coefficient bridge for FWI --- */
+void recomputeFDcoefficients(modPar *mod, bndPar *bnd);
+void extractModelVector(float *x, modPar *mod, bndPar *bnd, int param);
+void injectModelVector(float *x, modPar *mod, bndPar *bnd, int param);
+void extractGradientVector(float *g, float *grad1, float *grad2, float *grad3,
+                           modPar *mod, bndPar *bnd, int param);
+
+/* --- fwi_gradient.c: Gradient kernels --- */
+void convertGradientToVelocity(float *grad1, float *grad2, float *grad3,
+                               float *cp, float *cs, float *rho, size_t sizem);
+
+
 #if __STDC_VERSION__ >= 199901L
   /* "restrict" is a keyword */
 #else
-#define restrict 
+#define restrict
 #endif
 

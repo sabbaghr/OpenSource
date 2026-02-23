@@ -9,11 +9,18 @@ ALLINC  = -I.
 # MPI compiler (override with MPICC=... on command line if needed)
 MPICC ?= mpicc
 
+# Optimization library
+OPTIM_DIR = ../optimization
+OPTIM_LIB = $(OPTIM_DIR)/liboptim.a
+OPTIM_INC = -I$(OPTIM_DIR)
+
 all: test_fdfwimodc test_fwi_gradient
 
 # FWI driver targets
 driver: fwi_driver
 mpi: fwi_mpi_driver
+inversion: fwi_inversion
+mpi_inversion: fwi_mpi_inversion
 test_wave_op_dp: $(PRG5)
 test_dotproduct: $(PRG6)
 test_taylor: $(PRG7)
@@ -25,6 +32,8 @@ PRG4 = fwi_mpi_driver
 PRG5 = test_wave_op_dp
 PRG6 = test_dotproduct
 PRG7 = test_taylor
+PRG8 = fwi_inversion
+PRG9 = fwi_mpi_inversion
 
 # Library sources (no test drivers -- those have main())
 SRCC	= fdfwimodc.c \
@@ -130,17 +139,47 @@ $(PRG4):	$(OBJC) fdelfwi.h
 	$(MPICC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG4) fwi_driver_mpi.o \
 		$(OBJC) fileOpen.o writeRec.o $(LIBS)
 
+# Build optimizer library if needed
+$(OPTIM_LIB):
+	$(MAKE) -C $(OPTIM_DIR)
+
+# Serial FWI inversion (optimization loop + gradient computation)
+$(PRG8):	$(OBJC) $(OPTIM_LIB) fdelfwi.h
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(OPTIM_INC) $(CFLAGS) $(OPTC) -c updateModel.c
+	$(CC) $(OPTIM_INC) $(CFLAGS) $(OPTC) -c fwi_inversion.c
+	$(CC) $(LDFLAGS) $(OPTIM_INC) $(CFLAGS) $(OPTC) -o $(PRG8) fwi_inversion.o updateModel.o \
+		$(OBJC) fileOpen.o writeRec.o $(OPTIM_LIB) $(LIBS)
+
+# MPI FWI inversion
+$(PRG9):	$(OBJC) $(OPTIM_LIB) fdelfwi.h
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(OPTIM_INC) $(CFLAGS) $(OPTC) -c updateModel.c
+	$(MPICC) -c $(OPTIM_INC) $(CFLAGS) $(OPTC) -DUSE_MPI -o fwi_inversion_mpi.o fwi_inversion.c
+	$(MPICC) $(LDFLAGS) $(OPTIM_INC) $(CFLAGS) $(OPTC) -o $(PRG9) fwi_inversion_mpi.o updateModel.o \
+		$(OBJC) fileOpen.o writeRec.o $(OPTIM_LIB) $(LIBS)
+
 install: $(PRG1) $(PRG2) $(PRG4)
 	cp $(PRG1) $B
 	cp $(PRG2) $B
 	cp $(PRG4) $B
 
 clean:
-		rm -f core $(OBJC) *_mpi.o fileOpen.o writeRec.o test_fdfwimodc.o test_fwi_gradient.o fwi_driver.o fwi_driver_mpi.o test_wave_op_dp.o test_dotproduct.o test_taylor.o $(PRG1) $(PRG2) $(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7)
+		rm -f core $(OBJC) *_mpi.o fileOpen.o writeRec.o updateModel.o \
+			test_fdfwimodc.o test_fwi_gradient.o fwi_driver.o fwi_driver_mpi.o \
+			fwi_inversion.o fwi_inversion_mpi.o \
+			test_wave_op_dp.o test_dotproduct.o test_taylor.o \
+			$(PRG1) $(PRG2) $(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7) $(PRG8) $(PRG9)
 
 realclean:
-		rm -f core $(OBJC) fileOpen.o writeRec.o test_fdfwimodc.o test_fwi_gradient.o fwi_driver.o $(PRG1) $(PRG2) $(PRG3) $B/$(PRG1) $B/$(PRG2) $B/$(PRG3)
-		rm -f *_mpi.o fwi_driver_mpi.o $(PRG4) $B/$(PRG4)
+		rm -f core $(OBJC) fileOpen.o writeRec.o updateModel.o \
+			test_fdfwimodc.o test_fwi_gradient.o fwi_driver.o $(PRG1) $(PRG2) $(PRG3) \
+			$B/$(PRG1) $B/$(PRG2) $B/$(PRG3)
+		rm -f *_mpi.o fwi_driver_mpi.o fwi_inversion_mpi.o $(PRG4) $(PRG9) \
+			$B/$(PRG4) $B/$(PRG9)
+		rm -f fwi_inversion.o $(PRG8) $B/$(PRG8)
 
 print:	Makefile $(SRC)
 	$(PRINT) $?

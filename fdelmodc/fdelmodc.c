@@ -52,8 +52,12 @@ int viscoelastic4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int
 *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float *l2m, float *lam, float *mul, float *ts, float *tep, float
 *tes, float *r, float *q, float *p, int verbose);
 
-int elastic6(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, 
-    float **src_nwav, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox, 
+int elastic6(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc,
+    float **src_nwav, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox,
+    float *roz, float *l2m, float *lam, float *mul, int verbose);
+
+int elastic8(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc,
+    float **src_nwav, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox,
     float *roz, float *l2m, float *lam, float *mul, int verbose);
 
 int getRecTimes(modPar mod, recPar rec, bndPar bnd, int itime, int isam, float *vx, float *vz, float *tzz, float *txx, float *q,
@@ -604,7 +608,11 @@ shared (shot, bnd, mod, src, wav, rec, ixsrc, izsrc, it, src_nwav, verbose)
                             vx, vz, tzz, txx, txz, rox, roz, l2m, lam, mul, verbose);
 					}
 					else if (mod.iorder==6) {
-                        elastic6(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav, 
+                        elastic6(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav,
+							vx, vz, tzz, txx, txz, rox, roz, l2m, lam, mul, verbose);
+                    }
+					else if (mod.iorder==8) {
+                        elastic8(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav,
 							vx, vz, tzz, txx, txz, rox, roz, l2m, lam, mul, verbose);
                     }
 					break;
