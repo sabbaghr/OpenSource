@@ -161,10 +161,12 @@ $(PRG9):	$(OBJC) $(OPTIM_LIB) fdelfwi.h
 	$(MPICC) $(LDFLAGS) $(OPTIM_INC) $(CFLAGS) $(OPTC) -o $(PRG9) fwi_inversion_mpi.o updateModel.o \
 		$(OBJC) fileOpen.o writeRec.o $(OPTIM_LIB) $(LIBS)
 
-install: $(PRG1) $(PRG2) $(PRG4)
+install: $(PRG1) $(PRG2) $(PRG4) $(PRG8) $(PRG9)
 	cp $(PRG1) $B
 	cp $(PRG2) $B
 	cp $(PRG4) $B
+	cp $(PRG8) $B
+	cp $(PRG9) $B
 
 clean:
 		rm -f core $(OBJC) *_mpi.o fileOpen.o writeRec.o updateModel.o \
