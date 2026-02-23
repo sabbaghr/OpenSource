@@ -418,6 +418,15 @@ static float compute_fwi_gradient(
 				grad2[i] += shot_grad2[i];
 		}
 
+		if (verbose > 0) {
+			/* Per-shot gradient diagnostic */
+			float gmax = 0.0f;
+			for (i = 0; i < (int)sizem; i++)
+				if (fabsf(shot_grad1[i]) > gmax) gmax = fabsf(shot_grad1[i]);
+			fprintf(stderr, "  rank %d: shot %d  misfit=%.4e  max|g_shot|=%.4e\n",
+			        mpi_rank, ishot, misfit, gmax);
+		}
+
 		free(shot_grad1);
 		free(shot_grad3);
 		if (shot_grad2) free(shot_grad2);
@@ -427,6 +436,16 @@ static float compute_fwi_gradient(
 	/* Reduce gradients and misfit across ranks */
 #ifdef USE_MPI
 	{
+		/* Diagnostic: local gradient norm before reduction */
+		if (verbose > 0) {
+			float local_gnorm = 0.0f;
+			for (i = 0; i < (int)sizem; i++)
+				local_gnorm += grad1[i] * grad1[i];
+			local_gnorm = sqrtf(local_gnorm);
+			fprintf(stderr, "  rank %d: local ||g1||=%.4e  local misfit=%.4e\n",
+			        mpi_rank, local_gnorm, total_misfit);
+		}
+
 		float *tmp1 = (float *)calloc(sizem, sizeof(float));
 		float *tmp3 = (float *)calloc(sizem, sizeof(float));
 		float *tmp2 = NULL;
@@ -446,6 +465,15 @@ static float compute_fwi_gradient(
 		if (tmp2) free(tmp2);
 
 		MPI_Allreduce(&total_misfit, &global_misfit, 1, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+
+		if (verbose > 0 && mpi_rank == 0) {
+			float global_gnorm = 0.0f;
+			for (i = 0; i < (int)sizem; i++)
+				global_gnorm += grad1[i] * grad1[i];
+			global_gnorm = sqrtf(global_gnorm);
+			vmess("  MPI reduction: global ||g1||=%.4e  global misfit=%.4e",
+			      global_gnorm, global_misfit);
+		}
 	}
 #else
 	global_misfit = total_misfit;
