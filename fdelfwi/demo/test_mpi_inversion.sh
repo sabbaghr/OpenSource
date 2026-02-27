@@ -118,10 +118,8 @@ echo " STEP 4: MPI L-BFGS inversion (3 iterations, pressure)"
 echo "  ${NSHOTS} shots, ${NPROC} MPI ranks"
 echo "========================================================="
 
-# Build xsrc/zsrc comma-separated lists
-XSRC_STR=$(IFS=,; echo "${XSRC[*]}")
-ZSRC_STR=$(printf "${ZSRC}%.0s," $(seq 1 ${NSHOTS}))
-ZSRC_STR=${ZSRC_STR%,}  # remove trailing comma
+# Shot geometry: nshot + xsrc (first position) + dxshot (increment)
+DXSHOT=$(( ${XSRC[1]} - ${XSRC[0]} ))
 
 mpirun -np ${NPROC} ${FDELFWI}/fwi_mpi_inversion \
     file_cp=init_cp.su file_cs=init_cs.su file_den=init_ro.su \
@@ -130,27 +128,77 @@ mpirun -np ${NPROC} ${FDELFWI}/fwi_mpi_inversion \
     rec_type_vz=1 rec_type_vx=1 rec_type_p=1 rec_type_tzz=1 rec_type_txx=1 \
     dtrcv=0.004 tmod=1.0 verbose=1 \
     xrcv1=50 xrcv2=950 zrcv1=490 zrcv2=490 dxrcv=10 \
-    xsrc=${XSRC_STR} zsrc=${ZSRC_STR} ntaper=30 \
+    xsrc=${XSRC[0]} zsrc=${ZSRC} nshot=${NSHOTS} dxshot=${DXSHOT} ntaper=30 \
     left=4 right=4 top=4 bottom=4 \
     file_obs=obs comp=_rp \
     chk_skipdt=100 chk_base=chk \
-    param=2 \
+    param=1 \
     niter=3 algorithm=1 lbfgs_mem=5 grad_taper=5 \
-    file_grad=gradient write_iter=1
+    file_grad=gradient write_iter=1 || LBFGS_RC=$?
 
 echo ""
 echo "========================================================="
-echo " RESULTS"
+echo " L-BFGS RESULTS (exit code: ${LBFGS_RC:-0})"
 echo "========================================================="
 
 if [ -f iterate_LB.dat ]; then
     echo ""
-    echo "--- Convergence log ---"
+    echo "--- L-BFGS Convergence log ---"
     cat iterate_LB.dat
 fi
 
-echo ""
-echo "--- Output files ---"
-ls -la model_iter*.su gradient_*.su 2>/dev/null || echo "  No output files"
+# Save L-BFGS results
+mkdir -p results_lbfgs
+mv -f model_iter*.su gradient_*.su iterate_LB.dat results_lbfgs/ 2>/dev/null || true
+rm -rf fwi_rank* syn_*.su
 
+# =========================================================
+# STEP 5: Run MPI TRN inversion (pressure)
+# =========================================================
+echo ""
+echo "========================================================="
+echo " STEP 5: MPI TRN inversion (3 iterations, niter_cg=3, pressure)"
+echo "  ${NSHOTS} shots, ${NPROC} MPI ranks"
+echo "========================================================="
+
+mpirun -np ${NPROC} ${FDELFWI}/fwi_mpi_inversion \
+    file_cp=init_cp.su file_cs=init_cs.su file_den=init_ro.su \
+    file_src=wave.su file_rcv=syn \
+    ischeme=3 iorder=4 src_type=1 \
+    rec_type_vz=1 rec_type_vx=1 rec_type_p=1 rec_type_tzz=1 rec_type_txx=1 \
+    dtrcv=0.004 tmod=1.0 verbose=1 \
+    xrcv1=50 xrcv2=950 zrcv1=490 zrcv2=490 dxrcv=10 \
+    xsrc=${XSRC[0]} zsrc=${ZSRC} nshot=${NSHOTS} dxshot=${DXSHOT} ntaper=30 \
+    left=4 right=4 top=4 bottom=4 \
+    file_obs=obs comp=_rp \
+    chk_skipdt=100 chk_base=chk \
+    param=1 \
+    niter=3 algorithm=4 niter_cg=3 grad_taper=5 \
+    file_grad=gradient_trn write_iter=1
+
+echo ""
+echo "========================================================="
+echo " TRN RESULTS"
+echo "========================================================="
+
+if [ -f iterate_TRN.dat ]; then
+    echo ""
+    echo "--- TRN Convergence log ---"
+    cat iterate_TRN.dat
+fi
+
+if [ -f iterate_TRN_CG.dat ]; then
+    echo ""
+    echo "--- TRN CG log ---"
+    cat iterate_TRN_CG.dat
+fi
+
+# Save TRN results
+mkdir -p results_trn
+mv -f model_iter*.su gradient_trn*.su iterate_TRN*.dat results_trn/ 2>/dev/null || true
+rm -rf fwi_rank* syn_*.su
+
+echo ""
+echo "========================================================="
+echo " DONE"
 echo "========================================================="

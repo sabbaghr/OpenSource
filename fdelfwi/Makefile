@@ -24,6 +24,7 @@ mpi_inversion: fwi_mpi_inversion
 test_wave_op_dp: $(PRG5)
 test_dotproduct: $(PRG6)
 test_taylor: $(PRG7)
+test_hessian_dp: $(PRG10)
 
 PRG1 = test_fdfwimodc
 PRG2 = test_fwi_gradient
@@ -34,6 +35,7 @@ PRG6 = test_dotproduct
 PRG7 = test_taylor
 PRG8 = fwi_inversion
 PRG9 = fwi_mpi_inversion
+PRG10 = test_hessian_dp
 
 # Library sources (no test drivers -- those have main())
 SRCC	= fdfwimodc.c \
@@ -70,6 +72,9 @@ SRCC	= fdfwimodc.c \
 		elastic6_adj.c  \
 		elastic8_adj.c  \
 		computeResidual.c  \
+		born_vsrc.c  \
+		born_shot.c  \
+		hess_shot.c  \
 		sourceOnSurface.c  \
 		getWaveletHeaders.c  \
 		boundaries.c  \
@@ -161,6 +166,15 @@ $(PRG9):	$(OBJC) $(OPTIM_LIB) fdelfwi.h
 	$(MPICC) $(LDFLAGS) $(OPTIM_INC) $(CFLAGS) $(OPTC) -o $(PRG9) fwi_inversion_mpi.o updateModel.o \
 		$(OBJC) fileOpen.o writeRec.o $(OPTIM_LIB) $(LIBS)
 
+# Hessian symmetry dot product test
+$(PRG10):	$(OBJC) fdelfwi.h
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -c updateModel.c
+	$(CC) $(CFLAGS) $(OPTC) -c test_hessian_dp.c
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG10) test_hessian_dp.o updateModel.o \
+		$(OBJC) fileOpen.o writeRec.o $(LIBS)
+
 install: $(PRG1) $(PRG2) $(PRG4) $(PRG8) $(PRG9)
 	cp $(PRG1) $B
 	cp $(PRG2) $B
@@ -172,8 +186,8 @@ clean:
 		rm -f core $(OBJC) *_mpi.o fileOpen.o writeRec.o updateModel.o \
 			test_fdfwimodc.o test_fwi_gradient.o fwi_driver.o fwi_driver_mpi.o \
 			fwi_inversion.o fwi_inversion_mpi.o \
-			test_wave_op_dp.o test_dotproduct.o test_taylor.o \
-			$(PRG1) $(PRG2) $(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7) $(PRG8) $(PRG9)
+			test_wave_op_dp.o test_dotproduct.o test_taylor.o test_hessian_dp.o \
+			$(PRG1) $(PRG2) $(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7) $(PRG8) $(PRG9) $(PRG10)
 
 realclean:
 		rm -f core $(OBJC) fileOpen.o writeRec.o updateModel.o \

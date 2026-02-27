@@ -137,16 +137,20 @@ void optim_save_lbfgs(int n, optim_type *opt, float *x, float *grad)
 
 
 /*--------------------------------------------------------------------
- * descent_lbfgs -- Two-loop recursion for L-BFGS descent direction.
+ * optim_lbfgs_apply -- Two-loop recursion: output = -H_k * input.
  *
- * Computes d = -H_k * grad where H_k is the L-BFGS approximation
+ * Computes output = -H_k * input where H_k is the L-BFGS approximation
  * of the inverse Hessian (Nocedal Algorithm 7.5, p.179).
  *
- * Safeguard: falls back to steepest descent if sk or yk norms are zero.
+ * Public function: used by lbfgs_run() for descent direction and by
+ * enriched_run() as preconditioner for the inner CG of TRN.
+ *
+ * Safeguard: falls back to -input if sk or yk norms are zero.
  *
  * Translated from: LBFGS/kernel/src/descent_LBFGS.f90
  *--------------------------------------------------------------------*/
-static void descent_lbfgs(int n, optim_type *opt, float *grad)
+void optim_lbfgs_apply(int n, optim_type *opt, const float *input,
+                       float *output)
 {
 	int i, j, idx;
 	int borne;  /* effective number of stored pairs */
@@ -158,9 +162,9 @@ static void descent_lbfgs(int n, optim_type *opt, float *grad)
 	/* borne = cpt_lbfgs - 1 (number of completed pairs) */
 	borne = opt->cpt_lbfgs - 1;
 	if (borne <= 0) {
-		/* No history: steepest descent */
+		/* No history: return -input */
 		for (i = 0; i < n; i++)
-			opt->descent[i] = -grad[i];
+			output[i] = -input[i];
 		return;
 	}
 
@@ -171,7 +175,7 @@ static void descent_lbfgs(int n, optim_type *opt, float *grad)
 
 	if (norm_sk == 0.0f || norm_yk == 0.0f) {
 		for (i = 0; i < n; i++)
-			opt->descent[i] = -grad[i];
+			output[i] = -input[i];
 		return;
 	}
 
@@ -180,8 +184,8 @@ static void descent_lbfgs(int n, optim_type *opt, float *grad)
 	rho   = (float *)malloc(borne * sizeof(float));
 	q     = (float *)malloc(n * sizeof(float));
 
-	/* q = grad */
-	memcpy(q, grad, n * sizeof(float));
+	/* q = input */
+	memcpy(q, input, n * sizeof(float));
 
 	/*--- First loop: backward through history (newest to oldest) ---*/
 	for (i = 0; i < borne; i++) {
@@ -202,22 +206,22 @@ static void descent_lbfgs(int n, optim_type *opt, float *grad)
 	gamma_den = optim_norm_l2(n, &opt->yk[(borne - 1) * n]);
 	gamma = gamma_num / (gamma_den * gamma_den);
 
-	/* descent = gamma * q */
+	/* output = gamma * q */
 	for (i = 0; i < n; i++)
-		opt->descent[i] = gamma * q[i];
+		output[i] = gamma * q[i];
 
 	/*--- Second loop: forward through history (oldest to newest) ---*/
 	for (idx = 0; idx < borne; idx++) {
 		beta = rho[idx] * optim_dot(n, &opt->yk[idx * n],
-		                             opt->descent);
-		/* descent = descent + (alpha[idx] - beta) * sk[:,idx] */
+		                             output);
+		/* output = output + (alpha[idx] - beta) * sk[:,idx] */
 		for (j = 0; j < n; j++)
-			opt->descent[j] += (alpha[idx] - beta) * opt->sk[idx * n + j];
+			output[j] += (alpha[idx] - beta) * opt->sk[idx * n + j];
 	}
 
-	/*--- Negate for descent direction ---*/
+	/*--- Negate: output = -H(m) * input ---*/
 	for (i = 0; i < n; i++)
-		opt->descent[i] = -opt->descent[i];
+		output[i] = -output[i];
 
 	free(q);
 	free(alpha);
@@ -296,7 +300,7 @@ void lbfgs_run(int n, float *x, float fcost, float *grad,
 				*flag = OPT_NSTE;
 
 				optim_update_lbfgs(n, opt, x, grad);
-				descent_lbfgs(n, opt, grad);
+				optim_lbfgs_apply(n, opt, grad, opt->descent);
 				optim_save_lbfgs(n, opt, x, grad);
 
 				memcpy(opt->grad, grad, n * sizeof(float));

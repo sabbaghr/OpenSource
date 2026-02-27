@@ -320,6 +320,129 @@ void accumGradient(modPar *mod, bndPar *bnd,
 
 
 /***********************************************************************
+ * accumGradient_rho_Dsig -- Density gradient using exact D_σ(stress).
+ *
+ * Replaces the dv/dt approximation in accumGradient for density with
+ * the exact spatial derivative D_σ(forward stress), eliminating source
+ * injection contamination that breaks the B/B^T transpose duality
+ * needed for Hessian symmetry.
+ *
+ * The exact transpose of born_vsrc_vel for density is:
+ *   g_ρ[P] += Σ_t 0.5 * (ψ_vx · rox · Dsig_vx) / ρ   [scatter]
+ *   g_ρ[P] += Σ_t 0.5 * (ψ_vz · roz · Dsig_vz) / ρ   [scatter]
+ *
+ * where Dsig_vx = D-x(txx) + D+z(txz) at the Vx grid, and
+ *       Dsig_vz = D+x(txz) + D-z(tzz) at the Vz grid.
+ *
+ * This uses the same stencils and loop bounds as born_vsrc_vel.
+ *
+ * Parameters:
+ *   fwd_txx, fwd_tzz, fwd_txz - forward stress at time n-1
+ *                                (stress BEFORE step n, same timing
+ *                                 as born_vsrc_vel at step n)
+ *   wfl_adj     - adjoint wavefield (ψ_vx, ψ_vz after callAdjKernel)
+ *   grad_rho    - density gradient array (accumulated, padded grid)
+ ***********************************************************************/
+void accumGradient_rho_Dsig(modPar *mod, bndPar *bnd,
+                            float *fwd_txx, float *fwd_tzz, float *fwd_txz,
+                            wflPar *wfl_adj,
+                            float dt,
+                            float *grad_rho)
+{
+	int ix, iz, n1;
+	float c1, c2, c3, c4;
+
+	(void)dt;  /* dt parameter kept for interface consistency but unused;
+	            * the old dv/dt code had dt*(Δvx/dt)=Δvx, which cancels. */
+
+	if (mod->ischeme <= 2) return;
+	if (!grad_rho || !fwd_txx || !fwd_tzz || !fwd_txz) return;
+
+	n1  = mod->naz;
+	c3 = c4 = 0.0f;
+
+	switch (mod->iorder) {
+		case 4:
+			c1 = 9.0f/8.0f;
+			c2 = -1.0f/24.0f;
+			break;
+		case 6:
+			c1 = 75.0f/64.0f;
+			c2 = -25.0f/384.0f;
+			c3 = 3.0f/640.0f;
+			break;
+		case 8:
+			c1 = 1225.0f/1024.0f;
+			c2 = -245.0f/3072.0f;
+			c3 = 49.0f/5120.0f;
+			c4 = -5.0f/7168.0f;
+			break;
+		default:
+			c1 = 9.0f/8.0f;
+			c2 = -1.0f/24.0f;
+			break;
+	}
+
+	/* Vx contribution: Dsig_vx = D-x(txx) + D+z(txz)
+	 * Same stencil as born_vsrc_vel and elastic4 Phase F1 for vx.
+	 * Loop bounds: ioXx..ieXx (same as born_vsrc_vel and accumGradient). */
+	for (ix = mod->ioXx; ix < mod->ieXx; ix++) {
+		for (iz = mod->ioXz; iz < mod->ieXz; iz++) {
+			float Dsig, vx_contrib;
+			float rox_val = mod->rox[ix*n1+iz];
+
+			Dsig = c1*(fwd_txx[ix*n1+iz]     - fwd_txx[(ix-1)*n1+iz] +
+			           fwd_txz[ix*n1+iz+1]   - fwd_txz[ix*n1+iz])    +
+			       c2*(fwd_txx[(ix+1)*n1+iz] - fwd_txx[(ix-2)*n1+iz] +
+			           fwd_txz[ix*n1+iz+2]   - fwd_txz[ix*n1+iz-1]);
+			if (mod->iorder >= 6)
+				Dsig += c3*(fwd_txx[(ix+2)*n1+iz] - fwd_txx[(ix-3)*n1+iz] +
+				            fwd_txz[ix*n1+iz+3]   - fwd_txz[ix*n1+iz-2]);
+			if (mod->iorder >= 8)
+				Dsig += c4*(fwd_txx[(ix+3)*n1+iz] - fwd_txx[(ix-4)*n1+iz] +
+				            fwd_txz[ix*n1+iz+4]   - fwd_txz[ix*n1+iz-3]);
+
+			/* Forward kernel: vx -= rox * Dsig, so Δvx = -rox * Dsig.
+			 * The old dv/dt code: vx_contrib = ψ*Δvx = -ψ*rox*Dsig.
+			 * We must match the negative sign for correct -J^T. */
+			vx_contrib = -wfl_adj->vx[ix*n1+iz] * rox_val * Dsig;
+
+			/* Scatter to 2 P-grid points straddled by Vx(ix,iz) */
+			grad_rho[(ix-1)*n1+iz] += 0.5f * vx_contrib / mod->rho[(ix-1)*n1+iz];
+			grad_rho[ix*n1+iz]     += 0.5f * vx_contrib / mod->rho[ix*n1+iz];
+		}
+	}
+
+	/* Vz contribution: Dsig_vz = D+x(txz) + D-z(tzz)
+	 * Same stencil as born_vsrc_vel and elastic4 Phase F1 for vz. */
+	for (ix = mod->ioZx; ix < mod->ieZx; ix++) {
+		for (iz = mod->ioZz; iz < mod->ieZz; iz++) {
+			float Dsig, vz_contrib;
+			float roz_val = mod->roz[ix*n1+iz];
+
+			Dsig = c1*(fwd_tzz[ix*n1+iz]     - fwd_tzz[ix*n1+iz-1]    +
+			           fwd_txz[(ix+1)*n1+iz] - fwd_txz[ix*n1+iz])     +
+			       c2*(fwd_tzz[ix*n1+iz+1]   - fwd_tzz[ix*n1+iz-2]    +
+			           fwd_txz[(ix+2)*n1+iz] - fwd_txz[(ix-1)*n1+iz]);
+			if (mod->iorder >= 6)
+				Dsig += c3*(fwd_tzz[ix*n1+iz+2]   - fwd_tzz[ix*n1+iz-3]    +
+				            fwd_txz[(ix+3)*n1+iz] - fwd_txz[(ix-2)*n1+iz]);
+			if (mod->iorder >= 8)
+				Dsig += c4*(fwd_tzz[ix*n1+iz+3]   - fwd_tzz[ix*n1+iz-4]    +
+				            fwd_txz[(ix+4)*n1+iz] - fwd_txz[(ix-3)*n1+iz]);
+
+			/* Forward kernel: vz -= roz * Dsig, so Δvz = -roz * Dsig. */
+			vz_contrib = -wfl_adj->vz[ix*n1+iz] * roz_val * Dsig;
+
+			/* Scatter to 2 P-grid points straddled by Vz(ix,iz) */
+			grad_rho[ix*n1+(iz-1)] += 0.5f * vz_contrib / mod->rho[ix*n1+(iz-1)];
+			grad_rho[ix*n1+iz]     += 0.5f * vz_contrib / mod->rho[ix*n1+iz];
+		}
+	}
+}
+
+
+/***********************************************************************
  * convertGradientToVelocity -- Chain rule: Lamé → (Vp, Vs, ρ).
  *
  * Converts Lamé-parameter gradients (g_λ, g_μ, g_ρ_direct) to

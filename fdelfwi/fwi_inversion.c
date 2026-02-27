@@ -115,7 +115,9 @@ char *sdoc[] = {
 " Same parameters as fwi_driver, plus:",
 "   niter=20           max optimization iterations",
 "   conv=1e-6          convergence tolerance (fcost/f0)",
-"   algorithm=1        0=SD, 1=LBFGS, 2=PLBFGS, 3=PNLCG",
+"   algorithm=1        0=SD, 1=LBFGS, 2=PLBFGS, 3=PNLCG, 4=TRN, 5=ENRICHED",
+"   niter_cg=5         max inner CG iterations per TRN/Enriched step (algorithm=4,5)",
+"   enr_l=20           L-BFGS cycle length for Enriched method (algorithm=5)",
 "   lbfgs_mem=20       L-BFGS history pairs",
 "   nls_max=20         max linesearch iterations",
 "   vp_min=,vp_max=    Vp bounds (m/s, optional)",
@@ -301,6 +303,7 @@ static float compute_fwi_gradient(
 	float *grad1, float *grad2, float *grad3,
 	const char *chk_base, int chk_skipdt,
 	int mpi_rank, int mpi_size,
+	int keep_checkpoints,
 	int verbose)
 {
 	int ishot, k, i;
@@ -329,7 +332,6 @@ static float compute_fwi_gradient(
 	/* Working directory for checkpoints */
 	snprintf(work_dir, sizeof(work_dir), "fwi_rank%03d", mpi_rank);
 	mkdir(work_dir, 0755);
-	snprintf(chk_path, sizeof(chk_path), "%s/%s", work_dir, chk_base);
 
 	/* Process assigned shots */
 	for (k = 0; k < my_nshots; k++) {
@@ -346,6 +348,11 @@ static float compute_fwi_gradient(
 			shot_grad2 = (float *)calloc(sizem, sizeof(float));
 
 		/* Step 1: Forward modeling with checkpointing */
+		if (keep_checkpoints)
+			snprintf(chk_path, sizeof(chk_path), "%s/%s_shot%03d",
+			         work_dir, chk_base, ishot);
+		else
+			snprintf(chk_path, sizeof(chk_path), "%s/%s", work_dir, chk_base);
 		initCheckpoints(&chk, mod, chk_skipdt, 0, chk_path);
 
 		snaPar sna_off = *sna;
@@ -430,7 +437,8 @@ static float compute_fwi_gradient(
 		free(shot_grad1);
 		free(shot_grad3);
 		if (shot_grad2) free(shot_grad2);
-		cleanCheckpoints(&chk);
+		if (!keep_checkpoints)
+			cleanCheckpoints(&chk);
 	}
 
 	/* Reduce gradients and misfit across ranks */
@@ -481,6 +489,211 @@ static float compute_fwi_gradient(
 
 	free(my_shots);
 	return global_misfit;
+}
+
+
+/*--------------------------------------------------------------------
+ * clean_shot_checkpoints -- Remove per-shot checkpoint files.
+ *
+ * Called when TRN accepts a new step (OPT_NSTE) or at termination,
+ * to free disk space used by per-shot checkpoints.
+ *--------------------------------------------------------------------*/
+static void clean_shot_checkpoints(
+	modPar *mod, shotPar *shot,
+	const char *chk_base,
+	int mpi_rank, int mpi_size)
+{
+	int ishot;
+	char work_dir[256], chk_path[512];
+	checkpointPar chk;
+
+	snprintf(work_dir, sizeof(work_dir), "fwi_rank%03d", mpi_rank);
+
+	for (ishot = mpi_rank; ishot < shot->n; ishot += mpi_size) {
+		snprintf(chk_path, sizeof(chk_path), "%s/%s_shot%03d",
+		         work_dir, chk_base, ishot);
+		initCheckpoints(&chk, mod, 1, 0, chk_path);
+		cleanCheckpoints(&chk);
+	}
+}
+
+
+/*--------------------------------------------------------------------
+ * compute_hessian_vector_product -- Compute H_GN * d for TRN.
+ *
+ * For each shot assigned to this rank:
+ *   1. Reconstruct checkpoint struct (files on disk from gradient step)
+ *   2. Call hess_shot (born_shot + adj_shot)
+ *   3. Accumulate per-shot Hd
+ * Then MPI_Allreduce to get global Hd.
+ *
+ * Parameters:
+ *   dpert      - perturbation vector (opt->d, flat, length nvec)
+ *   Hd_flat    - OUTPUT: H*d result (flat, length nvec, on rank 0)
+ *   grad_taper - gradient taper radius
+ *
+ * Other parameters same as compute_fwi_gradient.
+ *--------------------------------------------------------------------*/
+static void compute_hessian_vector_product(
+	modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
+	recPar *rec, shotPar *shot,
+	float **src_nwav,
+	const char *comp_str,
+	int res_taper, int param,
+	const char *chk_base, int chk_skipdt,
+	int mpi_rank, int mpi_size,
+	float *dpert, float *Hd_flat, int nvec,
+	int grad_taper,
+	int verbose)
+{
+	int ishot, k, i;
+	int n1 = mod->naz;
+	size_t sizem = (size_t)mod->nax * mod->naz;
+	char work_dir[256], chk_path[512], born_path[512];
+	checkpointPar chk;
+
+	/* Perturbed FD coefficient arrays */
+	int elastic = (mod->ischeme > 2);
+	float *delta_lam = NULL;
+	float *delta_mul = NULL;
+	if (elastic) {
+		delta_lam = (float *)calloc(sizem, sizeof(float));
+		delta_mul = (float *)calloc(sizem, sizeof(float));
+	}
+	float *delta_rox = (float *)calloc(sizem, sizeof(float));
+	float *delta_roz = (float *)calloc(sizem, sizeof(float));
+	float *delta_l2m = (float *)calloc(sizem, sizeof(float));
+
+	/* Convert perturbation vector to FD coefficient perturbations */
+	perturbFDcoefficients(mod, bnd, dpert, param,
+	                      delta_rox, delta_roz, delta_l2m, delta_lam, delta_mul);
+
+	/* Padded Hd gradient arrays */
+	float *hd1 = (float *)calloc(sizem, sizeof(float));
+	float *hd3 = (float *)calloc(sizem, sizeof(float));
+	float *hd2 = NULL;
+	if (elastic) hd2 = (float *)calloc(sizem, sizeof(float));
+
+	/* Determine shots for this rank */
+	int my_nshots = 0;
+	for (ishot = mpi_rank; ishot < shot->n; ishot += mpi_size)
+		my_nshots++;
+
+	int *my_shots = (int *)malloc(my_nshots * sizeof(int));
+	k = 0;
+	for (ishot = mpi_rank; ishot < shot->n; ishot += mpi_size)
+		my_shots[k++] = ishot;
+
+	snprintf(work_dir, sizeof(work_dir), "fwi_rank%03d", mpi_rank);
+
+	/* Process assigned shots */
+	for (k = 0; k < my_nshots; k++) {
+		ishot = my_shots[k];
+		int izsrc = shot->z[ishot];
+		int ixsrc = shot->x[ishot];
+		int fileno = ishot;
+
+		/* Per-shot Hd (zeroed) */
+		float *shot_hd1 = (float *)calloc(sizem, sizeof(float));
+		float *shot_hd2 = elastic ? (float *)calloc(sizem, sizeof(float)) : NULL;
+		float *shot_hd3 = (float *)calloc(sizem, sizeof(float));
+
+		/* Reconstruct checkpoint metadata (files persist on disk
+		 * from the gradient computation with keep_checkpoints=1) */
+		snprintf(chk_path, sizeof(chk_path), "%s/%s_shot%03d",
+		         work_dir, chk_base, ishot);
+		initCheckpoints(&chk, mod, chk_skipdt, 0, chk_path);
+
+		/* Born output base name */
+		snprintf(born_path, sizeof(born_path), "%s/born", work_dir);
+
+		/* Compute per-shot H*d via born_shot + adj_shot */
+		hess_shot(mod, src, wav, bnd, rec,
+		          ixsrc, izsrc, src_nwav, &chk,
+		          delta_rox, delta_roz, delta_l2m, delta_lam, delta_mul,
+		          born_path, comp_str,
+		          ishot, shot->n, fileno,
+		          res_taper,
+		          shot_hd1, shot_hd2, shot_hd3,
+		          1,  /* always Lame internally */
+		          verbose);
+
+		/* Accumulate into local Hd sum */
+		for (i = 0; i < (int)sizem; i++) {
+			hd1[i] += shot_hd1[i];
+			hd3[i] += shot_hd3[i];
+			if (hd2 && shot_hd2)
+				hd2[i] += shot_hd2[i];
+		}
+
+		if (verbose > 0) {
+			float hmax = 0.0f;
+			for (i = 0; i < (int)sizem; i++)
+				if (fabsf(shot_hd1[i]) > hmax) hmax = fabsf(shot_hd1[i]);
+			fprintf(stderr, "  rank %d: shot %d  max|Hd_shot|=%.4e\n",
+			        mpi_rank, ishot, hmax);
+		}
+
+		free(shot_hd1);
+		free(shot_hd3);
+		if (shot_hd2) free(shot_hd2);
+	}
+
+	/* Reduce Hd across ranks */
+#ifdef USE_MPI
+	{
+		float *tmp1 = (float *)calloc(sizem, sizeof(float));
+		float *tmp3 = (float *)calloc(sizem, sizeof(float));
+		float *tmp2 = NULL;
+		if (hd2) tmp2 = (float *)calloc(sizem, sizeof(float));
+
+		MPI_Allreduce(hd1, tmp1, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+		MPI_Allreduce(hd3, tmp3, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+		if (hd2 && tmp2)
+			MPI_Allreduce(hd2, tmp2, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+
+		memcpy(hd1, tmp1, sizem * sizeof(float));
+		memcpy(hd3, tmp3, sizem * sizeof(float));
+		if (hd2 && tmp2)
+			memcpy(hd2, tmp2, sizem * sizeof(float));
+
+		free(tmp1); free(tmp3);
+		if (tmp2) free(tmp2);
+	}
+#endif
+
+	/* Apply gradient taper (same as gradient) */
+	if (grad_taper > 0) {
+		int ibx = mod->ioPx, ibz = mod->ioPz;
+		if (bnd->lef == 4 || bnd->lef == 2) ibx += bnd->ntap;
+		if (bnd->top == 4 || bnd->top == 2) ibz += bnd->ntap;
+		taperGradientSrcRcv(hd1, n1, mod->nax, shot, rec, ibx, ibz, grad_taper);
+		if (elastic)
+			taperGradientSrcRcv(hd2, n1, mod->nax, shot, rec, ibx, ibz, grad_taper);
+		taperGradientSrcRcv(hd3, n1, mod->nax, shot, rec, ibx, ibz, grad_taper);
+	}
+
+	/* Extract to flat vector (raw, no scaling — matching SEISCOPE
+	 * convention: optimizer receives unscaled Hd).
+	 * Use param=1 (Lame) since hess_shot accumulated in Lame space. */
+	if (mpi_rank == 0) {
+		extractGradientVector(Hd_flat, hd1, hd2, hd3, mod, bnd, 1);
+
+		if (verbose > 0) {
+			float hnorm = 0.0f;
+			for (i = 0; i < nvec; i++)
+				hnorm += Hd_flat[i] * Hd_flat[i];
+			vmess("  Hessian-vector product: ||Hd||=%.4e", sqrtf(hnorm));
+		}
+	}
+
+	/* Cleanup */
+	free(my_shots);
+	free(delta_rox); free(delta_roz); free(delta_l2m);
+	if (delta_lam) free(delta_lam);
+	if (delta_mul) free(delta_mul);
+	free(hd1); free(hd3);
+	if (hd2) free(hd2);
 }
 
 
@@ -636,7 +849,7 @@ int main(int argc, char **argv)
 	int    chk_skipdt, res_taper, grad_taper, param;
 
 	/* Optimization parameters */
-	int    niter, algorithm, lbfgs_mem, nls_max, write_iter;
+	int    niter, algorithm, lbfgs_mem, nls_max, write_iter, niter_cg;
 	float  conv;
 
 #ifdef USE_MPI
@@ -673,9 +886,10 @@ int main(int argc, char **argv)
 	if (!getparint("lbfgs_mem", &lbfgs_mem)) lbfgs_mem = 20;
 	if (!getparint("nls_max", &nls_max)) nls_max = 20;
 	if (!getparint("write_iter", &write_iter)) write_iter = 1;
+	if (!getparint("niter_cg", &niter_cg)) niter_cg = 5;
 
-	if (algorithm < 0 || algorithm > 3)
-		verr("algorithm must be 0 (SD), 1 (LBFGS), 2 (PLBFGS), or 3 (PNLCG)");
+	if (algorithm < 0 || algorithm > 5)
+		verr("algorithm must be 0 (SD), 1 (LBFGS), 2 (PLBFGS), 3 (PNLCG), 4 (TRN), or 5 (ENRICHED)");
 
 	/* ============================================================ */
 	/* Standard setup (same as fwi_driver.c)                        */
@@ -743,7 +957,7 @@ int main(int argc, char **argv)
 	/* Print inversion summary                                      */
 	/* ============================================================ */
 	if (mpi_rank == 0) {
-		const char *alg_names[] = {"Steepest Descent", "L-BFGS", "PLBFGS", "PNLCG"};
+		const char *alg_names[] = {"Steepest Descent", "L-BFGS", "PLBFGS", "PNLCG", "TRN", "Enriched"};
 		vmess("*******************************************");
 #ifdef USE_MPI
 		vmess("***** MPI FWI INVERSION               *****");
@@ -761,6 +975,13 @@ int main(int argc, char **argv)
 		vmess("Convergence tolerance: %.2e", conv);
 		if (algorithm == 1 || algorithm == 2)
 			vmess("L-BFGS memory: %d", lbfgs_mem);
+		if (algorithm == 4 || algorithm == 5)
+			vmess("Max CG iterations: %d", niter_cg);
+		if (algorithm == 5) {
+			int enr_l_val;
+			if (!getparint("enr_l", &enr_l_val)) enr_l_val = 20;
+			vmess("Enriched L-BFGS cycle: %d", enr_l_val);
+		}
 		vmess("*******************************************");
 	}
 
@@ -796,6 +1017,17 @@ int main(int argc, char **argv)
 	opt.print_flag = (mpi_rank == 0) ? 1 : 0;
 	opt.debug = (verbose > 1) ? 1 : 0;
 
+	/* TRN/Enriched-specific: max inner CG iterations */
+	opt.niter_max_CG = niter_cg;
+
+	/* Enriched-specific: L-BFGS cycle length and max CG */
+	if (algorithm == 5) {
+		int enr_l_val;
+		if (!getparint("enr_l", &enr_l_val)) enr_l_val = 20;
+		opt.enr_l = enr_l_val;
+		opt.enr_maxcg = niter_cg;
+	}
+
 	/* Setup bounds if specified */
 	if (mpi_rank == 0)
 		setup_bounds(&opt, &mod, &bnd, param, nvec);
@@ -806,11 +1038,13 @@ int main(int argc, char **argv)
 	if (mpi_rank == 0)
 		vmess("Computing initial gradient...");
 
+	int keep_chk = (algorithm == 4 || algorithm == 5) ? 1 : 0;
+
 	float fcost = compute_fwi_gradient(
 		&mod, &src, &wav, &bnd, &rec, &sna, &shot, src_nwav,
 		file_obs, comp_str, res_taper, param,
 		grad1, grad2, grad3,
-		chk_base, chk_skipdt, mpi_rank, mpi_size, verbose);
+		chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk, verbose);
 
 	/* Taper gradient near source and receiver positions */
 	{
@@ -825,43 +1059,50 @@ int main(int argc, char **argv)
 
 	/* Extract gradient to flat vector (only rank 0 needs it).
 	 *
-	 * FWI gradients are cross-correlations of wavefields, so their
-	 * magnitude is unrelated to the model parameter scale. We normalize
-	 * the gradient so ||g||_2 = 1 and set alpha to control the step
-	 * size.  This makes the Wolfe directional derivative q0 = -1,
-	 * ensuring the Armijo condition is satisfiable regardless of the
-	 * physical units of the data (particle velocity vs pressure). */
-	float grad_scale = 0.0f;  /* gradient normalization factor */
+	 * Following the SEISCOPE optimization toolbox convention, the
+	 * raw (unscaled) gradient is passed to all optimizers.  Each
+	 * algorithm handles scaling internally:
+	 *   - L-BFGS: two-loop recursion provides curvature scaling;
+	 *     we set an initial alpha heuristic to help the first step.
+	 *   - TRN/Enriched: CG solves H*d = -g with the true gradient
+	 *     norm, so Eisenstat-Walker stopping works correctly and
+	 *     alpha=1.0 gives the natural Newton step.
+	 * Normalizing the gradient would break the Eisenstat-Walker
+	 * criterion (||r|| <= eta * ||g|| becomes trivial when ||g||=1)
+	 * and corrupt the L-BFGS curvature pairs in Enriched mode. */
 
 	if (mpi_rank == 0) {
 		extractGradientVector(grad_vec, grad1, grad2, grad3,
 		                      &mod, &bnd, param);
 		vmess("Initial misfit: %.6e", fcost);
 
-		/* Normalize gradient */
 		float gnorm = 0.0f;
 		for (i = 0; i < nvec; i++)
 			gnorm += grad_vec[i] * grad_vec[i];
 		gnorm = sqrtf(gnorm);
 
 		if (gnorm > 0.0f) {
-			grad_scale = 1.0f / gnorm;
-			for (i = 0; i < nvec; i++)
-				grad_vec[i] *= grad_scale;
-
-			/* Set initial alpha: max model change = eps * max|x| */
-			float xmax = 0.0f, gmax_norm = 0.0f;
-			for (i = 0; i < nvec; i++) {
-				if (fabsf(x[i]) > xmax) xmax = fabsf(x[i]);
-				if (fabsf(grad_vec[i]) > gmax_norm)
-					gmax_norm = fabsf(grad_vec[i]);
+			/* Set initial alpha.
+			 * SEISCOPE default is alpha=1.0 for all algorithms.
+			 * For SD/L-BFGS/CG the first descent direction is -g,
+			 * so alpha=1 with a large raw gradient can overshoot.
+			 * Use a heuristic: max model change = eps * max|x|. */
+			if (algorithm == 4 || algorithm == 5) {
+				/* TRN/Enriched: alpha=1 is the natural Newton step */
+				opt.alpha = 1.0f;
+			} else {
+				float xmax = 0.0f, gmax = 0.0f;
+				for (i = 0; i < nvec; i++) {
+					if (fabsf(x[i]) > xmax) xmax = fabsf(x[i]);
+					if (fabsf(grad_vec[i]) > gmax)
+						gmax = fabsf(grad_vec[i]);
+				}
+				if (gmax > 0.0f && xmax > 0.0f) {
+					float eps_alpha = 0.01f;  /* 1% max perturbation */
+					opt.alpha = eps_alpha * xmax / gmax;
+				}
 			}
-			if (gmax_norm > 0.0f && xmax > 0.0f) {
-				float eps_alpha = 0.01f;  /* 1% max perturbation */
-				opt.alpha = eps_alpha * xmax / gmax_norm;
-			}
-			vmess("Gradient: ||g||=%.4e, normalized, alpha=%.4e",
-			      gnorm, opt.alpha);
+			vmess("Gradient: ||g||=%.4e, alpha=%.4e", gnorm, opt.alpha);
 		}
 	}
 
@@ -896,6 +1137,12 @@ int main(int argc, char **argv)
 				pnlcg_run(nvec, x, fcost, grad_vec, grad_vec,
 				           &opt, &flag);
 				break;
+			case 4:
+				trn_run(nvec, x, fcost, grad_vec, &opt, &flag);
+				break;
+			case 5:
+				enriched_run(nvec, x, fcost, grad_vec, &opt, &flag);
+				break;
 			}
 		}
 
@@ -920,7 +1167,7 @@ int main(int argc, char **argv)
 				&mod, &src, &wav, &bnd, &rec, &sna, &shot, src_nwav,
 				file_obs, comp_str, res_taper, param,
 				grad1, grad2, grad3,
-				chk_base, chk_skipdt, mpi_rank, mpi_size, verbose);
+				chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk, verbose);
 
 			/* Taper gradient near source and receiver positions */
 			{
@@ -933,7 +1180,8 @@ int main(int argc, char **argv)
 				taperGradientSrcRcv(grad3, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper);
 			}
 
-			/* Rank 0: extract gradient and normalize */
+			/* Rank 0: extract raw gradient (no normalization,
+			 * matching SEISCOPE toolbox convention) */
 			if (mpi_rank == 0) {
 				extractGradientVector(grad_vec, grad1, grad2, grad3,
 				                      &mod, &bnd, param);
@@ -953,19 +1201,35 @@ int main(int argc, char **argv)
 					memset(grad_vec, 0, nvec * sizeof(float));
 				}
 
-				/* Normalize gradient */
-				float gnorm = 0.0f;
-				for (i = 0; i < nvec; i++)
-					gnorm += grad_vec[i] * grad_vec[i];
-				gnorm = sqrtf(gnorm);
-				if (gnorm > 0.0f) {
-					float scale = 1.0f / gnorm;
+				if (verbose > 0) {
+					float gnorm = 0.0f;
 					for (i = 0; i < nvec; i++)
-						grad_vec[i] *= scale;
+						gnorm += grad_vec[i] * grad_vec[i];
+					vmess("  gradient ||g||=%.4e", sqrtf(gnorm));
 				}
-				if (verbose > 0)
-					vmess("  gradient ||g||=%.4e (normalized)", gnorm);
 			}
+
+		} else if (flag == OPT_HESS) {
+			/* --- TRN inner CG needs Hessian-vector product --- */
+
+			/* Broadcast CG direction from rank 0 to all ranks */
+#ifdef USE_MPI
+			MPI_Bcast(opt.d, nvec, MPI_FLOAT, 0, MPI_COMM_WORLD);
+#endif
+
+			/* Compute H*d = J^T(J*d) using Born + adjoint for all shots */
+			compute_hessian_vector_product(
+				&mod, &src, &wav, &bnd, &rec, &shot, src_nwav,
+				comp_str, res_taper, param,
+				chk_base, chk_skipdt, mpi_rank, mpi_size,
+				opt.d, opt.Hd, nvec,
+				grad_taper,
+				verbose);
+
+#ifdef USE_MPI
+			/* Broadcast Hd back to all ranks (rank 0 has the result) */
+			MPI_Bcast(opt.Hd, nvec, MPI_FLOAT, 0, MPI_COMM_WORLD);
+#endif
 
 		} else if (flag == OPT_NSTE) {
 			/* --- New step accepted: write intermediate model --- */
@@ -976,8 +1240,17 @@ int main(int argc, char **argv)
 				if (write_iter > 0 && (opt_iter % write_iter == 0))
 					write_iteration_model(opt_iter, x, &mod, &bnd, param);
 			}
+
+			/* TRN/Enriched: keep checkpoints alive — the next
+			 * outer CG iteration needs them for H*v products.
+			 * They'll be overwritten on the next OPT_GRAD, and
+			 * cleaned up at termination. */
 		}
 	}
+
+	/* Clean up any remaining TRN/Enriched checkpoints at termination */
+	if (algorithm == 4 || algorithm == 5)
+		clean_shot_checkpoints(&mod, &shot, chk_base, mpi_rank, mpi_size);
 
 	/* ============================================================ */
 	/* Write final results                                           */

@@ -376,6 +376,240 @@ static int test_trn(void)
 }
 
 
+/*--------------------------------------------------------------------
+ * test_enriched -- Test Enriched (L-BFGS + TN hybrid) on Rosenbrock.
+ *
+ * Starts with TRN to seed L-BFGS buffer, then switches to L-BFGS.
+ *--------------------------------------------------------------------*/
+static int test_enriched(void)
+{
+	int n = 2;
+	float x[2] = {1.5f, 1.5f};
+	float fcost, grad[2];
+	optim_type opt;
+	optFlag flag;
+
+	printf("=== TEST 7: Enriched (L-BFGS + TN) on Rosenbrock ===\n");
+
+	memset(&opt, 0, sizeof(optim_type));
+	opt.niter_max = 100;
+	opt.conv = 1e-8f;
+	opt.print_flag = 1;
+	opt.debug = 0;
+	opt.l = 20;           /* L-BFGS memory */
+	opt.enr_l = 20;       /* L-BFGS cycle length */
+	opt.enr_maxcg = 5;    /* max CG iterations */
+
+	rosenbrock(x, &fcost, grad);
+	printf("  Initial: x=(%.4f, %.4f), f=%.6e\n", x[0], x[1], fcost);
+
+	flag = OPT_INIT;
+	while (flag != OPT_CONV && flag != OPT_FAIL) {
+		enriched_run(n, x, fcost, grad, &opt, &flag);
+		if (flag == OPT_HESS) {
+			rosenbrock_hessian_vec(x, opt.d, opt.Hd);
+		} else if (flag == OPT_GRAD) {
+			rosenbrock(x, &fcost, grad);
+		} else if (flag == OPT_NSTE) {
+			rosenbrock(x, &fcost, grad);
+		}
+	}
+
+	printf("  Final:   x=(%.6f, %.6f), f=%.6e\n", x[0], x[1], fcost);
+	printf("  Iterations: %d, Forward problems: %d, Hess-vec: %d\n",
+	       opt.cpt_iter, opt.nfwd_pb, opt.nhess);
+
+	if (flag == OPT_FAIL) {
+		printf("  FAIL: linesearch failed\n");
+		return 1;
+	}
+	if (fabsf(x[0] - 1.0f) > TOL || fabsf(x[1] - 1.0f) > TOL) {
+		printf("  FAIL: did not converge to (1,1)\n");
+		return 1;
+	}
+
+	printf("  PASS\n\n");
+	return 0;
+}
+
+
+/*--------------------------------------------------------------------
+ * Comparison benchmark infrastructure.
+ *--------------------------------------------------------------------*/
+typedef struct {
+	const char *name;
+	int converged;
+	int iters;
+	int ngrad;
+	int nhess;
+	float final_cost;
+	float final_x[2];
+} bench_result;
+
+static bench_result run_bench_lbfgs(float x0, float x1)
+{
+	int n = 2;
+	float x[2] = {x0, x1};
+	float fcost, grad[2];
+	optim_type opt;
+	optFlag flag;
+	bench_result r;
+
+	memset(&opt, 0, sizeof(optim_type));
+	opt.niter_max = 10000;
+	opt.conv = 1e-8f;
+	opt.print_flag = 0;
+	opt.l = 20;
+
+	rosenbrock(x, &fcost, grad);
+	flag = OPT_INIT;
+	while (flag != OPT_CONV && flag != OPT_FAIL) {
+		lbfgs_run(n, x, fcost, grad, &opt, &flag);
+		if (flag == OPT_GRAD) rosenbrock(x, &fcost, grad);
+	}
+
+	r.name = "L-BFGS";
+	r.converged = (flag == OPT_CONV);
+	r.iters = opt.cpt_iter;
+	r.ngrad = opt.nfwd_pb;
+	r.nhess = 0;
+	r.final_cost = fcost;
+	r.final_x[0] = x[0]; r.final_x[1] = x[1];
+	return r;
+}
+
+static bench_result run_bench_pnlcg(float x0, float x1)
+{
+	int n = 2;
+	float x[2] = {x0, x1};
+	float fcost, grad[2];
+	optim_type opt;
+	optFlag flag;
+	bench_result r;
+
+	memset(&opt, 0, sizeof(optim_type));
+	opt.niter_max = 50000;
+	opt.conv = 1e-8f;
+	opt.print_flag = 0;
+
+	rosenbrock(x, &fcost, grad);
+	flag = OPT_INIT;
+	while (flag != OPT_CONV && flag != OPT_FAIL) {
+		pnlcg_run(n, x, fcost, grad, grad, &opt, &flag);
+		if (flag == OPT_GRAD) rosenbrock(x, &fcost, grad);
+	}
+
+	r.name = "PNLCG";
+	r.converged = (flag == OPT_CONV);
+	r.iters = opt.cpt_iter;
+	r.ngrad = opt.nfwd_pb;
+	r.nhess = 0;
+	r.final_cost = fcost;
+	r.final_x[0] = x[0]; r.final_x[1] = x[1];
+	return r;
+}
+
+static bench_result run_bench_trn(float x0, float x1)
+{
+	int n = 2;
+	float x[2] = {x0, x1};
+	float fcost, grad[2];
+	optim_type opt;
+	optFlag flag;
+	bench_result r;
+
+	memset(&opt, 0, sizeof(optim_type));
+	opt.niter_max = 10000;
+	opt.conv = 1e-8f;
+	opt.print_flag = 0;
+	opt.niter_max_CG = 5;
+
+	rosenbrock(x, &fcost, grad);
+	flag = OPT_INIT;
+	while (flag != OPT_CONV && flag != OPT_FAIL) {
+		trn_run(n, x, fcost, grad, &opt, &flag);
+		if (flag == OPT_HESS) rosenbrock_hessian_vec(x, opt.d, opt.Hd);
+		else if (flag == OPT_GRAD || flag == OPT_NSTE) rosenbrock(x, &fcost, grad);
+	}
+
+	r.name = "TRN";
+	r.converged = (flag == OPT_CONV);
+	r.iters = opt.cpt_iter;
+	r.ngrad = opt.nfwd_pb;
+	r.nhess = opt.nhess;
+	r.final_cost = fcost;
+	r.final_x[0] = x[0]; r.final_x[1] = x[1];
+	return r;
+}
+
+static bench_result run_bench_enriched(float x0, float x1)
+{
+	int n = 2;
+	float x[2] = {x0, x1};
+	float fcost, grad[2];
+	optim_type opt;
+	optFlag flag;
+	bench_result r;
+
+	memset(&opt, 0, sizeof(optim_type));
+	opt.niter_max = 10000;
+	opt.conv = 1e-8f;
+	opt.print_flag = 0;
+	opt.l = 20;
+	opt.enr_l = 20;
+	opt.enr_maxcg = 5;
+
+	rosenbrock(x, &fcost, grad);
+	flag = OPT_INIT;
+	while (flag != OPT_CONV && flag != OPT_FAIL) {
+		enriched_run(n, x, fcost, grad, &opt, &flag);
+		if (flag == OPT_HESS) rosenbrock_hessian_vec(x, opt.d, opt.Hd);
+		else if (flag == OPT_GRAD || flag == OPT_NSTE) rosenbrock(x, &fcost, grad);
+	}
+
+	r.name = "Enriched";
+	r.converged = (flag == OPT_CONV);
+	r.iters = opt.cpt_iter;
+	r.ngrad = opt.nfwd_pb;
+	r.nhess = opt.nhess;
+	r.final_cost = fcost;
+	r.final_x[0] = x[0]; r.final_x[1] = x[1];
+	return r;
+}
+
+static void run_comparison(float x0, float x1)
+{
+	float fcost, grad[2], x[2] = {x0, x1};
+	rosenbrock(x, &fcost, grad);
+
+	printf("================================================================\n");
+	printf("  Rosenbrock f(x)=(1-x)^2+100(y-x^2)^2\n");
+	printf("  Start: (%.1f, %.1f)  f0=%.2e  conv=1e-8\n", x0, x1, fcost);
+	printf("================================================================\n");
+	printf("  %-12s %6s %6s %6s %10s %10s\n",
+	       "Method", "Iter", "Grads", "Hess", "Final cost", "Status");
+	printf("  %-12s %6s %6s %6s %10s %10s\n",
+	       "------", "----", "-----", "----", "----------", "------");
+
+	bench_result results[4];
+	results[0] = run_bench_pnlcg(x0, x1);
+	results[1] = run_bench_lbfgs(x0, x1);
+	results[2] = run_bench_trn(x0, x1);
+	results[3] = run_bench_enriched(x0, x1);
+
+	for (int i = 0; i < 4; i++) {
+		printf("  %-12s %6d %6d %6d %10.2e %10s\n",
+		       results[i].name,
+		       results[i].iters,
+		       results[i].ngrad,
+		       results[i].nhess,
+		       results[i].final_cost,
+		       results[i].converged ? "CONV" : "FAIL");
+	}
+	printf("================================================================\n");
+}
+
+
 int main(void)
 {
 	int nfail = 0;
@@ -389,12 +623,19 @@ int main(void)
 	nfail += test_pnlcg();
 	nfail += test_plbfgs();
 	nfail += test_trn();
+	nfail += test_enriched();
 
 	printf("================================\n");
 	if (nfail == 0)
 		printf("All tests PASSED\n");
 	else
 		printf("%d test(s) FAILED\n", nfail);
+
+	/* Comparison benchmarks from multiple starting points */
+	printf("\n\n");
+	run_comparison(-1.2f, 1.0f);
+	printf("\n");
+	run_comparison(-5.0f, 5.0f);
 
 	return nfail;
 }

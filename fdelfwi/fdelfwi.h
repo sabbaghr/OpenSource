@@ -264,10 +264,56 @@ void extractModelVector(float *x, modPar *mod, bndPar *bnd, int param);
 void injectModelVector(float *x, modPar *mod, bndPar *bnd, int param);
 void extractGradientVector(float *g, float *grad1, float *grad2, float *grad3,
                            modPar *mod, bndPar *bnd, int param);
+void perturbFDcoefficients(modPar *mod, bndPar *bnd,
+                           float *dpert, int param,
+                           float *delta_rox, float *delta_roz,
+                           float *delta_l2m, float *delta_lam,
+                           float *delta_mul);
+
+/* --- born_vsrc.c: Virtual source injection for Born/Hessian-vector --- */
+void inject_born_vsrc_vel(modPar *mod,
+                          float *txx_fwd, float *tzz_fwd, float *txz_fwd,
+                          float *delta_rox, float *delta_roz,
+                          float *born_vx, float *born_vz);
+void inject_born_vsrc_stress(modPar *mod, bndPar *bnd,
+                             float *vx_fwd, float *vz_fwd,
+                             float *delta_l2m, float *delta_lam,
+                             float *delta_mul,
+                             float *born_txx, float *born_tzz,
+                             float *born_txz);
+
+/* --- born_shot.c: Forward Born propagation (J * dm) --- */
+int born_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
+              recPar *rec,
+              int ixsrc, int izsrc, float **src_nwav,
+              checkpointPar *chk,
+              float *delta_rox, float *delta_roz,
+              float *delta_l2m, float *delta_lam, float *delta_mul,
+              const char *file_born,
+              int ishot, int nshots, int fileno,
+              int verbose);
+
+/* --- hess_shot.c: Gauss-Newton Hessian-vector product (J^T J dm) --- */
+int hess_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
+              recPar *rec,
+              int ixsrc, int izsrc, float **src_nwav,
+              checkpointPar *chk,
+              float *delta_rox, float *delta_roz,
+              float *delta_l2m, float *delta_lam, float *delta_mul,
+              const char *file_born, const char *comp_str,
+              int ishot, int nshots, int fileno,
+              int res_taper,
+              float *hd1, float *hd2, float *hd3,
+              int param, int verbose);
 
 /* --- fwi_gradient.c: Gradient kernels --- */
 void convertGradientToVelocity(float *grad1, float *grad2, float *grad3,
                                float *cp, float *cs, float *rho, size_t sizem);
+void accumGradient_rho_Dsig(modPar *mod, bndPar *bnd,
+                            float *fwd_txx, float *fwd_tzz, float *fwd_txz,
+                            wflPar *wfl_adj,
+                            float dt,
+                            float *grad_rho);
 
 
 #if __STDC_VERSION__ >= 199901L

@@ -62,6 +62,11 @@ void accumGradient(modPar *mod, bndPar *bnd,
 void convertGradientToVelocity(float *grad1, float *grad2, float *grad3,
                                float *cp, float *cs, float *rho,
                                size_t sizem);
+void accumGradient_rho_Dsig(modPar *mod, bndPar *bnd,
+                            float *fwd_txx, float *fwd_tzz, float *fwd_txz,
+                            wflPar *wfl_adj,
+                            float dt,
+                            float *grad_rho);
 
 
 /***********************************************************************
@@ -180,6 +185,7 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 {
 	wflPar wfl_fwd, wfl_adj;
 	float *buf_vx, *buf_vz;
+	float *buf_txx, *buf_tzz, *buf_txz;     /* Forward stress buffer for D_σ density gradient */
 	float *grad_lam, *grad_muu, *grad_rho;  /* Internal Lamé gradient pointers */
 	int k, j, it, seg_start, seg_end, nsteps, max_nsteps;
 	size_t sizem;
@@ -256,10 +262,71 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 	if (!buf_vx || !buf_vz)
 		verr("adj_shot: Cannot allocate forward buffer (%d steps x %zu)", max_nsteps, sizem);
 
+	/* Stress buffer for exact D_σ density gradient (eliminates source
+	 * injection contamination in the dv/dt approximation).
+	 * Stores σ at each forward time step so that during the backward
+	 * pass we can compute D_σ(σ^{j-1}) directly. */
+	buf_txx = buf_tzz = buf_txz = NULL;
+	if (mod->ischeme > 2 && grad3) {
+		buf_txx = (float *)malloc((size_t)max_nsteps * sizem * sizeof(float));
+		buf_tzz = (float *)malloc((size_t)max_nsteps * sizem * sizeof(float));
+		buf_txz = (float *)malloc((size_t)max_nsteps * sizem * sizeof(float));
+		if (!buf_txx || !buf_tzz || !buf_txz)
+			verr("adj_shot: Cannot allocate stress buffer (%d steps x %zu)", max_nsteps, sizem);
+	}
+
+	/* ------------------------------------------------------------ */
+	/* Pre-pass: compute end-of-segment forward stress for j=0      */
+	/* density gradient at segment boundaries.                       */
+	/*                                                               */
+	/* born_shot injects density virtual source at j=0 of segment k */
+	/* using forward stress from the END of segment k-1 (saved_txx).*/
+	/* The adjoint (accumGradient_rho_Dsig) must use the same stress */
+	/* at j=0.  Since we process segments backward (k=nsnap-1 to 0),*/
+	/* the end-of-segment-(k-1) stress is not available when we      */
+	/* reach j=0 of segment k.  So we pre-compute it here.          */
+	/*                                                               */
+	/* seg_end_txx[k] = forward stress at END of segment k           */
+	/* Used for j=0 of segment k+1.  k=0,j=0 uses zero (IC).       */
+	/* ------------------------------------------------------------ */
+	float *seg_end_txx = NULL, *seg_end_tzz = NULL, *seg_end_txz = NULL;
+	if (buf_txx && chk->nsnap > 1) {
+		size_t seg_buf_size = (size_t)(chk->nsnap - 1) * sizem;
+		seg_end_txx = (float *)calloc(seg_buf_size, sizeof(float));
+		seg_end_tzz = (float *)calloc(seg_buf_size, sizeof(float));
+		seg_end_txz = (float *)calloc(seg_buf_size, sizeof(float));
+		if (!seg_end_txx || !seg_end_tzz || !seg_end_txz)
+			verr("adj_shot: Cannot allocate seg_end stress buffer");
+
+		for (k = 0; k < chk->nsnap - 1; k++) {
+			seg_start = chk->delay + k * chk->skipdt;
+			seg_end   = chk->delay + (k + 1) * chk->skipdt;
+			nsteps    = seg_end - seg_start;
+
+			readCheckpoint(chk, k, &wfl_fwd);
+			for (j = 1; j < nsteps; j++) {
+				it = seg_start + j;
+#pragma omp parallel default(shared)
+{
+				callKernel(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav, &wfl_fwd, verbose);
+}
+			}
+			memcpy(seg_end_txx + (size_t)k * sizem, wfl_fwd.txx, sizem * sizeof(float));
+			memcpy(seg_end_tzz + (size_t)k * sizem, wfl_fwd.tzz, sizem * sizeof(float));
+			memcpy(seg_end_txz + (size_t)k * sizem, wfl_fwd.txz, sizem * sizeof(float));
+		}
+
+		if (verbose)
+			vmess("adj_shot: Pre-pass computed %d end-of-segment stresses for density j=0",
+				chk->nsnap - 1);
+	}
+
 	if (verbose) {
+		float buf_mb = (buf_txx ? 5.0f : 2.0f) * max_nsteps * sizem * sizeof(float) / (1024.0*1024.0);
+		if (seg_end_txx)
+			buf_mb += 3.0f * (chk->nsnap - 1) * sizem * sizeof(float) / (1024.0*1024.0);
 		vmess("adj_shot: %d segments, max_nsteps=%d, buffer=%.1f MB",
-			chk->nsnap, max_nsteps,
-			2.0 * max_nsteps * sizem * sizeof(float) / (1024.0*1024.0));
+			chk->nsnap, max_nsteps, buf_mb);
 		t0_wall = wallclock_time();
 	}
 
@@ -299,6 +366,11 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 		/* Store checkpoint state as buf[0] */
 		memcpy(buf_vx, wfl_fwd.vx, sizem * sizeof(float));
 		memcpy(buf_vz, wfl_fwd.vz, sizem * sizeof(float));
+		if (buf_txx) {
+			memcpy(buf_txx, wfl_fwd.txx, sizem * sizeof(float));
+			memcpy(buf_tzz, wfl_fwd.tzz, sizem * sizeof(float));
+			memcpy(buf_txz, wfl_fwd.txz, sizem * sizeof(float));
+		}
 
 		/* Re-propagate forward through rest of segment */
 		for (j = 1; j < nsteps; j++) {
@@ -309,6 +381,11 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 }
 			memcpy(buf_vx + (size_t)j * sizem, wfl_fwd.vx, sizem * sizeof(float));
 			memcpy(buf_vz + (size_t)j * sizem, wfl_fwd.vz, sizem * sizeof(float));
+			if (buf_txx) {
+				memcpy(buf_txx + (size_t)j * sizem, wfl_fwd.txx, sizem * sizeof(float));
+				memcpy(buf_tzz + (size_t)j * sizem, wfl_fwd.tzz, sizem * sizeof(float));
+				memcpy(buf_txz + (size_t)j * sizem, wfl_fwd.txz, sizem * sizeof(float));
+			}
 		}
 
 		/* ---- 4b. Adjoint backward through segment ---- */
@@ -342,8 +419,34 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			 * modify ψ_v, so ψ_v after callAdjKernel = ψ_v_mid
 			 * (after Phase A1 + velocity source injection), which is
 			 * the correct multiplier for the F1 (velocity update).
-			 * For j=0, we don't have v_prev, so pass NULL to skip. */
-			{
+			 *
+			 * Uses D_σ(stress) directly instead of dv/dt to avoid
+			 * source injection contamination at the shot point.
+			 * For step j, the density virtual source uses σ^{j-1}
+			 * (stress BEFORE step seg_start+j = buf_stress[j-1]).
+			 * For j=0 at k>0: uses pre-computed end-of-segment-(k-1)
+			 * stress from the pre-pass.
+			 * For j=0 at k=0: zero IC → zero contribution, skip. */
+			if (buf_txx && j > 0) {
+				accumGradient_rho_Dsig(mod, bnd,
+					buf_txx + (size_t)(j-1) * sizem,
+					buf_tzz + (size_t)(j-1) * sizem,
+					buf_txz + (size_t)(j-1) * sizem,
+					&wfl_adj, dt,
+					grad_rho);
+			}
+			else if (seg_end_txx && j == 0 && k > 0) {
+				/* At j=0 of segment k>0: use end-of-segment-(k-1) stress.
+				 * Matches born_shot's saved_txx at segment boundaries. */
+				accumGradient_rho_Dsig(mod, bnd,
+					seg_end_txx + (size_t)(k-1) * sizem,
+					seg_end_tzz + (size_t)(k-1) * sizem,
+					seg_end_txz + (size_t)(k-1) * sizem,
+					&wfl_adj, dt,
+					grad_rho);
+			}
+			else if (!buf_txx && grad_rho) {
+				/* Fallback to dv/dt for acoustic (no stress buffers) */
 				float *vx_prev = (j > 0) ? buf_vx + (size_t)(j-1) * sizem : NULL;
 				float *vz_prev = (j > 0) ? buf_vz + (size_t)(j-1) * sizem : NULL;
 
@@ -404,6 +507,12 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 	/* ------------------------------------------------------------ */
 	free(buf_vx);
 	free(buf_vz);
+	if (buf_txx) free(buf_txx);
+	if (buf_tzz) free(buf_tzz);
+	if (buf_txz) free(buf_txz);
+	if (seg_end_txx) free(seg_end_txx);
+	if (seg_end_tzz) free(seg_end_tzz);
+	if (seg_end_txz) free(seg_end_txz);
 	free(wfl_fwd.vx); free(wfl_fwd.vz); free(wfl_fwd.tzz);
 	if (wfl_fwd.txx) free(wfl_fwd.txx);
 	if (wfl_fwd.txz) free(wfl_fwd.txz);

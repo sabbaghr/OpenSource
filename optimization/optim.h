@@ -34,7 +34,8 @@ typedef enum {
 	ALG_LBFGS,   /* Limited-memory BFGS */
 	ALG_PLBFGS,  /* Preconditioned L-BFGS */
 	ALG_PNLCG,  /* Preconditioned nonlinear conjugate gradient (Dai-Yuan) */
-	ALG_TRN      /* Truncated Newton */
+	ALG_TRN,     /* Truncated Newton */
+	ALG_ENRICHED /* Enriched method (L-BFGS + TN hybrid, Morales & Nocedal 2002) */
 } optAlg;
 
 /* Internal linesearch state (replaces Fortran CHARACTER*8 task) */
@@ -128,6 +129,18 @@ typedef struct {
 	float  *eisenvect;      /* work vector for forcing term [n] */
 	/* descent_prev is shared with PNLCG */
 
+	/* Enriched method state (Morales & Nocedal 2002) */
+	int     enr_method;     /* 0=L-BFGS phase, 1=HFN (TN) phase */
+	int     enr_l;          /* L-BFGS cycle length (dynamically adjusted) */
+	int     enr_t;          /* HFN cycle length (dynamically adjusted) */
+	int     enr_k;          /* step counter within current cycle */
+	int     enr_profit;     /* consecutive profitable HFN steps */
+	int     enr_force2;     /* force at least 2 HFN iterations */
+	int     enr_first;      /* first time entering HFN (startup: start with TRN) */
+	int     enr_maxcg;      /* max CG iterations for current HFN cycle */
+	trnComm enr_comm;       /* internal comm state (DESC=CG or NSTE=linesearch) */
+	float  *enr_precond_z;  /* preconditioner workspace [n] */
+
 	/* Bound constraints */
 	int     bound;          /* 0=off, 1=on */
 	float   threshold;      /* bound tolerance (default 0) */
@@ -164,6 +177,13 @@ void trn_run(int n, float *x, float fcost, float *grad,
 void steepest_descent_run(int n, float *x, float fcost, float *grad,
                           optim_type *opt, optFlag *flag);
 
+/* Enriched method: L-BFGS + TN hybrid (reverse communication).
+ * Starts with TN to seed L-BFGS buffer, switches to L-BFGS as workhorse,
+ * dynamically switches back to TN when L-BFGS stalls.
+ * Returns OPT_HESS when Hessian-vector product is needed (same as TRN). */
+void enriched_run(int n, float *x, float fcost, float *grad,
+                  optim_type *opt, optFlag *flag);
+
 /* Free all internally allocated arrays. Called automatically on CONV/FAIL,
  * but can be called manually for early termination. */
 void optim_finalize(optim_type *opt);
@@ -193,9 +213,14 @@ int optim_test_conv(optim_type *opt, float fcost);
 void optim_print_info(int n, const char *tag, optim_type *opt,
                       float fcost, optFlag flag);
 
-/* L-BFGS history management (shared between lbfgs and plbfgs) */
+/* L-BFGS history management (shared between lbfgs, plbfgs, enriched) */
 void optim_save_lbfgs(int n, optim_type *opt, float *x, float *grad);
 void optim_update_lbfgs(int n, optim_type *opt, float *x, float *grad);
+
+/* L-BFGS two-loop recursion: output = -H(m) * input.
+ * Used by lbfgs for descent direction and by enriched as CG preconditioner. */
+void optim_lbfgs_apply(int n, optim_type *opt, const float *input,
+                        float *output);
 
 /* TRN-specific print info */
 void print_info_trn(int n, optim_type *opt, float fcost, optFlag flag);
