@@ -66,6 +66,7 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              int ixsrc, int izsrc, float **src_nwav,
              checkpointPar *chk, snaPar *sna,
              float *grad1, float *grad2, float *grad3,
+             float *illum_lam, float *illum_muu, float *illum_rho,
              int param, int verbose);
 
 int writesufile(char *filename, float *data, size_t n1, size_t n2,
@@ -467,7 +468,7 @@ int main(int argc, char **argv)
 
 		adj_shot(&mod, &src, &wav, &bnd, &rec, &adj,
 			ixsrc, izsrc, src_nwav, &chk, &sna,
-			grad1, grad2, grad3, param, verbose);
+			grad1, grad2, grad3, NULL, NULL, NULL, param, verbose);
 
 		sna.file_snap = orig_snap_name;
 	}

@@ -67,6 +67,7 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              int ixsrc, int izsrc, float **src_nwav,
              checkpointPar *chk, snaPar *sna,
              float *grad1, float *grad2, float *grad3,
+             float *illum_lam, float *illum_muu, float *illum_rho,
              int param, int verbose);
 
 void convertGradientToVelocity(float *grad1, float *grad2, float *grad3,
@@ -307,7 +308,7 @@ int main(int argc, char **argv)
 		/* param=1: returns Lame gradients (g_lambda, g_mu, g_rho_direct) */
 		adj_shot(&mod, &src, &wav, &bnd, &rec, &adj,
 			ixsrc, izsrc, src_nwav, &chk, &sna_adj,
-			grad_vp, grad_vs, grad_rho, 1, verbose);
+			grad_vp, grad_vs, grad_rho, NULL, NULL, NULL, 1, verbose);
 	}
 
 	/* Save Lame gradients before chain rule conversion (for diagnostics) */

@@ -81,6 +81,7 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              int ixsrc, int izsrc, float **src_nwav,
              checkpointPar *chk, snaPar *sna,
              float *grad1, float *grad2, float *grad3,
+             float *illum_lam, float *illum_muu, float *illum_rho,
              int param, int verbose);
 
 int writesufile(char *filename, float *data, size_t n1, size_t n2,
@@ -115,9 +116,9 @@ char *sdoc[] = {
 " Same parameters as fwi_driver, plus:",
 "   niter=20           max optimization iterations",
 "   conv=1e-6          convergence tolerance (fcost/f0)",
-"   algorithm=1        0=SD, 1=LBFGS, 2=PLBFGS, 3=PNLCG, 4=TRN, 5=ENRICHED",
-"   niter_cg=5         max inner CG iterations per TRN/Enriched step (algorithm=4,5)",
-"   enr_l=20           L-BFGS cycle length for Enriched method (algorithm=5)",
+"   algorithm=1        0=SD, 1=LBFGS, 2=PLBFGS, 3=PNLCG, 4=TRN, 5=ENRICHED, 6=PTRN, 7=PENRICHED",
+"   niter_cg=5         max inner CG iterations per TRN/Enriched step (algorithm=4,5,7)",
+"   enr_l=20           L-BFGS cycle length for Enriched method (algorithm=5,7)",
 "   lbfgs_mem=20       L-BFGS history pairs",
 "   nls_max=20         max linesearch iterations",
 "   vp_min=,vp_max=    Vp bounds (m/s, optional)",
@@ -126,6 +127,113 @@ char *sdoc[] = {
 "   write_iter=1       write model every N iterations",
 " ",
 NULL};
+
+
+/*--------------------------------------------------------------------
+ * convertIllumToVelocity -- Convert illumination Lamé → velocity space.
+ *
+ * Transforms illumination arrays in-place using chain rule Jacobian:
+ *   H_Vp = (2ρVp)² · H_λ
+ *   H_Vs = (2ρVs)² · (4·H_λ + H_μ)
+ *   H_ρ  = (Vp²-2Vs²)² · H_λ + Vs⁴ · H_μ + H_ρ_direct
+ *--------------------------------------------------------------------*/
+static void convertIllumToVelocity(float *illum_lam, float *illum_muu,
+                                   float *illum_rho,
+                                   modPar *mod, size_t sizem)
+{
+	int i;
+	for (i = 0; i < (int)sizem; i++) {
+		float rho_val = mod->rho[i];
+		float vp  = mod->cp[i];
+		float vs  = mod->cs[i];
+		float vp2 = vp * vp;
+		float vs2 = vs * vs;
+
+		float h_lam = illum_lam[i];
+		float h_muu = illum_muu ? illum_muu[i] : 0.0f;
+		float h_rho = illum_rho[i];
+
+		illum_lam[i] = (2.0f * rho_val * vp) * (2.0f * rho_val * vp) * h_lam;
+		if (illum_muu)
+			illum_muu[i] = (2.0f * rho_val * vs) * (2.0f * rho_val * vs)
+			             * (4.0f * h_lam + h_muu);
+		float dv = vp2 - 2.0f * vs2;
+		illum_rho[i] = dv * dv * h_lam + vs2 * vs2 * h_muu + h_rho;
+	}
+}
+
+
+/*--------------------------------------------------------------------
+ * stabilizePrecondVector -- Add eps*max stabilization per parameter.
+ *
+ * Flat vector layout: [param1 | param2 | param3]
+ * Each segment of nmodel elements gets its own eps = precond_eps*max.
+ *--------------------------------------------------------------------*/
+static void stabilizePrecondVector(float *pv, int nvec, int nmodel,
+                                   int nparam, float precond_eps,
+                                   int param, int mpi_rank)
+{
+	int p, i;
+	const char *lame_names[] = {"H_lam", "H_mu", "H_rho"};
+	const char *vel_names[]  = {"H_Vp", "H_Vs", "H_rho"};
+	const char **names = (param == 2) ? vel_names : lame_names;
+	for (p = 0; p < nparam; p++) {
+		int off = p * nmodel;
+		float maxval = 0.0f;
+		for (i = 0; i < nmodel; i++)
+			if (pv[off + i] > maxval) maxval = pv[off + i];
+		float eps = precond_eps * maxval;
+		for (i = 0; i < nmodel; i++)
+			pv[off + i] += eps;
+		if (mpi_rank == 0)
+			vmess("Preconditioner: %s_max=%.4e  eps=%.4e", names[p], maxval, eps);
+	}
+}
+
+
+/*--------------------------------------------------------------------
+ * extractPrecondAndApply -- Extract illumination to flat vector and
+ * apply preconditioner for preconditioned algorithms only.
+ *
+ * For all algorithms: extracts illumination to precond_vec.
+ * For PLBFGS/PNLCG/PTRN/PEnriched: also computes grad_preco_vec.
+ * For SD/LBFGS/TRN/Enriched: precond_vec is extracted but NOT applied
+ * to the gradient (these algorithms have no native preconditioner mechanism).
+ *--------------------------------------------------------------------*/
+static void extractPrecondAndApply(
+	float *illum_lam, float *illum_muu, float *illum_rho,
+	float *precond_vec, float *grad_vec, float *grad_preco_vec,
+	modPar *mod, bndPar *bnd, float precond_eps,
+	int param, int elastic, size_t sizem,
+	int nvec, int nmodel, int nparam,
+	int algorithm, int mpi_rank)
+{
+	int i;
+
+	if (!illum_lam) return;
+
+	/* Convert illumination to velocity space if needed */
+	if (param == 2 && elastic)
+		convertIllumToVelocity(illum_lam, illum_muu, illum_rho, mod, sizem);
+
+	/* Extract illumination to flat vector (param=1: no chain rule,
+	 * already converted to velocity space if needed) */
+	extractGradientVector(precond_vec, illum_lam, illum_muu, illum_rho,
+	                      mod, bnd, 1);
+
+	/* Add epsilon stabilization per parameter segment */
+	stabilizePrecondVector(precond_vec, nvec, nmodel, nparam, precond_eps,
+	                       param, mpi_rank);
+
+	/* Only apply for preconditioned algorithms that have native mechanisms */
+	if (grad_preco_vec &&
+	    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)) {
+		/* PLBFGS/PNLCG/PTRN/PEnriched: provide preconditioned gradient copy */
+		for (i = 0; i < nvec; i++)
+			grad_preco_vec[i] = grad_vec[i] / precond_vec[i];
+	}
+	/* SD/LBFGS/TRN/Enriched: no preconditioning applied to gradient */
+}
 
 
 /*--------------------------------------------------------------------
@@ -301,6 +409,7 @@ static float compute_fwi_gradient(
 	const char *file_obs, const char *comp_str,
 	int res_taper, int param,
 	float *grad1, float *grad2, float *grad3,
+	float *illum_lam, float *illum_muu, float *illum_rho,
 	const char *chk_base, int chk_skipdt,
 	int mpi_rank, int mpi_size,
 	int keep_checkpoints,
@@ -314,10 +423,13 @@ static float compute_fwi_gradient(
 	checkpointPar chk;
 	adjSrcPar adj;
 
-	/* Zero gradient arrays */
+	/* Zero gradient and illumination arrays */
 	memset(grad1, 0, sizem * sizeof(float));
 	memset(grad3, 0, sizem * sizeof(float));
 	if (grad2) memset(grad2, 0, sizem * sizeof(float));
+	if (illum_lam) memset(illum_lam, 0, sizem * sizeof(float));
+	if (illum_muu) memset(illum_muu, 0, sizem * sizeof(float));
+	if (illum_rho) memset(illum_rho, 0, sizem * sizeof(float));
 
 	/* Determine shots for this rank */
 	int my_nshots = 0;
@@ -412,7 +524,8 @@ static float compute_fwi_gradient(
 			/* Step 4: Adjoint backpropagation */
 			adj_shot(mod, src, wav, bnd, rec, &adj,
 			         ixsrc, izsrc, src_nwav, &chk, NULL,
-			         shot_grad1, shot_grad2, shot_grad3, param, 0);
+			         shot_grad1, shot_grad2, shot_grad3,
+			         illum_lam, illum_muu, illum_rho, param, 0);
 
 			freeResidual(&adj);
 		}
@@ -471,6 +584,18 @@ static float compute_fwi_gradient(
 
 		free(tmp1); free(tmp3);
 		if (tmp2) free(tmp2);
+
+		/* Reduce illumination across ranks */
+		if (illum_lam) {
+			float *tmp_ill = (float *)calloc(sizem, sizeof(float));
+			MPI_Allreduce(illum_lam, tmp_ill, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+			memcpy(illum_lam, tmp_ill, sizem * sizeof(float));
+			MPI_Allreduce(illum_muu, tmp_ill, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+			memcpy(illum_muu, tmp_ill, sizem * sizeof(float));
+			MPI_Allreduce(illum_rho, tmp_ill, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+			memcpy(illum_rho, tmp_ill, sizem * sizeof(float));
+			free(tmp_ill);
+		}
 
 		MPI_Allreduce(&total_misfit, &global_misfit, 1, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
 
@@ -850,7 +975,8 @@ int main(int argc, char **argv)
 
 	/* Optimization parameters */
 	int    niter, algorithm, lbfgs_mem, nls_max, write_iter, niter_cg;
-	float  conv;
+	int    use_precond;
+	float  conv, precond_eps;
 
 #ifdef USE_MPI
 	MPI_Init(&argc, &argv);
@@ -874,7 +1000,8 @@ int main(int argc, char **argv)
 	if (!getparstring("file_grad", &file_grad)) file_grad = "gradient";
 	if (!getparstring("comp", &comp_str)) comp_str = "_rvz";
 	if (!getparint("res_taper", &res_taper)) res_taper = 100;
-	if (!getparint("grad_taper", &grad_taper)) grad_taper = 5;
+	int grad_taper_set = getparint("grad_taper", &grad_taper);
+	if (!grad_taper_set) grad_taper = 5;
 	if (!getparint("param", &param)) param = 1;
 	if (param < 1 || param > 2)
 		verr("param must be 1 (Lame) or 2 (velocity)");
@@ -887,9 +1014,20 @@ int main(int argc, char **argv)
 	if (!getparint("nls_max", &nls_max)) nls_max = 20;
 	if (!getparint("write_iter", &write_iter)) write_iter = 1;
 	if (!getparint("niter_cg", &niter_cg)) niter_cg = 5;
+	if (!getparint("precond", &use_precond)) use_precond = 0;
+	if (!getparfloat("precond_eps", &precond_eps)) precond_eps = 1e-3f;
 
-	if (algorithm < 0 || algorithm > 5)
-		verr("algorithm must be 0 (SD), 1 (LBFGS), 2 (PLBFGS), 3 (PNLCG), 4 (TRN), or 5 (ENRICHED)");
+	/* When illumination preconditioner is active AND algorithm uses it
+	 * natively, disable gradient taper — the preconditioner handles
+	 * the source singularity. Only preconditioned algorithms (2,3,6,7)
+	 * actually apply P^{-1}, so keep taper for unpreconditioned ones.
+	 * User can still force taper with explicit grad_taper= on command line. */
+	if (use_precond && !grad_taper_set &&
+	    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7))
+		grad_taper = 0;
+
+	if (algorithm < 0 || algorithm > 7)
+		verr("algorithm must be 0-7: SD, LBFGS, PLBFGS, PNLCG, TRN, ENRICHED, PTRN, PENRICHED");
 
 	/* ============================================================ */
 	/* Standard setup (same as fwi_driver.c)                        */
@@ -973,14 +1111,26 @@ int main(int argc, char **argv)
 		vmess("Algorithm: %s", alg_names[algorithm]);
 		vmess("Max iterations: %d", niter);
 		vmess("Convergence tolerance: %.2e", conv);
-		if (algorithm == 1 || algorithm == 2)
+		if (algorithm == 1 || algorithm == 2 || algorithm == 7)
 			vmess("L-BFGS memory: %d", lbfgs_mem);
-		if (algorithm == 4 || algorithm == 5)
+		if (algorithm == 4 || algorithm == 5 || algorithm == 6 || algorithm == 7)
 			vmess("Max CG iterations: %d", niter_cg);
-		if (algorithm == 5) {
+		if (algorithm == 5 || algorithm == 7) {
 			int enr_l_val;
 			if (!getparint("enr_l", &enr_l_val)) enr_l_val = 20;
 			vmess("Enriched L-BFGS cycle: %d", enr_l_val);
+		}
+		if (use_precond) {
+			int is_precond_alg = (algorithm == 2 || algorithm == 3 ||
+			                      algorithm == 6 || algorithm == 7);
+			vmess("Preconditioner: source illumination (eps=%.2e)%s",
+			      precond_eps,
+			      is_precond_alg ? "" : " (not used: algorithm has no native mechanism)");
+			vmess("Gradient taper: %s (grad_taper=%d)",
+			      grad_taper > 0 ? "enabled" : "disabled (preconditioner active)",
+			      grad_taper);
+		} else {
+			vmess("Gradient taper: %d grid points", grad_taper);
 		}
 		vmess("*******************************************");
 	}
@@ -1002,6 +1152,18 @@ int main(int argc, char **argv)
 	float *grad2 = NULL;
 	if (elastic) grad2 = (float *)calloc(sizem, sizeof(float));
 
+	/* Parameter-specific source illumination for preconditioning */
+	float *illum_lam = NULL, *illum_muu = NULL, *illum_rho = NULL;
+	float *precond_vec = NULL, *grad_preco_vec = NULL;
+	if (use_precond) {
+		illum_lam = (float *)calloc(sizem, sizeof(float));
+		illum_rho = (float *)calloc(sizem, sizeof(float));
+		if (elastic) illum_muu = (float *)calloc(sizem, sizeof(float));
+		precond_vec = (float *)calloc(nvec, sizeof(float));
+		if (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)
+			grad_preco_vec = (float *)calloc(nvec, sizeof(float));
+	}
+
 	/* Extract initial model into optimizer vector */
 	extractModelVector(x, &mod, &bnd, param);
 
@@ -1021,7 +1183,7 @@ int main(int argc, char **argv)
 	opt.niter_max_CG = niter_cg;
 
 	/* Enriched-specific: L-BFGS cycle length and max CG */
-	if (algorithm == 5) {
+	if (algorithm == 5 || algorithm == 7) {
 		int enr_l_val;
 		if (!getparint("enr_l", &enr_l_val)) enr_l_val = 20;
 		opt.enr_l = enr_l_val;
@@ -1032,18 +1194,26 @@ int main(int argc, char **argv)
 	if (mpi_rank == 0)
 		setup_bounds(&opt, &mod, &bnd, param, nvec);
 
+	/* For TRN/Enriched: allocate d and Hd on ALL MPI ranks.
+	 * The optimizer init (rank 0 only) will re-allocate these,
+	 * but non-root ranks need valid buffers for MPI_Bcast. */
+	if (algorithm == 4 || algorithm == 5 || algorithm == 6 || algorithm == 7) {
+		opt.d  = (float *)calloc(nvec, sizeof(float));
+		opt.Hd = (float *)calloc(nvec, sizeof(float));
+	}
+
 	/* ============================================================ */
 	/* Initial gradient computation                                  */
 	/* ============================================================ */
 	if (mpi_rank == 0)
 		vmess("Computing initial gradient...");
 
-	int keep_chk = (algorithm == 4 || algorithm == 5) ? 1 : 0;
+	int keep_chk = (algorithm == 4 || algorithm == 5 || algorithm == 6 || algorithm == 7) ? 1 : 0;
 
 	float fcost = compute_fwi_gradient(
 		&mod, &src, &wav, &bnd, &rec, &sna, &shot, src_nwav,
 		file_obs, comp_str, res_taper, param,
-		grad1, grad2, grad3,
+		grad1, grad2, grad3, illum_lam, illum_muu, illum_rho,
 		chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk, verbose);
 
 	/* Taper gradient near source and receiver positions */
@@ -1057,23 +1227,25 @@ int main(int argc, char **argv)
 		taperGradientSrcRcv(grad3, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper);
 	}
 
-	/* Extract gradient to flat vector (only rank 0 needs it).
+	/* Extract gradient to flat vector, apply preconditioner.
 	 *
-	 * Following the SEISCOPE optimization toolbox convention, the
-	 * raw (unscaled) gradient is passed to all optimizers.  Each
-	 * algorithm handles scaling internally:
-	 *   - L-BFGS: two-loop recursion provides curvature scaling;
-	 *     we set an initial alpha heuristic to help the first step.
-	 *   - TRN/Enriched: CG solves H*d = -g with the true gradient
-	 *     norm, so Eisenstat-Walker stopping works correctly and
-	 *     alpha=1.0 gives the natural Newton step.
-	 * Normalizing the gradient would break the Eisenstat-Walker
-	 * criterion (||r|| <= eta * ||g|| becomes trivial when ||g||=1)
-	 * and corrupt the L-BFGS curvature pairs in Enriched mode. */
+	 * For PLBFGS/PNLCG: preconditioner is applied through the
+	 * optimizer's native mechanism (OPT_PREC / grad_preco), so
+	 * grad_vec stays raw and grad_preco_vec gets g/H.
+	 *
+	 * For SD/LBFGS/TRN/Enriched: grad_vec is pre-divided by H. */
 
 	if (mpi_rank == 0) {
 		extractGradientVector(grad_vec, grad1, grad2, grad3,
 		                      &mod, &bnd, param);
+
+		/* Apply illumination preconditioner in flat vector space */
+		extractPrecondAndApply(illum_lam, illum_muu, illum_rho,
+		                       precond_vec, grad_vec, grad_preco_vec,
+		                       &mod, &bnd, precond_eps,
+		                       param, elastic, sizem,
+		                       nvec, nmodel, nparam,
+		                       algorithm, mpi_rank);
 		vmess("Initial misfit: %.6e", fcost);
 
 		float gnorm = 0.0f;
@@ -1087,7 +1259,7 @@ int main(int argc, char **argv)
 			 * For SD/L-BFGS/CG the first descent direction is -g,
 			 * so alpha=1 with a large raw gradient can overshoot.
 			 * Use a heuristic: max model change = eps * max|x|. */
-			if (algorithm == 4 || algorithm == 5) {
+			if (algorithm == 4 || algorithm == 5 || algorithm == 6 || algorithm == 7) {
 				/* TRN/Enriched: alpha=1 is the natural Newton step */
 				opt.alpha = 1.0f;
 			} else {
@@ -1125,16 +1297,23 @@ int main(int argc, char **argv)
 				lbfgs_run(nvec, x, fcost, grad_vec, &opt, &flag);
 				break;
 			case 2:
-				plbfgs_run(nvec, x, fcost, grad_vec, grad_vec,
+				plbfgs_run(nvec, x, fcost, grad_vec,
+				           grad_preco_vec ? grad_preco_vec : grad_vec,
 				           &opt, &flag);
-				/* Identity preconditioner: skip OPT_PREC */
 				while (flag == OPT_PREC) {
-					plbfgs_run(nvec, x, fcost, grad_vec, grad_vec,
+					/* Apply illumination preconditioner to q_plb */
+					if (precond_vec) {
+						for (i = 0; i < nvec; i++)
+							opt.q_plb[i] /= precond_vec[i];
+					}
+					plbfgs_run(nvec, x, fcost, grad_vec,
+					           grad_preco_vec ? grad_preco_vec : grad_vec,
 					           &opt, &flag);
 				}
 				break;
 			case 3:
-				pnlcg_run(nvec, x, fcost, grad_vec, grad_vec,
+				pnlcg_run(nvec, x, fcost, grad_vec,
+				           grad_preco_vec ? grad_preco_vec : grad_vec,
 				           &opt, &flag);
 				break;
 			case 4:
@@ -1142,6 +1321,16 @@ int main(int argc, char **argv)
 				break;
 			case 5:
 				enriched_run(nvec, x, fcost, grad_vec, &opt, &flag);
+				break;
+			case 6:
+				ptrn_run(nvec, x, fcost, grad_vec,
+				         grad_preco_vec ? grad_preco_vec : grad_vec,
+				         &opt, &flag);
+				break;
+			case 7:
+				penriched_run(nvec, x, fcost, grad_vec,
+				              grad_preco_vec ? grad_preco_vec : grad_vec,
+				              &opt, &flag);
 				break;
 			}
 		}
@@ -1166,7 +1355,7 @@ int main(int argc, char **argv)
 			fcost = compute_fwi_gradient(
 				&mod, &src, &wav, &bnd, &rec, &sna, &shot, src_nwav,
 				file_obs, comp_str, res_taper, param,
-				grad1, grad2, grad3,
+				grad1, grad2, grad3, illum_lam, illum_muu, illum_rho,
 				chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk, verbose);
 
 			/* Taper gradient near source and receiver positions */
@@ -1180,11 +1369,17 @@ int main(int argc, char **argv)
 				taperGradientSrcRcv(grad3, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper);
 			}
 
-			/* Rank 0: extract raw gradient (no normalization,
-			 * matching SEISCOPE toolbox convention) */
+			/* Rank 0: extract gradient and apply preconditioner */
 			if (mpi_rank == 0) {
 				extractGradientVector(grad_vec, grad1, grad2, grad3,
 				                      &mod, &bnd, param);
+
+				extractPrecondAndApply(illum_lam, illum_muu, illum_rho,
+				                       precond_vec, grad_vec, grad_preco_vec,
+				                       &mod, &bnd, precond_eps,
+				                       param, elastic, sizem,
+				                       nvec, nmodel, nparam,
+				                       algorithm, mpi_rank);
 
 				/* NaN guard: if forward modeling went unstable,
 				 * set huge cost so linesearch rejects this step.
@@ -1231,6 +1426,38 @@ int main(int argc, char **argv)
 			MPI_Bcast(opt.Hd, nvec, MPI_FLOAT, 0, MPI_COMM_WORLD);
 #endif
 
+		} else if (flag == OPT_PREC && algorithm == 6) {
+			/* --- PTRN inner CG: apply preconditioner to residual --- */
+			if (mpi_rank == 0 && precond_vec) {
+				for (i = 0; i < nvec; i++)
+					opt.residual_preco[i] = opt.residual[i] / precond_vec[i];
+			}
+			if (mpi_rank == 0) {
+				ptrn_run(nvec, x, fcost, grad_vec,
+				         grad_preco_vec ? grad_preco_vec : grad_vec,
+				         &opt, &flag);
+			}
+#ifdef USE_MPI
+			MPI_Bcast(&flag, 1, MPI_INT, 0, MPI_COMM_WORLD);
+#endif
+			continue;
+
+		} else if (flag == OPT_PREC && algorithm == 7) {
+			/* --- PEnriched: apply P^{-1} to q_plb (L-BFGS H0 or CG precond) --- */
+			if (mpi_rank == 0 && precond_vec) {
+				for (i = 0; i < nvec; i++)
+					opt.q_plb[i] /= precond_vec[i];
+			}
+			if (mpi_rank == 0) {
+				penriched_run(nvec, x, fcost, grad_vec,
+				              grad_preco_vec ? grad_preco_vec : grad_vec,
+				              &opt, &flag);
+			}
+#ifdef USE_MPI
+			MPI_Bcast(&flag, 1, MPI_INT, 0, MPI_COMM_WORLD);
+#endif
+			continue;
+
 		} else if (flag == OPT_NSTE) {
 			/* --- New step accepted: write intermediate model --- */
 			opt_iter++;
@@ -1249,7 +1476,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Clean up any remaining TRN/Enriched checkpoints at termination */
-	if (algorithm == 4 || algorithm == 5)
+	if (algorithm == 4 || algorithm == 5 || algorithm == 6 || algorithm == 7)
 		clean_shot_checkpoints(&mod, &shot, chk_base, mpi_rank, mpi_size);
 
 	/* ============================================================ */
@@ -1334,6 +1561,8 @@ int main(int argc, char **argv)
 
 	free(x);
 	free(grad_vec);
+	if (precond_vec) free(precond_vec);
+	if (grad_preco_vec) free(grad_preco_vec);
 	free(grad1); free(grad3);
 	if (grad2) free(grad2);
 

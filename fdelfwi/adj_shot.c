@@ -58,7 +58,8 @@ void accumGradient(modPar *mod, bndPar *bnd,
                    float *fwd_vx_prev, float *fwd_vz_prev,
                    wflPar *wfl_adj,
                    float dt,
-                   float *grad_lam, float *grad_muu, float *grad_rho);
+                   float *grad_lam, float *grad_muu, float *grad_rho,
+                   float *illum_lam, float *illum_muu, float *illum_rho);
 void convertGradientToVelocity(float *grad1, float *grad2, float *grad3,
                                float *cp, float *cs, float *rho,
                                size_t sizem);
@@ -181,6 +182,7 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              int ixsrc, int izsrc, float **src_nwav,
              checkpointPar *chk, snaPar *sna,
              float *grad1, float *grad2, float *grad3,
+             float *illum_lam, float *illum_muu, float *illum_rho,
              int param, int verbose)
 {
 	wflPar wfl_fwd, wfl_adj;
@@ -396,13 +398,18 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			 * This is ψ^{n+1}_σ (adjoint stress at the output of
 			 * forward step n), which is the correct Lagrangian
 			 * multiplier for the F2 (stress update) constraint.
-			 * Pass NULL for density (accumulated after adjoint step). */
+			 * Pass NULL for density gradient (accumulated after adjoint
+			 * step via D_σ), but pass prev velocity for density
+			 * illumination (uses dv/dt approximation, which is fine
+			 * for an approximate Hessian diagonal). */
 			accumGradient(mod, bnd,
 				buf_vx + (size_t)j * sizem,
 				buf_vz + (size_t)j * sizem,
-				NULL, NULL,  /* no density here */
+				(j > 0) ? buf_vx + (size_t)(j-1) * sizem : NULL,
+				(j > 0) ? buf_vz + (size_t)(j-1) * sizem : NULL,
 				&wfl_adj, dt,
-				grad_lam, grad_muu, NULL);
+				grad_lam, grad_muu, NULL,
+				illum_lam, illum_muu, illum_rho);
 
 			/* Advance adjoint wavefield with multicomponent source injection.
 			 * The adjoint kernel injects force residuals (Fx,Fz) at the
@@ -455,7 +462,8 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 					buf_vz + (size_t)j * sizem,
 					vx_prev, vz_prev,
 					&wfl_adj, dt,
-					NULL, NULL, grad_rho);
+					NULL, NULL, grad_rho,
+					NULL, NULL, NULL);
 			}
 
 			/* Write adjoint wavefield snapshot if requested. */

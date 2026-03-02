@@ -55,6 +55,7 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              int ixsrc, int izsrc, float **src_nwav,
              checkpointPar *chk, snaPar *sna,
              float *grad1, float *grad2, float *grad3,
+             float *illum_lam, float *illum_muu, float *illum_rho,
              int param, int verbose);
 
 double wallclock_time(void);
@@ -331,7 +332,7 @@ int hess_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 	/* ============================================================ */
 	adj_shot(mod, src, wav, bnd, rec, &adj,
 	         ixsrc, izsrc, src_nwav, chk, NULL,
-	         hd1, hd2, hd3, param, verbose);
+	         hd1, hd2, hd3, NULL, NULL, NULL, param, verbose);
 
 	/* ============================================================ */
 	/* 5. Cleanup                                                    */

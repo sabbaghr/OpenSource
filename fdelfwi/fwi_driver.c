@@ -80,6 +80,7 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              int ixsrc, int izsrc, float **src_nwav,
              checkpointPar *chk, snaPar *sna,
              float *grad1, float *grad2, float *grad3,
+             float *illum_lam, float *illum_muu, float *illum_rho,
              int param, int verbose);
 
 int writesufile(char *filename, float *data, size_t n1, size_t n2,
@@ -528,7 +529,7 @@ int main(int argc, char **argv)
 
 			adj_shot(&mod, &src, &wav, &bnd, &rec, &adj,
 				ixsrc, izsrc, src_nwav, &chk, sna_adj_ptr,
-				shot_grad1, shot_grad2, shot_grad3, param, 0);
+				shot_grad1, shot_grad2, shot_grad3, NULL, NULL, NULL, param, 0);
 
 			freeResidual(&adj);
 		}

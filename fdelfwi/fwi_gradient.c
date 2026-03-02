@@ -45,7 +45,8 @@ void accumGradient(modPar *mod, bndPar *bnd,
                    float *fwd_vx_prev, float *fwd_vz_prev,
                    wflPar *wfl_adj,
                    float dt,
-                   float *grad_lam, float *grad_muu, float *grad_rho)
+                   float *grad_lam, float *grad_muu, float *grad_rho,
+                   float *illum_lam, float *illum_muu, float *illum_rho)
 {
 	int ix, iz, n1, nax;
 	int ibPx, iePx, ibPz, iePz;
@@ -174,10 +175,10 @@ void accumGradient(modPar *mod, bndPar *bnd,
 	 *
 	 * The D+x/D+z stencils are the same as in the forward stress update.
 	 * ================================================================ */
-	if (grad_lam) {
+	if (grad_lam || illum_lam) {
 		for (ix = ibPx; ix < iePx; ix++) {
 			for (iz = ibPz; iz < iePz; iz++) {
-				float dvxdx_f, dvzdz_f;
+				float dvxdx_f, dvzdz_f, div_f;
 
 				/* Forward velocity divergence at P grid (order-dependent) */
 				dvxdx_f = sdx*(c1*(fwd_vx[(ix+1)*n1+iz]-fwd_vx[ix*n1+iz])
@@ -193,8 +194,14 @@ void accumGradient(modPar *mod, bndPar *bnd,
 					dvzdz_f += sdz*c4*(fwd_vz[ix*n1+iz+4]-fwd_vz[ix*n1+iz-3]);
 				}
 
-				grad_lam[ix*n1+iz] += dt*(wfl_adj->txx[ix*n1+iz] + wfl_adj->tzz[ix*n1+iz])
-				                        *(dvxdx_f + dvzdz_f);
+				div_f = dvxdx_f + dvzdz_f;
+
+				if (grad_lam)
+					grad_lam[ix*n1+iz] += dt*(wfl_adj->txx[ix*n1+iz] + wfl_adj->tzz[ix*n1+iz])
+					                        * div_f;
+				/* H_λ = Σ (∇·v)² */
+				if (illum_lam)
+					illum_lam[ix*n1+iz] += div_f * div_f;
 			}
 		}
 	}
@@ -212,8 +219,10 @@ void accumGradient(modPar *mod, bndPar *bnd,
 	 *
 	 * No interpolation needed — each cross-correlation uses collocated fields.
 	 * ================================================================ */
-	if (grad_muu) {
-		/* --- Part 1: Normal-stress at P grid (same bounds as lambda) --- */
+	if (grad_muu || illum_muu) {
+		/* --- Part 1: Normal-stress at P grid (same bounds as lambda) ---
+		 * Gradient: g_μ += 2*(ψ_txx·dvxdx + ψ_tzz·dvzdz)
+		 * Illumination: H_μ += 4*(dvxdx² + dvzdz²)  [factor 2² from ∂l2m/∂μ=2] */
 		for (ix = ibPx; ix < iePx; ix++) {
 			for (iz = ibPz; iz < iePz; iz++) {
 				float dvxdx_f, dvzdz_f;
@@ -231,8 +240,12 @@ void accumGradient(modPar *mod, bndPar *bnd,
 					dvzdz_f += sdz*c4*(fwd_vz[ix*n1+iz+4]-fwd_vz[ix*n1+iz-3]);
 				}
 
-				grad_muu[ix*n1+iz] += dt*2.0f*(wfl_adj->txx[ix*n1+iz]*dvxdx_f
-				                              + wfl_adj->tzz[ix*n1+iz]*dvzdz_f);
+				if (grad_muu)
+					grad_muu[ix*n1+iz] += dt*2.0f*(wfl_adj->txx[ix*n1+iz]*dvxdx_f
+					                              + wfl_adj->tzz[ix*n1+iz]*dvzdz_f);
+				/* H_μ normal-stress part: (2*dvxdx)² + (2*dvzdz)² */
+				if (illum_muu)
+					illum_muu[ix*n1+iz] += 4.0f*(dvxdx_f*dvxdx_f + dvzdz_f*dvzdz_f);
 			}
 		}
 
@@ -245,7 +258,7 @@ void accumGradient(modPar *mod, bndPar *bnd,
 		 * since ioTx = ioPx+1, ioTz = ioPz+1. */
 		for (ix = ibTx; ix < ieTx; ix++) {
 			for (iz = ibTz; iz < ieTz; iz++) {
-				float dvxdz_f, dvzdx_f, shear;
+				float dvxdz_f, dvzdx_f, shear_strain2;
 
 				dvxdz_f = sdz*(c1*(fwd_vx[ix*n1+iz]-fwd_vx[ix*n1+iz-1])
 				              +c2*(fwd_vx[ix*n1+iz+1]-fwd_vx[ix*n1+iz-2]));
@@ -260,13 +273,22 @@ void accumGradient(modPar *mod, bndPar *bnd,
 					dvzdx_f += sdx*c4*(fwd_vz[(ix+3)*n1+iz]-fwd_vz[(ix-4)*n1+iz]);
 				}
 
-				shear = dt*wfl_adj->txz[ix*n1+iz]*(dvxdz_f + dvzdx_f);
-
-				/* Scatter to 4 surrounding P-grid points */
-				grad_muu[(ix-1)*n1+iz-1] += 0.25f * shear;
-				grad_muu[ix*n1+iz-1]     += 0.25f * shear;
-				grad_muu[(ix-1)*n1+iz]   += 0.25f * shear;
-				grad_muu[ix*n1+iz]       += 0.25f * shear;
+				if (grad_muu) {
+					float shear = dt*wfl_adj->txz[ix*n1+iz]*(dvxdz_f + dvzdx_f);
+					/* Scatter to 4 surrounding P-grid points */
+					grad_muu[(ix-1)*n1+iz-1] += 0.25f * shear;
+					grad_muu[ix*n1+iz-1]     += 0.25f * shear;
+					grad_muu[(ix-1)*n1+iz]   += 0.25f * shear;
+					grad_muu[ix*n1+iz]       += 0.25f * shear;
+				}
+				/* H_μ shear part: (dvxdz + dvzdx)² scattered to P grid */
+				if (illum_muu) {
+					shear_strain2 = (dvxdz_f + dvzdx_f) * (dvxdz_f + dvzdx_f);
+					illum_muu[(ix-1)*n1+iz-1] += 0.25f * shear_strain2;
+					illum_muu[ix*n1+iz-1]     += 0.25f * shear_strain2;
+					illum_muu[(ix-1)*n1+iz]   += 0.25f * shear_strain2;
+					illum_muu[ix*n1+iz]       += 0.25f * shear_strain2;
+				}
 			}
 		}
 	}
@@ -288,7 +310,7 @@ void accumGradient(modPar *mod, bndPar *bnd,
 	 * ψ_vz · dvz/dt is native at Vz grid, which straddles P(ix,iz-1)
 	 * and P(ix,iz) in z.  Same scatter pattern.
 	 * ================================================================ */
-	if (grad_rho && fwd_vx_prev && fwd_vz_prev) {
+	if ((grad_rho || illum_rho) && fwd_vx_prev && fwd_vz_prev) {
 		float dvx_dt, dvz_dt;
 		float sdt = 1.0f / dt;
 		float *rho = mod->rho;
@@ -296,23 +318,37 @@ void accumGradient(modPar *mod, bndPar *bnd,
 		/* Vx contribution, scattered to P grid */
 		for (ix = ibVx_x; ix < ieVx_x; ix++) {
 			for (iz = ibVx_z; iz < ieVx_z; iz++) {
-				float vx_contrib;
 				dvx_dt = (fwd_vx[ix*n1+iz] - fwd_vx_prev[ix*n1+iz]) * sdt;
-				vx_contrib = dt * wfl_adj->vx[ix*n1+iz] * dvx_dt;
-				/* Vx(ix,iz) straddles P(ix-1,iz) and P(ix,iz) */
-				grad_rho[(ix-1)*n1+iz] += 0.5f * vx_contrib / rho[(ix-1)*n1+iz];
-				grad_rho[ix*n1+iz]     += 0.5f * vx_contrib / rho[ix*n1+iz];
+				if (grad_rho) {
+					float vx_contrib = dt * wfl_adj->vx[ix*n1+iz] * dvx_dt;
+					grad_rho[(ix-1)*n1+iz] += 0.5f * vx_contrib / rho[(ix-1)*n1+iz];
+					grad_rho[ix*n1+iz]     += 0.5f * vx_contrib / rho[ix*n1+iz];
+				}
+				/* H_ρ: (dvx/dt / ρ)² scattered to P grid */
+				if (illum_rho) {
+					float a2 = dvx_dt * dvx_dt;
+					float r1 = rho[(ix-1)*n1+iz], r2 = rho[ix*n1+iz];
+					illum_rho[(ix-1)*n1+iz] += 0.5f * a2 / (r1*r1);
+					illum_rho[ix*n1+iz]     += 0.5f * a2 / (r2*r2);
+				}
 			}
 		}
 		/* Vz contribution, scattered to P grid */
 		for (ix = ibVz_x; ix < ieVz_x; ix++) {
 			for (iz = ibVz_z; iz < ieVz_z; iz++) {
-				float vz_contrib;
 				dvz_dt = (fwd_vz[ix*n1+iz] - fwd_vz_prev[ix*n1+iz]) * sdt;
-				vz_contrib = dt * wfl_adj->vz[ix*n1+iz] * dvz_dt;
-				/* Vz(ix,iz) straddles P(ix,iz-1) and P(ix,iz) */
-				grad_rho[ix*n1+(iz-1)] += 0.5f * vz_contrib / rho[ix*n1+(iz-1)];
-				grad_rho[ix*n1+iz]     += 0.5f * vz_contrib / rho[ix*n1+iz];
+				if (grad_rho) {
+					float vz_contrib = dt * wfl_adj->vz[ix*n1+iz] * dvz_dt;
+					grad_rho[ix*n1+(iz-1)] += 0.5f * vz_contrib / rho[ix*n1+(iz-1)];
+					grad_rho[ix*n1+iz]     += 0.5f * vz_contrib / rho[ix*n1+iz];
+				}
+				/* H_ρ: (dvz/dt / ρ)² scattered to P grid */
+				if (illum_rho) {
+					float a2 = dvz_dt * dvz_dt;
+					float r1 = rho[ix*n1+(iz-1)], r2 = rho[ix*n1+iz];
+					illum_rho[ix*n1+(iz-1)] += 0.5f * a2 / (r1*r1);
+					illum_rho[ix*n1+iz]     += 0.5f * a2 / (r2*r2);
+				}
 			}
 		}
 	}

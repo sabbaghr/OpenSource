@@ -83,7 +83,7 @@ static void init_trn(int n, float *x, float fcost, float *grad,
  *
  * Translated from: TRN/kernel/src/forcing_term_TRN.f90
  *--------------------------------------------------------------------*/
-static void forcing_term_trn(int n, float *grad, optim_type *opt)
+void forcing_term_trn(int n, float *grad, optim_type *opt)
 {
 	int i;
 	float eta_save, eta_save_power, norm_eisenvect;

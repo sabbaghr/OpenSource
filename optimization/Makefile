@@ -4,7 +4,7 @@ include ../Make_include
 
 ALLINC = -I.
 
-SRCS = optim_common.c lbfgs.c steepest_descent.c pnlcg.c plbfgs.c trn.c enriched.c
+SRCS = optim_common.c lbfgs.c steepest_descent.c pnlcg.c plbfgs.c trn.c ptrn.c enriched.c penriched.c
 OBJS = $(SRCS:%.c=%.o)
 LIB  = liboptim.a
 

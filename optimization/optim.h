@@ -25,7 +25,8 @@ typedef enum {
 	OPT_FAIL,   /* Linesearch failure */
 	OPT_NSTE,   /* New step accepted (iteration complete) */
 	OPT_HESS,   /* TRN: user must compute Hd = H * d (Hessian-vector product) */
-	OPT_PREC    /* PLBFGS: user must apply preconditioner to q_plb */
+	OPT_PREC    /* PLBFGS: apply preconditioner to q_plb;
+	               PTRN: apply preconditioner to residual -> residual_preco */
 } optFlag;
 
 /* Algorithm selector */
@@ -48,7 +49,9 @@ typedef enum {
 /* TRN internal communication state */
 typedef enum {
 	TRN_DESC,    /* Computing descent direction (inner CG) */
-	TRN_NSTE     /* Linesearch for new step */
+	TRN_NSTE,    /* Linesearch for new step */
+	PTRN_DES2,   /* PTRN: CG part 2, after preconditioning */
+	ENR_PREC     /* Preconditioned enriched: waiting for P^{-1} on q_plb */
 } trnComm;
 
 /* TRN CG phase */
@@ -124,6 +127,10 @@ typedef struct {
 	float   qkm1_CG;        /* previous CG quadratic model value */
 	float   hessian_term;   /* accumulated Hessian term for qk_CG */
 	float  *residual;       /* CG residual [n] */
+	float  *residual_preco; /* PTRN: preconditioned CG residual [n] */
+	float   res_scal_respreco; /* PTRN: <r, P^{-1}r> inner product */
+	float   alpha_CG;       /* PTRN: CG step size (saved for debug) */
+	float   dHd;             /* PTRN: <d, Hd> (saved for debug) */
 	float  *d;              /* CG direction [n] */
 	float  *Hd;             /* Hessian-vector product result [n] */
 	float  *eisenvect;      /* work vector for forcing term [n] */
@@ -140,6 +147,7 @@ typedef struct {
 	int     enr_maxcg;      /* max CG iterations for current HFN cycle */
 	trnComm enr_comm;       /* internal comm state (DESC=CG or NSTE=linesearch) */
 	float  *enr_precond_z;  /* preconditioner workspace [n] */
+	int     enr_recovering; /* 1=recovering from HFN linesearch failure */
 
 	/* Bound constraints */
 	int     bound;          /* 0=off, 1=on */
@@ -173,6 +181,14 @@ void pnlcg_run(int n, float *x, float fcost, float *grad,
 void trn_run(int n, float *x, float fcost, float *grad,
              optim_type *opt, optFlag *flag);
 
+/* Preconditioned Truncated Newton (reverse communication).
+ * Like TRN but with preconditioned CG inner loop.
+ * Returns OPT_HESS for Hessian-vector product,
+ * OPT_PREC when user must set opt->residual_preco = P^{-1} * opt->residual,
+ * OPT_GRAD when user must also provide grad_preco = P^{-1} * grad. */
+void ptrn_run(int n, float *x, float fcost, float *grad,
+              float *grad_preco, optim_type *opt, optFlag *flag);
+
 /* Steepest descent optimizer (reverse communication, same interface). */
 void steepest_descent_run(int n, float *x, float fcost, float *grad,
                           optim_type *opt, optFlag *flag);
@@ -183,6 +199,14 @@ void steepest_descent_run(int n, float *x, float fcost, float *grad,
  * Returns OPT_HESS when Hessian-vector product is needed (same as TRN). */
 void enriched_run(int n, float *x, float fcost, float *grad,
                   optim_type *opt, optFlag *flag);
+
+/* Preconditioned Enriched: PLBFGS + PTRN hybrid (reverse communication).
+ * Like enriched_run but uses external preconditioner P^{-1} in the two-loop
+ * recursion (as H0). Returns OPT_PREC when user must apply P^{-1} to
+ * opt->q_plb, OPT_HESS for Hessian-vector products.
+ * grad_preco: preconditioned gradient P^{-1}*grad (at OPT_GRAD). */
+void penriched_run(int n, float *x, float fcost, float *grad,
+                   float *grad_preco, optim_type *opt, optFlag *flag);
 
 /* Free all internally allocated arrays. Called automatically on CONV/FAIL,
  * but can be called manually for early termination. */
@@ -222,7 +246,9 @@ void optim_update_lbfgs(int n, optim_type *opt, float *x, float *grad);
 void optim_lbfgs_apply(int n, optim_type *opt, const float *input,
                         float *output);
 
-/* TRN-specific print info */
+/* TRN-specific print info and forcing term (shared with PTRN) */
 void print_info_trn(int n, optim_type *opt, float fcost, optFlag flag);
+void print_info_ptrn(int n, optim_type *opt, float fcost, optFlag flag);
+void forcing_term_trn(int n, float *grad, optim_type *opt);
 
 #endif /* OPTIM_H */
