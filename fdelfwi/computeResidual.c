@@ -106,8 +106,46 @@ static int countTraces(FILE *fp, const char *fname, int *ns_out, int *dt_us_out)
 /***********************************************************************
  * computeResidual -- Main function.
  ***********************************************************************/
+float computeDataRMS(const char *filename)
+{
+	FILE *fp;
+	segy hdr;
+	float *buf;
+	double sum2 = 0.0;
+	long nsamp_total = 0;
+	int ns;
+
+	fp = fopen(filename, "r");
+	if (!fp)
+		verr("computeDataRMS: Cannot open %s", filename);
+
+	/* Read first header to get ns */
+	if (fread(&hdr, 1, TRCBYTES, fp) != TRCBYTES)
+		verr("computeDataRMS: Cannot read header from %s", filename);
+	ns = (int)hdr.ns;
+	rewind(fp);
+
+	buf = (float *)malloc(ns * sizeof(float));
+
+	while (fread(&hdr, 1, TRCBYTES, fp) == TRCBYTES) {
+		int isamp;
+		if (fread(buf, sizeof(float), ns, fp) != (size_t)ns) break;
+		for (isamp = 0; isamp < ns; isamp++)
+			sum2 += (double)buf[isamp] * (double)buf[isamp];
+		nsamp_total += ns;
+	}
+
+	free(buf);
+	fclose(fp);
+
+	if (nsamp_total == 0) return 1.0f;
+	return (float)sqrt(sum2 / (double)nsamp_total);
+}
+
+
 float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
-                      const char *res_file, misfitType mtype, int verbose)
+                      const char *res_file, misfitType mtype,
+                      const float *comp_weights, int verbose)
 {
 	FILE *fp_obs, *fp_syn, *fp_res;
 	segy hdr_obs, hdr_syn;
@@ -196,6 +234,14 @@ float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
 		if (!buf_obs || !buf_syn)
 			verr("computeResidual: Memory allocation failed for ns=%d", ns);
 
+		/* Per-component weight (Brossier W_d):
+		 * w_k = comp_weights[k], applied as w_k^2 to misfit and adjoint source.
+		 * When comp_weights is NULL, w2 = 1.0 (no weighting). */
+		float w2 = 1.0f;
+		if (comp_weights) {
+			w2 = comp_weights[k] * comp_weights[k];
+		}
+
 		/* ---- Process traces ---- */
 		for (itr = 0; itr < ntr_obs; itr++) {
 			int isamp;
@@ -219,12 +265,15 @@ float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
 				      k, itr, hdr_obs.gx, hdr_obs.gelev, hdr_syn.gx, hdr_syn.gelev);
 
 			/* Compute adjoint source and misfit (L2)
-			 * Misfit uses discrete norm J = 0.5*sum(r^2) so that the
-			 * adjoint source dJ/dd = r is consistent without dt_rec. */
+			 * With Brossier weighting:
+			 *   J = 0.5 * w^2 * sum(r^2)
+			 *   dJ/dd = w^2 * r
+			 * When w=1/rms(d_obs), each component contributes ~N/2
+			 * regardless of amplitude, making J ~ O(N_total/2). */
 			for (isamp = 0; isamp < ns; isamp++) {
 				float r = buf_syn[isamp] - buf_obs[isamp];
-				misfit += 0.5f * r * r;
-				buf_obs[isamp] = r;  /* reuse buffer for residual */
+				misfit += 0.5f * w2 * r * r;
+				buf_obs[isamp] = w2 * r;  /* weighted adjoint source */
 			}
 
 			/* Prepare output header: copy observed header, set TRID */

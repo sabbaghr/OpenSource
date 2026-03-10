@@ -70,8 +70,10 @@ int initCheckpoints(checkpointPar *chk, modPar *mod, int skipdt,
                     int delay, const char *file_base);
 int cleanCheckpoints(checkpointPar *chk);
 
+float computeDataRMS(const char *filename);
 float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
-                      const char *res_file, misfitType mtype, int verbose);
+                      const char *res_file, misfitType mtype,
+                      const float *comp_weights, int verbose);
 
 int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd);
 void freeResidual(adjSrcPar *adj);
@@ -81,7 +83,8 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              int ixsrc, int izsrc, float **src_nwav,
              checkpointPar *chk, snaPar *sna,
              float *grad1, float *grad2, float *grad3,
-             float *illum_lam, float *illum_muu, float *illum_rho,
+             float *hess_lam, float *hess_muu, float *hess_rho,
+             float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
              int param, int verbose);
 
 int writesufile(char *filename, float *data, size_t n1, size_t n2,
@@ -125,115 +128,16 @@ char *sdoc[] = {
 "   vs_min=,vs_max=    Vs bounds (m/s, optional)",
 "   rho_min=,rho_max=  density bounds (kg/m3, optional)",
 "   write_iter=1       write model every N iterations",
+"   scaling=0          parameter scaling: 0=none, 1=Brossier(mean), 2=Yang(max)",
+"   precond=0          Yang pseudo-Hessian preconditioner (0=off, 1=on)",
+"   precond_eps=1e-3   regularization epsilon for preconditioner",
+"   precond_scale_1/2/3=1.0  manual Yang scaling (overridden by scaling>0)",
+"   data_weight=auto    Brossier W_d data weighting: 0=off, 1=on (auto=1 when scaling>0)",
 " ",
 NULL};
 
 
-/*--------------------------------------------------------------------
- * convertIllumToVelocity -- Convert illumination Lamé → velocity space.
- *
- * Transforms illumination arrays in-place using chain rule Jacobian:
- *   H_Vp = (2ρVp)² · H_λ
- *   H_Vs = (2ρVs)² · (4·H_λ + H_μ)
- *   H_ρ  = (Vp²-2Vs²)² · H_λ + Vs⁴ · H_μ + H_ρ_direct
- *--------------------------------------------------------------------*/
-static void convertIllumToVelocity(float *illum_lam, float *illum_muu,
-                                   float *illum_rho,
-                                   modPar *mod, size_t sizem)
-{
-	int i;
-	for (i = 0; i < (int)sizem; i++) {
-		float rho_val = mod->rho[i];
-		float vp  = mod->cp[i];
-		float vs  = mod->cs[i];
-		float vp2 = vp * vp;
-		float vs2 = vs * vs;
-
-		float h_lam = illum_lam[i];
-		float h_muu = illum_muu ? illum_muu[i] : 0.0f;
-		float h_rho = illum_rho[i];
-
-		illum_lam[i] = (2.0f * rho_val * vp) * (2.0f * rho_val * vp) * h_lam;
-		if (illum_muu)
-			illum_muu[i] = (2.0f * rho_val * vs) * (2.0f * rho_val * vs)
-			             * (4.0f * h_lam + h_muu);
-		float dv = vp2 - 2.0f * vs2;
-		illum_rho[i] = dv * dv * h_lam + vs2 * vs2 * h_muu + h_rho;
-	}
-}
-
-
-/*--------------------------------------------------------------------
- * stabilizePrecondVector -- Add eps*max stabilization per parameter.
- *
- * Flat vector layout: [param1 | param2 | param3]
- * Each segment of nmodel elements gets its own eps = precond_eps*max.
- *--------------------------------------------------------------------*/
-static void stabilizePrecondVector(float *pv, int nvec, int nmodel,
-                                   int nparam, float precond_eps,
-                                   int param, int mpi_rank)
-{
-	int p, i;
-	const char *lame_names[] = {"H_lam", "H_mu", "H_rho"};
-	const char *vel_names[]  = {"H_Vp", "H_Vs", "H_rho"};
-	const char **names = (param == 2) ? vel_names : lame_names;
-	for (p = 0; p < nparam; p++) {
-		int off = p * nmodel;
-		float maxval = 0.0f;
-		for (i = 0; i < nmodel; i++)
-			if (pv[off + i] > maxval) maxval = pv[off + i];
-		float eps = precond_eps * maxval;
-		for (i = 0; i < nmodel; i++)
-			pv[off + i] += eps;
-		if (mpi_rank == 0)
-			vmess("Preconditioner: %s_max=%.4e  eps=%.4e", names[p], maxval, eps);
-	}
-}
-
-
-/*--------------------------------------------------------------------
- * extractPrecondAndApply -- Extract illumination to flat vector and
- * apply preconditioner for preconditioned algorithms only.
- *
- * For all algorithms: extracts illumination to precond_vec.
- * For PLBFGS/PNLCG/PTRN/PEnriched: also computes grad_preco_vec.
- * For SD/LBFGS/TRN/Enriched: precond_vec is extracted but NOT applied
- * to the gradient (these algorithms have no native preconditioner mechanism).
- *--------------------------------------------------------------------*/
-static void extractPrecondAndApply(
-	float *illum_lam, float *illum_muu, float *illum_rho,
-	float *precond_vec, float *grad_vec, float *grad_preco_vec,
-	modPar *mod, bndPar *bnd, float precond_eps,
-	int param, int elastic, size_t sizem,
-	int nvec, int nmodel, int nparam,
-	int algorithm, int mpi_rank)
-{
-	int i;
-
-	if (!illum_lam) return;
-
-	/* Convert illumination to velocity space if needed */
-	if (param == 2 && elastic)
-		convertIllumToVelocity(illum_lam, illum_muu, illum_rho, mod, sizem);
-
-	/* Extract illumination to flat vector (param=1: no chain rule,
-	 * already converted to velocity space if needed) */
-	extractGradientVector(precond_vec, illum_lam, illum_muu, illum_rho,
-	                      mod, bnd, 1);
-
-	/* Add epsilon stabilization per parameter segment */
-	stabilizePrecondVector(precond_vec, nvec, nmodel, nparam, precond_eps,
-	                       param, mpi_rank);
-
-	/* Only apply for preconditioned algorithms that have native mechanisms */
-	if (grad_preco_vec &&
-	    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)) {
-		/* PLBFGS/PNLCG/PTRN/PEnriched: provide preconditioned gradient copy */
-		for (i = 0; i < nvec; i++)
-			grad_preco_vec[i] = grad_vec[i] / precond_vec[i];
-	}
-	/* SD/LBFGS/TRN/Enriched: no preconditioning applied to gradient */
-}
+/* Yang block preconditioner functions in yang_precond.c */
 
 
 /*--------------------------------------------------------------------
@@ -409,10 +313,12 @@ static float compute_fwi_gradient(
 	const char *file_obs, const char *comp_str,
 	int res_taper, int param,
 	float *grad1, float *grad2, float *grad3,
-	float *illum_lam, float *illum_muu, float *illum_rho,
+	float *hess_lam, float *hess_muu, float *hess_rho,
+	float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
 	const char *chk_base, int chk_skipdt,
 	int mpi_rank, int mpi_size,
 	int keep_checkpoints,
+	const float *comp_weights,
 	int verbose)
 {
 	int ishot, k, i;
@@ -423,13 +329,16 @@ static float compute_fwi_gradient(
 	checkpointPar chk;
 	adjSrcPar adj;
 
-	/* Zero gradient and illumination arrays */
+	/* Zero gradient and hessian arrays */
 	memset(grad1, 0, sizem * sizeof(float));
 	memset(grad3, 0, sizem * sizeof(float));
 	if (grad2) memset(grad2, 0, sizem * sizeof(float));
-	if (illum_lam) memset(illum_lam, 0, sizem * sizeof(float));
-	if (illum_muu) memset(illum_muu, 0, sizem * sizeof(float));
-	if (illum_rho) memset(illum_rho, 0, sizem * sizeof(float));
+	if (hess_lam) memset(hess_lam, 0, sizem * sizeof(float));
+	if (hess_muu) memset(hess_muu, 0, sizem * sizeof(float));
+	if (hess_rho) memset(hess_rho, 0, sizem * sizeof(float));
+	if (hess_lam_muu) memset(hess_lam_muu, 0, sizem * sizeof(float));
+	if (hess_lam_rho) memset(hess_lam_rho, 0, sizem * sizeof(float));
+	if (hess_muu_rho) memset(hess_muu_rho, 0, sizem * sizeof(float));
 
 	/* Determine shots for this rank */
 	int my_nshots = 0;
@@ -513,7 +422,7 @@ static float compute_fwi_gradient(
 
 			snprintf(res_file, sizeof(res_file), "%s/residual.su", work_dir);
 			misfit = computeResidual(ncomp, obs_arr, syn_arr, res_file,
-			                         MISFIT_L2, 0);
+			                         MISFIT_L2, comp_weights, 0);
 			total_misfit += misfit;
 
 			/* Step 3: Read residuals and apply taper */
@@ -521,11 +430,17 @@ static float compute_fwi_gradient(
 			readResidual(res_file, &adj, mod, bnd);
 			applyCosineTaper(&adj, res_taper);
 
-			/* Step 4: Adjoint backpropagation */
+			/* Step 4: Adjoint backpropagation.
+			 * Always accumulate in Lamé space (param=1) for multi-shot.
+			 * The chain rule conversion to velocity (if param=2) is done
+			 * once at the end by extractGradientVector, avoiding double
+			 * conversion. See NOTE in adj_shot.c lines 213-215. */
 			adj_shot(mod, src, wav, bnd, rec, &adj,
 			         ixsrc, izsrc, src_nwav, &chk, NULL,
 			         shot_grad1, shot_grad2, shot_grad3,
-			         illum_lam, illum_muu, illum_rho, param, 0);
+			         hess_lam, hess_muu, hess_rho,
+			         hess_lam_muu, hess_lam_rho, hess_muu_rho,
+			         1, 0);
 
 			freeResidual(&adj);
 		}
@@ -585,16 +500,30 @@ static float compute_fwi_gradient(
 		free(tmp1); free(tmp3);
 		if (tmp2) free(tmp2);
 
-		/* Reduce illumination across ranks */
-		if (illum_lam) {
-			float *tmp_ill = (float *)calloc(sizem, sizeof(float));
-			MPI_Allreduce(illum_lam, tmp_ill, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
-			memcpy(illum_lam, tmp_ill, sizem * sizeof(float));
-			MPI_Allreduce(illum_muu, tmp_ill, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
-			memcpy(illum_muu, tmp_ill, sizem * sizeof(float));
-			MPI_Allreduce(illum_rho, tmp_ill, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
-			memcpy(illum_rho, tmp_ill, sizem * sizeof(float));
-			free(tmp_ill);
+		/* Reduce pseudo-Hessian arrays across ranks */
+		if (hess_lam) {
+			float *tmp_h = (float *)calloc(sizem, sizeof(float));
+			MPI_Allreduce(hess_lam, tmp_h, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+			memcpy(hess_lam, tmp_h, sizem * sizeof(float));
+			if (hess_muu) {
+				MPI_Allreduce(hess_muu, tmp_h, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+				memcpy(hess_muu, tmp_h, sizem * sizeof(float));
+			}
+			MPI_Allreduce(hess_rho, tmp_h, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+			memcpy(hess_rho, tmp_h, sizem * sizeof(float));
+			if (hess_lam_muu) {
+				MPI_Allreduce(hess_lam_muu, tmp_h, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+				memcpy(hess_lam_muu, tmp_h, sizem * sizeof(float));
+			}
+			if (hess_lam_rho) {
+				MPI_Allreduce(hess_lam_rho, tmp_h, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+				memcpy(hess_lam_rho, tmp_h, sizem * sizeof(float));
+			}
+			if (hess_muu_rho) {
+				MPI_Allreduce(hess_muu_rho, tmp_h, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+				memcpy(hess_muu_rho, tmp_h, sizem * sizeof(float));
+			}
+			free(tmp_h);
 		}
 
 		MPI_Allreduce(&total_misfit, &global_misfit, 1, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
@@ -669,6 +598,7 @@ static void compute_hessian_vector_product(
 	int mpi_rank, int mpi_size,
 	float *dpert, float *Hd_flat, int nvec,
 	int grad_taper,
+	const float *comp_weights,
 	int verbose)
 {
 	int ishot, k, i;
@@ -741,7 +671,7 @@ static void compute_hessian_vector_product(
 		          res_taper,
 		          shot_hd1, shot_hd2, shot_hd3,
 		          1,  /* always Lame internally */
-		          verbose);
+		          comp_weights, verbose);
 
 		/* Accumulate into local Hd sum */
 		for (i = 0; i < (int)sizem; i++) {
@@ -975,8 +905,9 @@ int main(int argc, char **argv)
 
 	/* Optimization parameters */
 	int    niter, algorithm, lbfgs_mem, nls_max, write_iter, niter_cg;
-	int    use_precond;
+	int    use_precond, scaling;
 	float  conv, precond_eps;
+	float  s1 = 1.0f, s2 = 1.0f, s3 = 1.0f;  /* Yang scaling (eq 48) */
 
 #ifdef USE_MPI
 	MPI_Init(&argc, &argv);
@@ -1016,6 +947,12 @@ int main(int argc, char **argv)
 	if (!getparint("niter_cg", &niter_cg)) niter_cg = 5;
 	if (!getparint("precond", &use_precond)) use_precond = 0;
 	if (!getparfloat("precond_eps", &precond_eps)) precond_eps = 1e-3f;
+	if (!getparint("scaling", &scaling)) scaling = 0;
+	if (use_precond) {
+		getparfloat("precond_scale_1", &s1);
+		getparfloat("precond_scale_2", &s2);
+		getparfloat("precond_scale_3", &s3);
+	}
 
 	/* When illumination preconditioner is active AND algorithm uses it
 	 * natively, disable gradient taper — the preconditioner handles
@@ -1095,7 +1032,7 @@ int main(int argc, char **argv)
 	/* Print inversion summary                                      */
 	/* ============================================================ */
 	if (mpi_rank == 0) {
-		const char *alg_names[] = {"Steepest Descent", "L-BFGS", "PLBFGS", "PNLCG", "TRN", "Enriched"};
+		const char *alg_names[] = {"Steepest Descent", "L-BFGS", "PLBFGS", "PNLCG", "TRN", "Enriched", "PTRN", "PEnriched"};
 		vmess("*******************************************");
 #ifdef USE_MPI
 		vmess("***** MPI FWI INVERSION               *****");
@@ -1123,8 +1060,8 @@ int main(int argc, char **argv)
 		if (use_precond) {
 			int is_precond_alg = (algorithm == 2 || algorithm == 3 ||
 			                      algorithm == 6 || algorithm == 7);
-			vmess("Preconditioner: source illumination (eps=%.2e)%s",
-			      precond_eps,
+			vmess("Preconditioner: Yang pseudo-Hessian (eps=%.2e, s=[%.2f,%.2f,%.2f])%s",
+			      precond_eps, s1, s2, s3,
 			      is_precond_alg ? "" : " (not used: algorithm has no native mechanism)");
 			vmess("Gradient taper: %s (grad_taper=%d)",
 			      grad_taper > 0 ? "enabled" : "disabled (preconditioner active)",
@@ -1152,14 +1089,26 @@ int main(int argc, char **argv)
 	float *grad2 = NULL;
 	if (elastic) grad2 = (float *)calloc(sizem, sizeof(float));
 
-	/* Parameter-specific source illumination for preconditioning */
-	float *illum_lam = NULL, *illum_muu = NULL, *illum_rho = NULL;
-	float *precond_vec = NULL, *grad_preco_vec = NULL;
+	/* Yang pseudo-Hessian arrays (padded grid, accumulated in adj_shot) */
+	float *hess_lam = NULL, *hess_muu = NULL, *hess_rho = NULL;
+	float *hess_lam_muu = NULL, *hess_lam_rho = NULL, *hess_muu_rho = NULL;
+	/* Block preconditioner matrix (6 upper-triangle, flat nmodel each) */
+	float *P11 = NULL, *P12 = NULL, *P13 = NULL;
+	float *P22 = NULL, *P23 = NULL, *P33 = NULL;
+	float *grad_preco_vec = NULL;
 	if (use_precond) {
-		illum_lam = (float *)calloc(sizem, sizeof(float));
-		illum_rho = (float *)calloc(sizem, sizeof(float));
-		if (elastic) illum_muu = (float *)calloc(sizem, sizeof(float));
-		precond_vec = (float *)calloc(nvec, sizeof(float));
+		hess_lam = (float *)calloc(sizem, sizeof(float));
+		hess_rho = (float *)calloc(sizem, sizeof(float));
+		if (elastic) hess_muu = (float *)calloc(sizem, sizeof(float));
+		hess_lam_muu = (float *)calloc(sizem, sizeof(float));
+		hess_lam_rho = (float *)calloc(sizem, sizeof(float));
+		hess_muu_rho = (float *)calloc(sizem, sizeof(float));
+		P11 = (float *)calloc(nmodel, sizeof(float));
+		P12 = (float *)calloc(nmodel, sizeof(float));
+		P13 = (float *)calloc(nmodel, sizeof(float));
+		P22 = (float *)calloc(nmodel, sizeof(float));
+		P23 = (float *)calloc(nmodel, sizeof(float));
+		P33 = (float *)calloc(nmodel, sizeof(float));
 		if (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)
 			grad_preco_vec = (float *)calloc(nvec, sizeof(float));
 	}
@@ -1167,9 +1116,37 @@ int main(int argc, char **argv)
 	/* Extract initial model into optimizer vector */
 	extractModelVector(x, &mod, &bnd, param);
 
+	/* Parameter scaling (0=none, 1=Brossier mean, 2=Yang max):
+	 * m0[p] computed from initial model, x_tilde = x / m0.
+	 * When preconditioner is active, s_p = m0_p automatically. */
+	float m0[3] = {1.0f, 1.0f, 1.0f};
+	float m_shift[3] = {0.0f, 0.0f, 0.0f};
+	if (scaling > 0) {
+		scaling_compute_m0(scaling, x, nmodel, nparam, m0, m_shift);
+		scaling_normalize(x, nmodel, nparam, m0, m_shift);
+		if (use_precond) {
+			s1 = m0[0];
+			if (nparam >= 2) s2 = m0[1];
+			if (nparam >= 3) s3 = m0[2];
+		}
+		if (mpi_rank == 0) {
+			const char *sname = (scaling == 1) ? "Brossier (mean)" : "Yang (max)";
+			vmess("Scaling=%d (%s): m0 = [%.4e, %.4e, %.4e]",
+			      scaling, sname, m0[0],
+			      nparam >= 2 ? m0[1] : 0.0f,
+			      nparam >= 3 ? m0[2] : 0.0f);
+		}
+	}
+
 	/* ============================================================ */
 	/* Configure optimizer                                          */
 	/* ============================================================ */
+	/* Verbose linesearch diagnostics (verbose >= 2) */
+	int diag_new_iter = 1;
+	int diag_ls_trial = 0;
+	float diag_gnorm_raw = 0.0f;
+	float diag_gnorm_raw_start = 0.0f;
+
 	optim_type opt;
 	memset(&opt, 0, sizeof(optim_type));
 	opt.niter_max = niter;
@@ -1191,8 +1168,13 @@ int main(int argc, char **argv)
 	}
 
 	/* Setup bounds if specified */
-	if (mpi_rank == 0)
+	if (mpi_rank == 0) {
 		setup_bounds(&opt, &mod, &bnd, param, nvec);
+		if (scaling > 0 && opt.bound) {
+			scaling_normalize(opt.lb, nmodel, nparam, m0, m_shift);
+			scaling_normalize(opt.ub, nmodel, nparam, m0, m_shift);
+		}
+	}
 
 	/* For TRN/Enriched: allocate d and Hd on ALL MPI ranks.
 	 * The optimizer init (rank 0 only) will re-allocate these,
@@ -1210,11 +1192,53 @@ int main(int argc, char **argv)
 
 	int keep_chk = (algorithm == 4 || algorithm == 5 || algorithm == 6 || algorithm == 7) ? 1 : 0;
 
+	/* ============================================================ */
+	/* Compute Brossier W_d data weights from shot 0 observed data  */
+	/* w_c = 1/rms(d_obs_c) per component, so each component        */
+	/* contributes ~N/2 to the misfit regardless of amplitude.       */
+	/* data_weight=1 enables auto weighting (default=1 when scaling>0) */
+	/* ============================================================ */
+	int data_weight;
+	if (!getparint("data_weight", &data_weight))
+		data_weight = (scaling > 0) ? 1 : 0;
+
+	float *comp_weights = NULL;
+	int ncomp_w = 0;
+	{
+		char comp_buf_w[1024];
+		char *comp_suffixes_w[MAX_COMP];
+		char *token_w;
+		strncpy(comp_buf_w, comp_str, sizeof(comp_buf_w) - 1);
+		comp_buf_w[sizeof(comp_buf_w) - 1] = '\0';
+		token_w = strtok(comp_buf_w, ",");
+		while (token_w && ncomp_w < MAX_COMP) {
+			comp_suffixes_w[ncomp_w++] = token_w;
+			token_w = strtok(NULL, ",");
+		}
+
+		if (data_weight > 0) {
+			comp_weights = (float *)malloc(ncomp_w * sizeof(float));
+			for (i = 0; i < ncomp_w; i++) {
+				char obs_w[512];
+				snprintf(obs_w, sizeof(obs_w), "%s_%03d%s.su",
+				         file_obs, 0, comp_suffixes_w[i]);
+				float rms = computeDataRMS(obs_w);
+				comp_weights[i] = (rms > 1.0e-30f) ? (1.0f / rms) : 1.0f;
+				if (mpi_rank == 0)
+					vmess("Data weight: comp %s  rms=%.4e  w=%.4e",
+					      comp_suffixes_w[i], rms, comp_weights[i]);
+			}
+		}
+	}
+
 	float fcost = compute_fwi_gradient(
 		&mod, &src, &wav, &bnd, &rec, &sna, &shot, src_nwav,
 		file_obs, comp_str, res_taper, param,
-		grad1, grad2, grad3, illum_lam, illum_muu, illum_rho,
-		chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk, verbose);
+		grad1, grad2, grad3,
+		hess_lam, hess_muu, hess_rho,
+		hess_lam_muu, hess_lam_rho, hess_muu_rho,
+		chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk,
+		comp_weights, verbose);
 
 	/* Taper gradient near source and receiver positions */
 	{
@@ -1239,13 +1263,29 @@ int main(int argc, char **argv)
 		extractGradientVector(grad_vec, grad1, grad2, grad3,
 		                      &mod, &bnd, param);
 
-		/* Apply illumination preconditioner in flat vector space */
-		extractPrecondAndApply(illum_lam, illum_muu, illum_rho,
-		                       precond_vec, grad_vec, grad_preco_vec,
-		                       &mod, &bnd, precond_eps,
-		                       param, elastic, sizem,
-		                       nvec, nmodel, nparam,
-		                       algorithm, mpi_rank);
+		/* Capture raw gradient norm before scaling */
+		if (verbose >= 2) {
+			double g2 = 0.0;
+			for (i = 0; i < nvec; i++) g2 += (double)grad_vec[i] * (double)grad_vec[i];
+			diag_gnorm_raw_start = (float)sqrt(g2);
+		}
+
+		if (scaling > 0)
+			scaling_scale_gradient(grad_vec, nmodel, nparam, m0);
+
+		/* Build Yang block preconditioner and apply to gradient */
+		if (use_precond && hess_lam) {
+			buildBlockPrecond(hess_lam, hess_muu, hess_rho,
+			    hess_lam_muu, hess_lam_rho, hess_muu_rho,
+			    &mod, &bnd, param, elastic,
+			    precond_eps, s1, s2, s3,
+			    P11, P12, P13, P22, P23, P33,
+			    nmodel, mpi_rank);
+			if (grad_preco_vec &&
+			    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7))
+				applyBlockPrecond(grad_preco_vec, grad_vec,
+				    P11, P12, P13, P22, P23, P33, nmodel, nparam);
+		}
 		vmess("Initial misfit: %.6e", fcost);
 
 		float gnorm = 0.0f;
@@ -1253,26 +1293,30 @@ int main(int argc, char **argv)
 			gnorm += grad_vec[i] * grad_vec[i];
 		gnorm = sqrtf(gnorm);
 
+		float gnorm_preco = 0.0f;
+		if (grad_preco_vec) {
+			double gp2 = 0.0;
+			for (i = 0; i < nvec; i++)
+				gp2 += (double)grad_preco_vec[i] * (double)grad_preco_vec[i];
+			gnorm_preco = (float)sqrt(gp2);
+			vmess("Preconditioned gradient: ||P^{-1}g||=%.4e (max=%.4e)",
+			      gnorm_preco, (float)sqrt(gp2/(nvec>0?nvec:1))*sqrt(nvec));
+			/* print a few sample values for diagnosis */
+			float maxabs = 0.0f;
+			for (i = 0; i < nvec; i++)
+				if (fabsf(grad_preco_vec[i]) > maxabs) maxabs = fabsf(grad_preco_vec[i]);
+			vmess("  P^{-1}g: max|element|=%.4e, ||.||_2=%.4e", maxabs, (float)sqrt(gp2));
+		}
+
 		if (gnorm > 0.0f) {
-			/* Set initial alpha.
-			 * SEISCOPE default is alpha=1.0 for all algorithms.
-			 * For SD/L-BFGS/CG the first descent direction is -g,
-			 * so alpha=1 with a large raw gradient can overshoot.
-			 * Use a heuristic: max model change = eps * max|x|. */
-			if (algorithm == 4 || algorithm == 5 || algorithm == 6 || algorithm == 7) {
-				/* TRN/Enriched: alpha=1 is the natural Newton step */
-				opt.alpha = 1.0f;
+			/* Initial step length for first iteration.
+			 * L-BFGS/SD/PLBFGS/PNLCG use descent=-g at iter 0 (no Hessian
+			 * scaling), so alpha=1/||g|| gives a unit step in model space.
+			 * TRN/Enriched use CG to get Hessian-scaled descent → alpha=1. */
+			if (algorithm <= 3) {
+				opt.alpha = 1.0f / gnorm;
 			} else {
-				float xmax = 0.0f, gmax = 0.0f;
-				for (i = 0; i < nvec; i++) {
-					if (fabsf(x[i]) > xmax) xmax = fabsf(x[i]);
-					if (fabsf(grad_vec[i]) > gmax)
-						gmax = fabsf(grad_vec[i]);
-				}
-				if (gmax > 0.0f && xmax > 0.0f) {
-					float eps_alpha = 0.01f;  /* 1% max perturbation */
-					opt.alpha = eps_alpha * xmax / gmax;
-				}
+				opt.alpha = 1.0f;
 			}
 			vmess("Gradient: ||g||=%.4e, alpha=%.4e", gnorm, opt.alpha);
 		}
@@ -1301,11 +1345,10 @@ int main(int argc, char **argv)
 				           grad_preco_vec ? grad_preco_vec : grad_vec,
 				           &opt, &flag);
 				while (flag == OPT_PREC) {
-					/* Apply illumination preconditioner to q_plb */
-					if (precond_vec) {
-						for (i = 0; i < nvec; i++)
-							opt.q_plb[i] /= precond_vec[i];
-					}
+					/* Apply Yang block preconditioner to q_plb */
+					if (P11)
+						applyBlockPrecond(opt.q_plb, opt.q_plb,
+						    P11, P12, P13, P22, P23, P33, nmodel, nparam);
 					plbfgs_run(nvec, x, fcost, grad_vec,
 					           grad_preco_vec ? grad_preco_vec : grad_vec,
 					           &opt, &flag);
@@ -1343,6 +1386,28 @@ int main(int argc, char **argv)
 		if (flag == OPT_GRAD) {
 			/* --- Model updated by optimizer, need new gradient --- */
 
+			/* Verbose: print iteration header at start of new linesearch */
+			if (verbose >= 2 && mpi_rank == 0 && diag_new_iter) {
+				float gnorm_scaled_start = optim_norm_l2(nvec, opt.grad);
+				float dnorm = optim_norm_l2(nvec, opt.descent);
+				vmess("");
+				vmess("Iteration %d:", opt.cpt_iter + 1);
+				vmess("  Cost:          %.4e  (%.2f%%)",
+				      opt.fk, 100.0 * opt.fk / opt.f0);
+				vmess("  ||g||:         %.4e", diag_gnorm_raw_start);
+				vmess("  ||g~||:        %.4e", gnorm_scaled_start);
+				vmess("  ||d||:         %.4e", dnorm);
+				vmess("  <g,d>:        %.4e %s",
+				      opt.q0, opt.q0 < 0 ? "(negative = descent OK)" : "(POSITIVE = NOT DESCENT!)");
+				vmess("  alpha_0:       %.4e", opt.alpha);
+				diag_new_iter = 0;
+				diag_ls_trial = 0;
+			}
+
+			/* Denormalize x to physical units for forward modeling */
+			if (scaling > 0)
+				scaling_denormalize(x, nmodel, nparam, m0, m_shift);
+
 			/* Broadcast new model vector from rank 0 */
 #ifdef USE_MPI
 			MPI_Bcast(x, nvec, MPI_FLOAT, 0, MPI_COMM_WORLD);
@@ -1351,12 +1416,19 @@ int main(int argc, char **argv)
 			/* All ranks: inject model into FD arrays */
 			injectModelVector(x, &mod, &bnd, param);
 
+			/* Re-normalize x back to tilde-space */
+			if (scaling > 0)
+				scaling_normalize(x, nmodel, nparam, m0, m_shift);
+
 			/* All ranks: compute gradient */
 			fcost = compute_fwi_gradient(
 				&mod, &src, &wav, &bnd, &rec, &sna, &shot, src_nwav,
 				file_obs, comp_str, res_taper, param,
-				grad1, grad2, grad3, illum_lam, illum_muu, illum_rho,
-				chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk, verbose);
+				grad1, grad2, grad3,
+				hess_lam, hess_muu, hess_rho,
+				hess_lam_muu, hess_lam_rho, hess_muu_rho,
+				chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk,
+				comp_weights, verbose);
 
 			/* Taper gradient near source and receiver positions */
 			{
@@ -1374,12 +1446,29 @@ int main(int argc, char **argv)
 				extractGradientVector(grad_vec, grad1, grad2, grad3,
 				                      &mod, &bnd, param);
 
-				extractPrecondAndApply(illum_lam, illum_muu, illum_rho,
-				                       precond_vec, grad_vec, grad_preco_vec,
-				                       &mod, &bnd, precond_eps,
-				                       param, elastic, sizem,
-				                       nvec, nmodel, nparam,
-				                       algorithm, mpi_rank);
+				/* Capture raw gradient norm before scaling */
+				if (verbose >= 2) {
+					double g2 = 0.0;
+					for (i = 0; i < nvec; i++) g2 += (double)grad_vec[i] * (double)grad_vec[i];
+					diag_gnorm_raw = (float)sqrt(g2);
+				}
+
+				if (scaling > 0)
+					scaling_scale_gradient(grad_vec, nmodel, nparam, m0);
+
+				/* Build Yang block preconditioner and apply to gradient */
+				if (use_precond && hess_lam) {
+					buildBlockPrecond(hess_lam, hess_muu, hess_rho,
+					    hess_lam_muu, hess_lam_rho, hess_muu_rho,
+					    &mod, &bnd, param, elastic,
+					    precond_eps, s1, s2, s3,
+					    P11, P12, P13, P22, P23, P33,
+					    nmodel, mpi_rank);
+					if (grad_preco_vec &&
+					    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7))
+						applyBlockPrecond(grad_preco_vec, grad_vec,
+						    P11, P12, P13, P22, P23, P33, nmodel, nparam);
+				}
 
 				/* NaN guard: if forward modeling went unstable,
 				 * set huge cost so linesearch rejects this step.
@@ -1402,10 +1491,39 @@ int main(int argc, char **argv)
 						gnorm += grad_vec[i] * grad_vec[i];
 					vmess("  gradient ||g||=%.4e", sqrtf(gnorm));
 				}
+
+				/* Verbose linesearch trial diagnostics */
+				if (verbose >= 2) {
+					diag_ls_trial++;
+					float armijo_rhs = opt.fk + opt.m1 * opt.alpha * opt.q0;
+					float q_curr = optim_dot(nvec, grad_vec, opt.descent);
+					float wolfe2_rhs = opt.m2 * opt.q0;
+					int wolfe1_pass = (fcost <= armijo_rhs);
+					int wolfe2_pass = (q_curr >= wolfe2_rhs);
+
+					vmess("");
+					vmess("  Line search trial %d: alpha=%.4e",
+					      diag_ls_trial, opt.alpha);
+					vmess("    f(x+ad):     %.4e", fcost);
+					vmess("    Wolfe 1: f=%.4e %s %.4e ? %s",
+					      fcost, wolfe1_pass ? "<=" : ">",
+					      armijo_rhs, wolfe1_pass ? "PASS" : "FAIL");
+					vmess("    Wolfe 2: <g,d>=%.4e %s %.4e ? %s",
+					      q_curr, wolfe2_pass ? ">=" : "<",
+					      wolfe2_rhs, wolfe2_pass ? "PASS" : "FAIL");
+					vmess("    Outcome: %s",
+					      (wolfe1_pass && wolfe2_pass) ? "ACCEPTED" :
+					      (!wolfe1_pass ? "ARMIJO FAIL -> bisect" :
+					       "CURVATURE FAIL -> expand/bisect"));
+				}
 			}
 
 		} else if (flag == OPT_HESS) {
 			/* --- TRN inner CG needs Hessian-vector product --- */
+
+			/* Denormalize d to physical units: d_phys = m0 * d_tilde */
+			if (scaling > 0)
+				scaling_denormalize(opt.d, nmodel, nparam, m0, m_shift);
 
 			/* Broadcast CG direction from rank 0 to all ranks */
 #ifdef USE_MPI
@@ -1419,7 +1537,13 @@ int main(int argc, char **argv)
 				chk_base, chk_skipdt, mpi_rank, mpi_size,
 				opt.d, opt.Hd, nvec,
 				grad_taper,
-				verbose);
+				comp_weights, verbose);
+
+			/* Re-normalize d and scale Hd to tilde-space */
+			if (scaling > 0) {
+				scaling_normalize(opt.d, nmodel, nparam, m0, m_shift);
+				scaling_scale_hessian_vec(opt.Hd, nmodel, nparam, m0);
+			}
 
 #ifdef USE_MPI
 			/* Broadcast Hd back to all ranks (rank 0 has the result) */
@@ -1427,11 +1551,10 @@ int main(int argc, char **argv)
 #endif
 
 		} else if (flag == OPT_PREC && algorithm == 6) {
-			/* --- PTRN inner CG: apply preconditioner to residual --- */
-			if (mpi_rank == 0 && precond_vec) {
-				for (i = 0; i < nvec; i++)
-					opt.residual_preco[i] = opt.residual[i] / precond_vec[i];
-			}
+			/* --- PTRN inner CG: apply block preconditioner to residual --- */
+			if (mpi_rank == 0 && P11)
+				applyBlockPrecond(opt.residual_preco, opt.residual,
+				    P11, P12, P13, P22, P23, P33, nmodel, nparam);
 			if (mpi_rank == 0) {
 				ptrn_run(nvec, x, fcost, grad_vec,
 				         grad_preco_vec ? grad_preco_vec : grad_vec,
@@ -1443,11 +1566,10 @@ int main(int argc, char **argv)
 			continue;
 
 		} else if (flag == OPT_PREC && algorithm == 7) {
-			/* --- PEnriched: apply P^{-1} to q_plb (L-BFGS H0 or CG precond) --- */
-			if (mpi_rank == 0 && precond_vec) {
-				for (i = 0; i < nvec; i++)
-					opt.q_plb[i] /= precond_vec[i];
-			}
+			/* --- PEnriched: apply block preconditioner to q_plb --- */
+			if (mpi_rank == 0 && P11)
+				applyBlockPrecond(opt.q_plb, opt.q_plb,
+				    P11, P12, P13, P22, P23, P33, nmodel, nparam);
 			if (mpi_rank == 0) {
 				penriched_run(nvec, x, fcost, grad_vec,
 				              grad_preco_vec ? grad_preco_vec : grad_vec,
@@ -1464,8 +1586,31 @@ int main(int argc, char **argv)
 			if (mpi_rank == 0) {
 				vmess("Iteration %d: misfit = %.6e (%.2f%% of initial)",
 				      opt_iter, fcost, 100.0f * fcost / opt.f0);
-				if (write_iter > 0 && (opt_iter % write_iter == 0))
+				if (write_iter > 0 && (opt_iter % write_iter == 0)) {
+					if (scaling > 0)
+						scaling_denormalize(x, nmodel, nparam, m0, m_shift);
 					write_iteration_model(opt_iter, x, &mod, &bnd, param);
+					if (scaling > 0)
+						scaling_normalize(x, nmodel, nparam, m0, m_shift);
+				}
+
+				/* Verbose end-of-iteration diagnostics */
+				if (verbose >= 2) {
+					float dm_norm = 0.0f;
+					for (i = 0; i < nvec; i++) {
+						float dx = x[i] - opt.xk[i];
+						dm_norm += dx * dx;
+					}
+					dm_norm = sqrtf(dm_norm);
+					vmess("");
+					vmess("  Final accepted alpha: %.4e", opt.alpha);
+					vmess("  ||delta_m||:   %.4e", dm_norm);
+					vmess("  Updated cost:  %.4e (%.2f%% of initial)",
+					      fcost, 100.0f * fcost / opt.f0);
+					vmess("  =========================================================");
+					diag_gnorm_raw_start = diag_gnorm_raw;
+					diag_new_iter = 1;
+				}
 			}
 
 			/* TRN/Enriched: keep checkpoints alive — the next
@@ -1501,7 +1646,9 @@ int main(int argc, char **argv)
 		vmess("Total forward problems: %d", opt.nfwd_pb);
 		vmess("Total time: %.1f s", t_total);
 
-		/* Write final model */
+		/* Write final model (denormalize to physical units) */
+		if (scaling > 0)
+			scaling_denormalize(x, nmodel, nparam, m0, m_shift);
 		write_iteration_model(opt.cpt_iter, x, &mod, &bnd, param);
 
 		/* Write final gradient */
@@ -1561,10 +1708,21 @@ int main(int argc, char **argv)
 
 	free(x);
 	free(grad_vec);
-	if (precond_vec) free(precond_vec);
 	if (grad_preco_vec) free(grad_preco_vec);
 	free(grad1); free(grad3);
 	if (grad2) free(grad2);
+	if (hess_lam) free(hess_lam);
+	if (hess_muu) free(hess_muu);
+	if (hess_rho) free(hess_rho);
+	if (hess_lam_muu) free(hess_lam_muu);
+	if (hess_lam_rho) free(hess_lam_rho);
+	if (hess_muu_rho) free(hess_muu_rho);
+	if (P11) free(P11);
+	if (P12) free(P12);
+	if (P13) free(P13);
+	if (P22) free(P22);
+	if (P23) free(P23);
+	if (P33) free(P33);
 
 	for (i = 0; i < wav.nx; i++)
 		free(src_nwav[i]);

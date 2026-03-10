@@ -55,10 +55,68 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              int ixsrc, int izsrc, float **src_nwav,
              checkpointPar *chk, snaPar *sna,
              float *grad1, float *grad2, float *grad3,
-             float *illum_lam, float *illum_muu, float *illum_rho,
+             float *hess_lam, float *hess_muu, float *hess_rho,
+             float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
              int param, int verbose);
 
 double wallclock_time(void);
+
+
+/***********************************************************************
+ * computeHydrophone -- Compute pressure P = 0.5*(Tzz + Txx) from Born data.
+ *
+ * Same logic as fwi_inversion.c:computeHydrophone.  Reads Born _rtzz
+ * and _rtxx files and writes hydrophone _rp file.
+ ***********************************************************************/
+static int computeHydrophone(const char *file_tzz, const char *file_txx,
+                             const char *file_p, int verbose)
+{
+	FILE *fp_tzz, *fp_txx, *fp_p;
+	segy hdr_tzz, hdr_txx;
+	float *data_tzz, *data_txx;
+	int ns;
+	size_t nread;
+
+	fp_tzz = fopen(file_tzz, "r");
+	fp_txx = fopen(file_txx, "r");
+	if (!fp_tzz || !fp_txx) {
+		if (fp_tzz) fclose(fp_tzz);
+		if (fp_txx) fclose(fp_txx);
+		return -1;
+	}
+
+	fp_p = fopen(file_p, "w");
+	if (!fp_p) { fclose(fp_tzz); fclose(fp_txx); return -1; }
+
+	nread = fread(&hdr_tzz, 1, TRCBYTES, fp_tzz);
+	if (nread != TRCBYTES) {
+		fclose(fp_tzz); fclose(fp_txx); fclose(fp_p);
+		return -1;
+	}
+	rewind(fp_tzz);
+
+	ns = hdr_tzz.ns;
+	data_tzz = (float *)malloc(ns * sizeof(float));
+	data_txx = (float *)malloc(ns * sizeof(float));
+
+	while (fread(&hdr_tzz, 1, TRCBYTES, fp_tzz) == TRCBYTES &&
+	       fread(&hdr_txx, 1, TRCBYTES, fp_txx) == TRCBYTES) {
+		if (hdr_tzz.ns != ns || hdr_txx.ns != ns) break;
+		nread = fread(data_tzz, sizeof(float), ns, fp_tzz);
+		if ((int)nread != ns) break;
+		nread = fread(data_txx, sizeof(float), ns, fp_txx);
+		if ((int)nread != ns) break;
+		for (int is = 0; is < ns; is++)
+			data_tzz[is] = 0.5f * (data_tzz[is] + data_txx[is]);
+		hdr_tzz.trid = 11;
+		fwrite(&hdr_tzz, 1, TRCBYTES, fp_p);
+		fwrite(data_tzz, sizeof(float), ns, fp_p);
+	}
+
+	free(data_tzz); free(data_txx);
+	fclose(fp_tzz); fclose(fp_txx); fclose(fp_p);
+	return 0;
+}
 
 
 /***********************************************************************
@@ -241,7 +299,7 @@ int hess_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
               int ishot, int nshots, int fileno,
               int res_taper,
               float *hd1, float *hd2, float *hd3,
-              int param, int verbose)
+              int param, const float *comp_weights, int verbose)
 {
 	adjSrcPar adj;
 	double t0_wall;
@@ -262,7 +320,26 @@ int hess_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 		verr("hess_shot: born_shot failed for shot %d", ishot);
 
 	/* ============================================================ */
-	/* 2. Combine Born component .su files into residual format      */
+	/* 2. Compute Born hydrophone if _rp is requested                */
+	/*                                                               */
+	/* born_shot writes _rtzz and _rtxx but NOT _rp.  Hydrophone     */
+	/* must be computed as P = 0.5*(Tzz + Txx), same as for          */
+	/* synthetic/observed data in fwi_inversion.c.                   */
+	/* ============================================================ */
+	if (strstr(comp_str, "_rp")) {
+		char born_tzz[512], born_txx[512], born_p[512];
+		snprintf(born_tzz, sizeof(born_tzz), "%s_%03d_rtzz.su", file_born, fileno);
+		snprintf(born_txx, sizeof(born_txx), "%s_%03d_rtxx.su", file_born, fileno);
+		snprintf(born_p,   sizeof(born_p),   "%s_%03d_rp.su",   file_born, fileno);
+		ret = computeHydrophone(born_tzz, born_txx, born_p, verbose);
+		if (ret != 0)
+			verr("hess_shot: computeHydrophone failed for Born shot %d", ishot);
+		if (verbose)
+			vmess("hess_shot: Computed Born hydrophone %s", born_p);
+	}
+
+	/* ============================================================ */
+	/* 3. Combine Born component .su files into residual format      */
 	/*                                                               */
 	/* born_shot writes per-component files (e.g., born_000_rvz.su). */
 	/* readResidual expects a single file with TRID headers.         */
@@ -311,6 +388,23 @@ int hess_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			vmess("hess_shot: Born data loaded: %d traces, %d samples",
 			      adj.nsrc, adj.nt);
 
+		/* Apply Brossier W_d weighting to Born data (same weights
+		 * as gradient residual, so H*d = J^T(w^2 * J*d)).
+		 * Traces are concatenated by component in comp_str order,
+		 * with each component having ntr_per_comp = nsrc/ncomp traces. */
+		if (comp_weights && adj.nsrc > 0 && ncomp > 0) {
+			int ntr_per_comp = adj.nsrc / ncomp;
+			int ic, itr2, is2;
+			for (ic = 0; ic < ncomp; ic++) {
+				float w2 = comp_weights[ic] * comp_weights[ic];
+				for (itr2 = 0; itr2 < ntr_per_comp; itr2++) {
+					int idx = (ic * ntr_per_comp + itr2) * adj.nt;
+					for (is2 = 0; is2 < adj.nt; is2++)
+						adj.wav[idx + is2] *= w2;
+				}
+			}
+		}
+
 		/* Apply cosine taper to Born data (same as gradient residual
 		 * to suppress edge effects at trace ends) */
 		if (res_taper > 0)
@@ -332,7 +426,8 @@ int hess_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 	/* ============================================================ */
 	adj_shot(mod, src, wav, bnd, rec, &adj,
 	         ixsrc, izsrc, src_nwav, chk, NULL,
-	         hd1, hd2, hd3, NULL, NULL, NULL, param, verbose);
+	         hd1, hd2, hd3, NULL, NULL, NULL, NULL, NULL, NULL,
+	         param, verbose);
 
 	/* ============================================================ */
 	/* 5. Cleanup                                                    */

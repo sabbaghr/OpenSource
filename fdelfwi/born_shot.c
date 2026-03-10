@@ -351,19 +351,19 @@ int born_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 }
 
 			/* ---- Record Born wavefield at receivers ----
-			 * CRITICAL: Use same isam formula as applyAdjointSource
-			 * (0-based) so that the recording and injection operators
-			 * are exact adjoints of each other.  The fdfwimodc formula
-			 * has a +1 offset that breaks the R/R^T duality required
-			 * for Hessian symmetry (J^T J must be symmetric).
+			 * Use 1-based isam formula matching fdfwimodc so that
+			 * readResidual (which skips SU sample 0) works
+			 * uniformly for both the gradient and Hessian pipelines.
+			 * Time alignment with applyAdjointSource (0-based) is
+			 * preserved because readResidual maps sample[k+1] to
+			 * adj->wav[k], and applyAdjointSource reads wav[isam]
+			 * with isam = (itime-delay)/skipdt.
 			 *
 			 * BOUNDS CHECK: isam must be < rec->nt to avoid writing
-			 * past the allocated receiver buffer.  The simulation may
-			 * run longer than tmod (e.g. nt=1024 > tmod/dt=1000),
-			 * so time steps past the recording window are skipped. */
+			 * past the allocated receiver buffer. */
 			if ((((it - rec->delay) % rec->skipdt) == 0) &&
 			    (it >= rec->delay) && size > 0) {
-				isam = (it - rec->delay) / rec->skipdt;
+				isam = (it - rec->delay) / rec->skipdt + 1;
 				if (isam >= rec->nt) continue;
 
 				getRecTimes(*mod, *rec, *bnd, it, isam,

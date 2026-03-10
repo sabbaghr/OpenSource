@@ -1,6 +1,7 @@
 #include<stdlib.h>
 #include<stdio.h>
 #include<math.h>
+#include<string.h>
 #include"fdelfwi.h"
 
 /**
@@ -18,6 +19,11 @@
  *
  * The mu gradient has factor 2 on the normal-stress terms (from l2m = λ+2μ)
  * but factor 1 on the shear term (from mul = μ).
+ *
+ * Pseudo-Hessian (Yang et al., 2018, SIAM J. Sci. Comput., eq 45):
+ *   Replaces adjoint wavefield with forward wavefield in gradient formula.
+ *   K_λ = (txx+tzz)·div(v),  K_μ = 2(txx·exx+tzz·ezz)+txz·exz,
+ *   K_ρ = (1/ρ)(vx·ax+vz·az).  H̃_ij = Σ_t K_i·K_j.
  *
  * Spatial derivatives match the forward operator stencils (order 4, 6, or 8).
  */
@@ -39,14 +45,26 @@
  *   g_μ = +Σ dt·[2·(ψ_txx·∂vx/∂x + ψ_tzz·∂vz/∂z) + ψ_txz·(∂vx/∂z + ∂vz/∂x)]
  *   g_ρ = +Σ (dt/ρ)·ψ_v·∂v/∂t
  * The result is dJ/dm (true gradient). Optimizer uses m -= α·g.
+ *
+ * Pseudo-Hessian (Yang et al., 2018):
+ *   When fwd_txx/fwd_tzz/fwd_txz are non-NULL and hess_* arrays are
+ *   non-NULL, accumulates the Yang pseudo-Hessian H̃_ij = Σ K_i·K_j
+ *   where K_i = w†∂A/∂m_i w uses the forward wavefield for both
+ *   "source" and "receiver" sides (zero-offset approximation).
+ *
+ *   Scratch arrays K_lam_tmp/K_muu_tmp/K_rho_tmp (size nax*naz each,
+ *   pre-allocated by caller) hold per-timestep kernel values at P grid.
  ***********************************************************************/
 void accumGradient(modPar *mod, bndPar *bnd,
                    float *fwd_vx, float *fwd_vz,
                    float *fwd_vx_prev, float *fwd_vz_prev,
+                   float *fwd_txx, float *fwd_tzz, float *fwd_txz,
                    wflPar *wfl_adj,
                    float dt,
                    float *grad_lam, float *grad_muu, float *grad_rho,
-                   float *illum_lam, float *illum_muu, float *illum_rho)
+                   float *hess_lam, float *hess_muu, float *hess_rho,
+                   float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
+                   float *K_lam_tmp, float *K_muu_tmp, float *K_rho_tmp)
 {
 	int ix, iz, n1, nax;
 	int ibPx, iePx, ibPz, iePz;
@@ -57,6 +75,8 @@ void accumGradient(modPar *mod, bndPar *bnd,
 	float c1, c2, c3, c4;
 	int half;
 
+	int do_hess;   /* Yang pseudo-Hessian accumulation active */
+
 	/* Only for elastic (ischeme > 2) */
 	if (mod->ischeme <= 2) return;
 
@@ -64,6 +84,18 @@ void accumGradient(modPar *mod, bndPar *bnd,
 	nax = mod->nax;
 	sdx = 1.0f / mod->dx;
 	sdz = 1.0f / mod->dz;
+
+	/* Yang pseudo-Hessian requires forward stress AND scratch arrays */
+	do_hess = (hess_lam && fwd_txx && fwd_tzz && fwd_txz &&
+	           K_lam_tmp && K_muu_tmp && K_rho_tmp);
+
+	/* Zero scratch arrays for this time step */
+	if (do_hess) {
+		size_t sz = (size_t)nax * n1;
+		memset(K_lam_tmp, 0, sz * sizeof(float));
+		memset(K_muu_tmp, 0, sz * sizeof(float));
+		memset(K_rho_tmp, 0, sz * sizeof(float));
+	}
 
 	/* ================================================================
 	 * Order-dependent FD coefficients (must match forward kernels)
@@ -175,33 +207,39 @@ void accumGradient(modPar *mod, bndPar *bnd,
 	 *
 	 * The D+x/D+z stencils are the same as in the forward stress update.
 	 * ================================================================ */
-	if (grad_lam || illum_lam) {
+	if (grad_lam || do_hess) {
 		for (ix = ibPx; ix < iePx; ix++) {
 			for (iz = ibPz; iz < iePz; iz++) {
 				float dvxdx_f, dvzdz_f, div_f;
+				int ig = ix*n1+iz;
 
 				/* Forward velocity divergence at P grid (order-dependent) */
-				dvxdx_f = sdx*(c1*(fwd_vx[(ix+1)*n1+iz]-fwd_vx[ix*n1+iz])
+				dvxdx_f = sdx*(c1*(fwd_vx[(ix+1)*n1+iz]-fwd_vx[ig])
 				              +c2*(fwd_vx[(ix+2)*n1+iz]-fwd_vx[(ix-1)*n1+iz]));
-				dvzdz_f = sdz*(c1*(fwd_vz[ix*n1+iz+1]-fwd_vz[ix*n1+iz])
-				              +c2*(fwd_vz[ix*n1+iz+2]-fwd_vz[ix*n1+iz-1]));
+				dvzdz_f = sdz*(c1*(fwd_vz[ig+1]-fwd_vz[ig])
+				              +c2*(fwd_vz[ig+2]-fwd_vz[ig-1]));
 				if (mod->iorder >= 6) {
 					dvxdx_f += sdx*c3*(fwd_vx[(ix+3)*n1+iz]-fwd_vx[(ix-2)*n1+iz]);
-					dvzdz_f += sdz*c3*(fwd_vz[ix*n1+iz+3]-fwd_vz[ix*n1+iz-2]);
+					dvzdz_f += sdz*c3*(fwd_vz[ig+3]-fwd_vz[ig-2]);
 				}
 				if (mod->iorder >= 8) {
 					dvxdx_f += sdx*c4*(fwd_vx[(ix+4)*n1+iz]-fwd_vx[(ix-3)*n1+iz]);
-					dvzdz_f += sdz*c4*(fwd_vz[ix*n1+iz+4]-fwd_vz[ix*n1+iz-3]);
+					dvzdz_f += sdz*c4*(fwd_vz[ig+4]-fwd_vz[ig-3]);
 				}
 
 				div_f = dvxdx_f + dvzdz_f;
 
 				if (grad_lam)
-					grad_lam[ix*n1+iz] += dt*(wfl_adj->txx[ix*n1+iz] + wfl_adj->tzz[ix*n1+iz])
-					                        * div_f;
-				/* H_λ = Σ (∇·v)² */
-				if (illum_lam)
-					illum_lam[ix*n1+iz] += div_f * div_f;
+					grad_lam[ig] += dt*(wfl_adj->txx[ig] + wfl_adj->tzz[ig])
+					                   * div_f;
+
+				/* Yang pseudo-Hessian kernels at P grid */
+				if (do_hess) {
+					float S = fwd_txx[ig] + fwd_tzz[ig];
+					K_lam_tmp[ig] = S * div_f;
+					/* K_μ normal-stress part (shear part added in Txz loop) */
+					K_muu_tmp[ig] = 2.0f*(fwd_txx[ig]*dvxdx_f + fwd_tzz[ig]*dvzdz_f);
+				}
 			}
 		}
 	}
@@ -219,33 +257,32 @@ void accumGradient(modPar *mod, bndPar *bnd,
 	 *
 	 * No interpolation needed — each cross-correlation uses collocated fields.
 	 * ================================================================ */
-	if (grad_muu || illum_muu) {
+	if (grad_muu || do_hess) {
 		/* --- Part 1: Normal-stress at P grid (same bounds as lambda) ---
 		 * Gradient: g_μ += 2*(ψ_txx·dvxdx + ψ_tzz·dvzdz)
-		 * Illumination: H_μ += 4*(dvxdx² + dvzdz²)  [factor 2² from ∂l2m/∂μ=2] */
-		for (ix = ibPx; ix < iePx; ix++) {
-			for (iz = ibPz; iz < iePz; iz++) {
-				float dvxdx_f, dvzdz_f;
+		 * K_μ_P already stored in K_muu_tmp by the lambda loop above. */
+		if (grad_muu) {
+			for (ix = ibPx; ix < iePx; ix++) {
+				for (iz = ibPz; iz < iePz; iz++) {
+					float dvxdx_f, dvzdz_f;
+					int ig = ix*n1+iz;
 
-				dvxdx_f = sdx*(c1*(fwd_vx[(ix+1)*n1+iz]-fwd_vx[ix*n1+iz])
-				              +c2*(fwd_vx[(ix+2)*n1+iz]-fwd_vx[(ix-1)*n1+iz]));
-				dvzdz_f = sdz*(c1*(fwd_vz[ix*n1+iz+1]-fwd_vz[ix*n1+iz])
-				              +c2*(fwd_vz[ix*n1+iz+2]-fwd_vz[ix*n1+iz-1]));
-				if (mod->iorder >= 6) {
-					dvxdx_f += sdx*c3*(fwd_vx[(ix+3)*n1+iz]-fwd_vx[(ix-2)*n1+iz]);
-					dvzdz_f += sdz*c3*(fwd_vz[ix*n1+iz+3]-fwd_vz[ix*n1+iz-2]);
-				}
-				if (mod->iorder >= 8) {
-					dvxdx_f += sdx*c4*(fwd_vx[(ix+4)*n1+iz]-fwd_vx[(ix-3)*n1+iz]);
-					dvzdz_f += sdz*c4*(fwd_vz[ix*n1+iz+4]-fwd_vz[ix*n1+iz-3]);
-				}
+					dvxdx_f = sdx*(c1*(fwd_vx[(ix+1)*n1+iz]-fwd_vx[ig])
+					              +c2*(fwd_vx[(ix+2)*n1+iz]-fwd_vx[(ix-1)*n1+iz]));
+					dvzdz_f = sdz*(c1*(fwd_vz[ig+1]-fwd_vz[ig])
+					              +c2*(fwd_vz[ig+2]-fwd_vz[ig-1]));
+					if (mod->iorder >= 6) {
+						dvxdx_f += sdx*c3*(fwd_vx[(ix+3)*n1+iz]-fwd_vx[(ix-2)*n1+iz]);
+						dvzdz_f += sdz*c3*(fwd_vz[ig+3]-fwd_vz[ig-2]);
+					}
+					if (mod->iorder >= 8) {
+						dvxdx_f += sdx*c4*(fwd_vx[(ix+4)*n1+iz]-fwd_vx[(ix-3)*n1+iz]);
+						dvzdz_f += sdz*c4*(fwd_vz[ig+4]-fwd_vz[ig-3]);
+					}
 
-				if (grad_muu)
-					grad_muu[ix*n1+iz] += dt*2.0f*(wfl_adj->txx[ix*n1+iz]*dvxdx_f
-					                              + wfl_adj->tzz[ix*n1+iz]*dvzdz_f);
-				/* H_μ normal-stress part: (2*dvxdx)² + (2*dvzdz)² */
-				if (illum_muu)
-					illum_muu[ix*n1+iz] += 4.0f*(dvxdx_f*dvxdx_f + dvzdz_f*dvzdz_f);
+					grad_muu[ig] += dt*2.0f*(wfl_adj->txx[ig]*dvxdx_f
+					                        + wfl_adj->tzz[ig]*dvzdz_f);
+				}
 			}
 		}
 
@@ -255,39 +292,43 @@ void accumGradient(modPar *mod, bndPar *bnd,
 		 * This is the transpose of the harmonic averaging in readModel.c
 		 * (approximated with arithmetic weights).
 		 * Index mapping: Txz(ix,iz) → P-grid (ix-1,iz-1),(ix,iz-1),(ix-1,iz),(ix,iz)
-		 * since ioTx = ioPx+1, ioTz = ioPz+1. */
+		 * since ioTx = ioPx+1, ioTz = ioPz+1.
+		 *
+		 * For Yang pseudo-Hessian: also scatter K_μ_S = txz·(exz) to P grid
+		 * so that K_muu_tmp = K_μ_P + K_μ_S at P grid. */
 		for (ix = ibTx; ix < ieTx; ix++) {
 			for (iz = ibTz; iz < ieTz; iz++) {
-				float dvxdz_f, dvzdx_f, shear_strain2;
+				float dvxdz_f, dvzdx_f;
+				int ig = ix*n1+iz;
 
-				dvxdz_f = sdz*(c1*(fwd_vx[ix*n1+iz]-fwd_vx[ix*n1+iz-1])
-				              +c2*(fwd_vx[ix*n1+iz+1]-fwd_vx[ix*n1+iz-2]));
-				dvzdx_f = sdx*(c1*(fwd_vz[ix*n1+iz]-fwd_vz[(ix-1)*n1+iz])
+				dvxdz_f = sdz*(c1*(fwd_vx[ig]-fwd_vx[ig-1])
+				              +c2*(fwd_vx[ig+1]-fwd_vx[ig-2]));
+				dvzdx_f = sdx*(c1*(fwd_vz[ig]-fwd_vz[(ix-1)*n1+iz])
 				              +c2*(fwd_vz[(ix+1)*n1+iz]-fwd_vz[(ix-2)*n1+iz]));
 				if (mod->iorder >= 6) {
-					dvxdz_f += sdz*c3*(fwd_vx[ix*n1+iz+2]-fwd_vx[ix*n1+iz-3]);
+					dvxdz_f += sdz*c3*(fwd_vx[ig+2]-fwd_vx[ig-3]);
 					dvzdx_f += sdx*c3*(fwd_vz[(ix+2)*n1+iz]-fwd_vz[(ix-3)*n1+iz]);
 				}
 				if (mod->iorder >= 8) {
-					dvxdz_f += sdz*c4*(fwd_vx[ix*n1+iz+3]-fwd_vx[ix*n1+iz-4]);
+					dvxdz_f += sdz*c4*(fwd_vx[ig+3]-fwd_vx[ig-4]);
 					dvzdx_f += sdx*c4*(fwd_vz[(ix+3)*n1+iz]-fwd_vz[(ix-4)*n1+iz]);
 				}
 
 				if (grad_muu) {
-					float shear = dt*wfl_adj->txz[ix*n1+iz]*(dvxdz_f + dvzdx_f);
+					float shear = dt*wfl_adj->txz[ig]*(dvxdz_f + dvzdx_f);
 					/* Scatter to 4 surrounding P-grid points */
 					grad_muu[(ix-1)*n1+iz-1] += 0.25f * shear;
 					grad_muu[ix*n1+iz-1]     += 0.25f * shear;
 					grad_muu[(ix-1)*n1+iz]   += 0.25f * shear;
-					grad_muu[ix*n1+iz]       += 0.25f * shear;
+					grad_muu[ig]             += 0.25f * shear;
 				}
-				/* H_μ shear part: (dvxdz + dvzdx)² scattered to P grid */
-				if (illum_muu) {
-					shear_strain2 = (dvxdz_f + dvzdx_f) * (dvxdz_f + dvzdx_f);
-					illum_muu[(ix-1)*n1+iz-1] += 0.25f * shear_strain2;
-					illum_muu[ix*n1+iz-1]     += 0.25f * shear_strain2;
-					illum_muu[(ix-1)*n1+iz]   += 0.25f * shear_strain2;
-					illum_muu[ix*n1+iz]       += 0.25f * shear_strain2;
+				/* Scatter K_μ_S to P grid (Yang pseudo-Hessian) */
+				if (do_hess) {
+					float K_muu_S = fwd_txz[ig] * (dvxdz_f + dvzdx_f);
+					K_muu_tmp[(ix-1)*n1+iz-1] += 0.25f * K_muu_S;
+					K_muu_tmp[ix*n1+iz-1]     += 0.25f * K_muu_S;
+					K_muu_tmp[(ix-1)*n1+iz]   += 0.25f * K_muu_S;
+					K_muu_tmp[ig]             += 0.25f * K_muu_S;
 				}
 			}
 		}
@@ -310,7 +351,7 @@ void accumGradient(modPar *mod, bndPar *bnd,
 	 * ψ_vz · dvz/dt is native at Vz grid, which straddles P(ix,iz-1)
 	 * and P(ix,iz) in z.  Same scatter pattern.
 	 * ================================================================ */
-	if ((grad_rho || illum_rho) && fwd_vx_prev && fwd_vz_prev) {
+	if ((grad_rho || do_hess) && fwd_vx_prev && fwd_vz_prev) {
 		float dvx_dt, dvz_dt;
 		float sdt = 1.0f / dt;
 		float *rho = mod->rho;
@@ -318,37 +359,63 @@ void accumGradient(modPar *mod, bndPar *bnd,
 		/* Vx contribution, scattered to P grid */
 		for (ix = ibVx_x; ix < ieVx_x; ix++) {
 			for (iz = ibVx_z; iz < ieVx_z; iz++) {
-				dvx_dt = (fwd_vx[ix*n1+iz] - fwd_vx_prev[ix*n1+iz]) * sdt;
+				int ig = ix*n1+iz;
+				dvx_dt = (fwd_vx[ig] - fwd_vx_prev[ig]) * sdt;
 				if (grad_rho) {
-					float vx_contrib = dt * wfl_adj->vx[ix*n1+iz] * dvx_dt;
+					float vx_contrib = dt * wfl_adj->vx[ig] * dvx_dt;
 					grad_rho[(ix-1)*n1+iz] += 0.5f * vx_contrib / rho[(ix-1)*n1+iz];
-					grad_rho[ix*n1+iz]     += 0.5f * vx_contrib / rho[ix*n1+iz];
+					grad_rho[ig]           += 0.5f * vx_contrib / rho[ig];
 				}
-				/* H_ρ: (dvx/dt / ρ)² scattered to P grid */
-				if (illum_rho) {
-					float a2 = dvx_dt * dvx_dt;
-					float r1 = rho[(ix-1)*n1+iz], r2 = rho[ix*n1+iz];
-					illum_rho[(ix-1)*n1+iz] += 0.5f * a2 / (r1*r1);
-					illum_rho[ix*n1+iz]     += 0.5f * a2 / (r2*r2);
+				/* Yang K_ρ: (1/ρ)(vx·dvx/dt), scattered to P grid */
+				if (do_hess) {
+					float K_rho_vx = fwd_vx[ig] * dvx_dt;
+					float r1 = rho[(ix-1)*n1+iz], r2 = rho[ig];
+					K_rho_tmp[(ix-1)*n1+iz] += 0.5f * K_rho_vx / r1;
+					K_rho_tmp[ig]           += 0.5f * K_rho_vx / r2;
 				}
 			}
 		}
 		/* Vz contribution, scattered to P grid */
 		for (ix = ibVz_x; ix < ieVz_x; ix++) {
 			for (iz = ibVz_z; iz < ieVz_z; iz++) {
-				dvz_dt = (fwd_vz[ix*n1+iz] - fwd_vz_prev[ix*n1+iz]) * sdt;
+				int ig = ix*n1+iz;
+				dvz_dt = (fwd_vz[ig] - fwd_vz_prev[ig]) * sdt;
 				if (grad_rho) {
-					float vz_contrib = dt * wfl_adj->vz[ix*n1+iz] * dvz_dt;
-					grad_rho[ix*n1+(iz-1)] += 0.5f * vz_contrib / rho[ix*n1+(iz-1)];
-					grad_rho[ix*n1+iz]     += 0.5f * vz_contrib / rho[ix*n1+iz];
+					float vz_contrib = dt * wfl_adj->vz[ig] * dvz_dt;
+					grad_rho[ig-1] += 0.5f * vz_contrib / rho[ig-1];
+					grad_rho[ig]   += 0.5f * vz_contrib / rho[ig];
 				}
-				/* H_ρ: (dvz/dt / ρ)² scattered to P grid */
-				if (illum_rho) {
-					float a2 = dvz_dt * dvz_dt;
-					float r1 = rho[ix*n1+(iz-1)], r2 = rho[ix*n1+iz];
-					illum_rho[ix*n1+(iz-1)] += 0.5f * a2 / (r1*r1);
-					illum_rho[ix*n1+iz]     += 0.5f * a2 / (r2*r2);
+				/* Yang K_ρ: (1/ρ)(vz·dvz/dt), scattered to P grid */
+				if (do_hess) {
+					float K_rho_vz = fwd_vz[ig] * dvz_dt;
+					float r1 = rho[ig-1], r2 = rho[ig];
+					K_rho_tmp[ig-1] += 0.5f * K_rho_vz / r1;
+					K_rho_tmp[ig]   += 0.5f * K_rho_vz / r2;
 				}
+			}
+		}
+	}
+
+	/* ================================================================
+	 * Final sweep: accumulate Yang pseudo-Hessian H̃_ij = Σ K_i·K_j
+	 *
+	 * All three kernels (K_λ, K_μ, K_ρ) are now collocated at P grid
+	 * in the scratch arrays. Compute all 6 upper-triangle products.
+	 * ================================================================ */
+	if (do_hess) {
+		for (ix = ibPx; ix < iePx; ix++) {
+			for (iz = ibPz; iz < iePz; iz++) {
+				int ig = ix*n1+iz;
+				float Kl = K_lam_tmp[ig];
+				float Km = K_muu_tmp[ig];
+				float Kr = K_rho_tmp[ig];
+
+				hess_lam[ig]     += Kl * Kl;
+				hess_muu[ig]     += Km * Km;
+				hess_rho[ig]     += Kr * Kr;
+				hess_lam_muu[ig] += Kl * Km;
+				hess_lam_rho[ig] += Kl * Kr;
+				hess_muu_rho[ig] += Km * Kr;
 			}
 		}
 	}

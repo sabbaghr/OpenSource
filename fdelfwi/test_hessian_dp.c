@@ -314,6 +314,52 @@ int main(int argc, char **argv)
 		vmess("test_block=%d: testing %s only", test_block, block_names[test_block]);
 	}
 
+	/* ---- Zero perturbation near source injection point ----
+	 * applySource uses material parameters (rox/roz, l2m) at the
+	 * source grid point.  The Born virtual source and gradient do
+	 * NOT include this source sensitivity, so model perturbation
+	 * near the source contaminates the symmetry test.
+	 * Same approach as test_dotproduct.c lines 528-544. */
+	{
+		int src_margin = 3;  /* covers stagger averaging */
+		int iix, iiz, p2;
+		for (iix = ixsrc - src_margin; iix <= ixsrc + src_margin; iix++) {
+			for (iiz = izsrc - src_margin; iiz <= izsrc + src_margin; iiz++) {
+				if (iix >= 0 && iix < mod.nx && iiz >= 0 && iiz < mod.nz) {
+					int idx2 = iix * mod.nz + iiz;
+					for (p2 = 0; p2 < nparam; p2++) {
+						dm1[p2 * nmodel + idx2] = 0.0f;
+						dm2[p2 * nmodel + idx2] = 0.0f;
+					}
+				}
+			}
+		}
+		vmess("Zeroed perturbation near source (ix=%d, iz=%d) +/- %d",
+			ixsrc, izsrc, src_margin);
+	}
+
+	/* ---- Zero perturbation in absorbing taper margin ----
+	 * The gradient is not accumulated in the taper zone, so any
+	 * Born scattering from perturbation there cannot be captured
+	 * by the adjoint.  Zero the perturbation for consistency. */
+	{
+		int margin = (bnd.ntap > mod.iorder/2) ? bnd.ntap : mod.iorder/2;
+		for (ix = 0; ix < mod.nx; ix++) {
+			for (iz = 0; iz < mod.nz; iz++) {
+				if (ix < margin || ix >= mod.nx - margin ||
+				    iz < margin || iz >= mod.nz - margin) {
+					int idx2 = ix * mod.nz + iz;
+					int p2;
+					for (p2 = 0; p2 < nparam; p2++) {
+						dm1[p2 * nmodel + idx2] = 0.0f;
+						dm2[p2 * nmodel + idx2] = 0.0f;
+					}
+				}
+			}
+		}
+		vmess("Zeroed perturbation in boundary margin (%d points)", margin);
+	}
+
 	{
 		double norm1 = 0.0, norm2 = 0.0;
 		for (i = 0; i < nvec; i++) {
@@ -362,7 +408,7 @@ int main(int argc, char **argv)
 	          0,  /* no residual taper */
 	          hd1_g1, hd1_g2, hd1_g3,
 	          1,  /* always accumulate in Lame space */
-	          verbose);
+	          NULL, verbose);
 
 	/* Heap probe: after hess_shot dm1 */
 	{ void *_hp = malloc(64); if (_hp) { memset(_hp, 0, 64); free(_hp); }
@@ -409,7 +455,7 @@ int main(int argc, char **argv)
 	          0,  /* no residual taper */
 	          hd2_g1, hd2_g2, hd2_g3,
 	          1,  /* always accumulate in Lame space */
-	          verbose);
+	          NULL, verbose);
 
 	/* Heap probe: after hess_shot dm2 */
 	{ void *_hp = malloc(64); if (_hp) { memset(_hp, 0, 64); free(_hp); }

@@ -124,6 +124,7 @@ int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd)
 	/*************/
 	/* Read Data */
 	/*************/
+	int su_ns = 0;  /* original SU sample count (before offset correction) */
 	for (isrc = 0; isrc < (size_t)adj->nsrc; isrc++) {
 		float grid_x, grid_z;
 
@@ -133,15 +134,23 @@ int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd)
 		if (hdr.trid < 1 || hdr.trid > 24)
 			verr("readResidual: In %s trace %zu has unknown receiver type (trid=%d).", filename, isrc + 1, hdr.trid);
 
-		/* Set nt from first trace */
+		/* Set nt from first trace.
+		 * fdfwimodc records with isam = it/skipdt + 1, so SU sample 0
+		 * is never written (always zero).  We skip it here so that
+		 * applyAdjointSource (isam = itime/skipdt, starting at 0)
+		 * reads the correct time-aligned data:
+		 *   adj->wav[k] = SU sample k+1 = data at forward time k*skipdt. */
 		if (isrc == 0) {
-			adj->nt  = (int)hdr.ns;
+			su_ns    = (int)hdr.ns;
+			adj->nt  = su_ns - 1;
+			if (adj->nt < 1)
+				verr("readResidual: SU file %s has ns=%d, need at least 2.", filename, su_ns);
 			adj->wav = (float *)malloc((size_t)adj->nsrc * adj->nt * sizeof(float));
 			if (!adj->wav)
 				verr("readResidual: Memory allocation failed for waveform data (%d x %d).", adj->nsrc, adj->nt);
 		} else {
-			if ((int)hdr.ns != adj->nt)
-				verr("readResidual: In %s trace %zu has %d samples, expected %d.", filename, isrc + 1, hdr.ns, adj->nt);
+			if ((int)hdr.ns != su_ns)
+				verr("readResidual: In %s trace %zu has %d samples, expected %d.", filename, isrc + 1, hdr.ns, su_ns);
 		}
 
 		/* Type and orientation from TRID */
@@ -196,9 +205,15 @@ int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd)
 		else
 			adj->zi[isrc] = ibndz + (size_t)grid_z;
 
-		/* Read trace data */
-		if (fread(&adj->wav[isrc * adj->nt], sizeof(float), adj->nt, fp) != (size_t)adj->nt)
-			verr("readResidual: Could not read data for trace %zu in %s.", isrc + 1, filename);
+		/* Read trace data: skip SU sample 0 (isam+1 recording offset),
+		 * then read the remaining adj->nt = su_ns - 1 samples. */
+		{
+			float s0;
+			if (fread(&s0, sizeof(float), 1, fp) != 1)
+				verr("readResidual: Could not read sample 0 for trace %zu in %s.", isrc + 1, filename);
+			if (fread(&adj->wav[isrc * adj->nt], sizeof(float), adj->nt, fp) != (size_t)adj->nt)
+				verr("readResidual: Could not read data for trace %zu in %s.", isrc + 1, filename);
+		}
 	}
 
 	fclose(fp);

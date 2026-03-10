@@ -53,13 +53,7 @@ int writeSnapTimes(modPar mod, snaPar sna, bndPar bnd, wavPar wav,
 void writeSnapTimesReset(void);
 
 /* Gradient cross-correlation and parameterization (fwi_gradient.c) */
-void accumGradient(modPar *mod, bndPar *bnd,
-                   float *fwd_vx, float *fwd_vz,
-                   float *fwd_vx_prev, float *fwd_vz_prev,
-                   wflPar *wfl_adj,
-                   float dt,
-                   float *grad_lam, float *grad_muu, float *grad_rho,
-                   float *illum_lam, float *illum_muu, float *illum_rho);
+/* accumGradient declared in fdelfwi.h */
 void convertGradientToVelocity(float *grad1, float *grad2, float *grad3,
                                float *cp, float *cs, float *rho,
                                size_t sizem);
@@ -182,18 +176,21 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              int ixsrc, int izsrc, float **src_nwav,
              checkpointPar *chk, snaPar *sna,
              float *grad1, float *grad2, float *grad3,
-             float *illum_lam, float *illum_muu, float *illum_rho,
+             float *hess_lam, float *hess_muu, float *hess_rho,
+             float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
              int param, int verbose)
 {
 	wflPar wfl_fwd, wfl_adj;
 	float *buf_vx, *buf_vz;
 	float *buf_txx, *buf_tzz, *buf_txz;     /* Forward stress buffer for D_σ density gradient */
 	float *grad_lam, *grad_muu, *grad_rho;  /* Internal Lamé gradient pointers */
+	float *K_lam_tmp, *K_muu_tmp, *K_rho_tmp; /* Yang pseudo-Hessian scratch arrays */
 	int k, j, it, seg_start, seg_end, nsteps, max_nsteps;
 	size_t sizem;
 	int it1;
 	float dt;
 	double t0_wall;
+	int do_hess;
 
 	int adj_snap_count;
 
@@ -249,6 +246,17 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 		wfl_adj.txx = (float *)calloc(sizem, sizeof(float));
 	}
 
+	/* Yang pseudo-Hessian: need scratch arrays for kernel colocation */
+	do_hess = (hess_lam != NULL);
+	K_lam_tmp = K_muu_tmp = K_rho_tmp = NULL;
+	if (do_hess) {
+		K_lam_tmp = (float *)malloc(sizem * sizeof(float));
+		K_muu_tmp = (float *)malloc(sizem * sizeof(float));
+		K_rho_tmp = (float *)malloc(sizem * sizeof(float));
+		if (!K_lam_tmp || !K_muu_tmp || !K_rho_tmp)
+			verr("adj_shot: Cannot allocate Yang scratch arrays");
+	}
+
 	/* ------------------------------------------------------------ */
 	/* 3. Allocate forward vx/vz buffer for one segment             */
 	/* ------------------------------------------------------------ */
@@ -264,12 +272,12 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 	if (!buf_vx || !buf_vz)
 		verr("adj_shot: Cannot allocate forward buffer (%d steps x %zu)", max_nsteps, sizem);
 
-	/* Stress buffer for exact D_σ density gradient (eliminates source
-	 * injection contamination in the dv/dt approximation).
-	 * Stores σ at each forward time step so that during the backward
-	 * pass we can compute D_σ(σ^{j-1}) directly. */
+	/* Stress buffer needed for:
+	 * 1. Exact D_σ density gradient (eliminates source injection contamination)
+	 * 2. Yang pseudo-Hessian kernels (K_λ, K_μ use forward stress)
+	 * Allocate if either density gradient or pseudo-Hessian is requested. */
 	buf_txx = buf_tzz = buf_txz = NULL;
-	if (mod->ischeme > 2 && grad3) {
+	if (mod->ischeme > 2 && (grad3 || do_hess)) {
 		buf_txx = (float *)malloc((size_t)max_nsteps * sizem * sizeof(float));
 		buf_tzz = (float *)malloc((size_t)max_nsteps * sizem * sizeof(float));
 		buf_txz = (float *)malloc((size_t)max_nsteps * sizem * sizeof(float));
@@ -407,9 +415,14 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 				buf_vz + (size_t)j * sizem,
 				(j > 0) ? buf_vx + (size_t)(j-1) * sizem : NULL,
 				(j > 0) ? buf_vz + (size_t)(j-1) * sizem : NULL,
+				buf_txx ? buf_txx + (size_t)j * sizem : NULL,
+				buf_tzz ? buf_tzz + (size_t)j * sizem : NULL,
+				buf_txz ? buf_txz + (size_t)j * sizem : NULL,
 				&wfl_adj, dt,
 				grad_lam, grad_muu, NULL,
-				illum_lam, illum_muu, illum_rho);
+				hess_lam, hess_muu, hess_rho,
+				hess_lam_muu, hess_lam_rho, hess_muu_rho,
+				K_lam_tmp, K_muu_tmp, K_rho_tmp);
 
 			/* Advance adjoint wavefield with multicomponent source injection.
 			 * The adjoint kernel injects force residuals (Fx,Fz) at the
@@ -461,8 +474,11 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 					buf_vx + (size_t)j * sizem,
 					buf_vz + (size_t)j * sizem,
 					vx_prev, vz_prev,
+					NULL, NULL, NULL,
 					&wfl_adj, dt,
 					NULL, NULL, grad_rho,
+					NULL, NULL, NULL,
+					NULL, NULL, NULL,
 					NULL, NULL, NULL);
 			}
 
@@ -521,6 +537,9 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 	if (seg_end_txx) free(seg_end_txx);
 	if (seg_end_tzz) free(seg_end_tzz);
 	if (seg_end_txz) free(seg_end_txz);
+	if (K_lam_tmp) free(K_lam_tmp);
+	if (K_muu_tmp) free(K_muu_tmp);
+	if (K_rho_tmp) free(K_rho_tmp);
 	free(wfl_fwd.vx); free(wfl_fwd.vz); free(wfl_fwd.tzz);
 	if (wfl_fwd.txx) free(wfl_fwd.txx);
 	if (wfl_fwd.txz) free(wfl_fwd.txz);

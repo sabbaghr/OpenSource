@@ -10,21 +10,22 @@ echo "=== Cleaning fdelfwi/demo test output ==="
 
 # Remove test output directories (created by test_*.sh scripts)
 WORKDIRS=(
-    dotproduct_test
-    dotproduct_lame_test
-    gradient_test
-    hessian_dp_test
-    inversion_test
-    mpi_inversion_test
-    mpi_multishot_test
-    multishot_test
-    residual_test
-    taylor_test
-    trn_debug_test
-    trn_inversion_test
+    # Tier 1 - Core physics tests
+    wave_op_dp_test
     wave_op_dp_all
     wave_op_dp_freesurface
-    wave_op_dp_test
+    dotproduct_test
+    dotproduct_nodecim
+    dotproduct_small
+    taylor_test
+    hessian_dp_test
+    # Tier 2 - Optimization tests
+    optimizer_test
+    scaling_test
+    # Tier 3 - Inversion tests
+    lbfgs_inversion_test
+    trn_inversion_test
+    gradient_visual_test
 )
 
 for d in "${WORKDIRS[@]}"; do

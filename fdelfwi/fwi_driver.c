@@ -70,7 +70,8 @@ int initCheckpoints(checkpointPar *chk, modPar *mod, int skipdt,
 int cleanCheckpoints(checkpointPar *chk);
 
 float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
-                      const char *res_file, misfitType mtype, int verbose);
+                      const char *res_file, misfitType mtype,
+                      const float *comp_weights, int verbose);
 
 int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd);
 void freeResidual(adjSrcPar *adj);
@@ -80,7 +81,8 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              int ixsrc, int izsrc, float **src_nwav,
              checkpointPar *chk, snaPar *sna,
              float *grad1, float *grad2, float *grad3,
-             float *illum_lam, float *illum_muu, float *illum_rho,
+             float *hess_lam, float *hess_muu, float *hess_rho,
+             float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
              int param, int verbose);
 
 int writesufile(char *filename, float *data, size_t n1, size_t n2,
@@ -488,7 +490,7 @@ int main(int argc, char **argv)
 			}
 
 			snprintf(res_file, sizeof(res_file), "%s/residual.su", work_dir);
-			misfit = computeResidual(ncomp, obs_arr, syn_arr, res_file, MISFIT_L2, 0);
+			misfit = computeResidual(ncomp, obs_arr, syn_arr, res_file, MISFIT_L2, NULL, 0);
 			total_misfit += misfit;
 
 			/* Save residual for the snapshot shot */
@@ -529,7 +531,8 @@ int main(int argc, char **argv)
 
 			adj_shot(&mod, &src, &wav, &bnd, &rec, &adj,
 				ixsrc, izsrc, src_nwav, &chk, sna_adj_ptr,
-				shot_grad1, shot_grad2, shot_grad3, NULL, NULL, NULL, param, 0);
+				shot_grad1, shot_grad2, shot_grad3,
+				NULL, NULL, NULL, NULL, NULL, NULL, param, 0);
 
 			freeResidual(&adj);
 		}

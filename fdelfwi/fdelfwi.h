@@ -304,9 +304,53 @@ int hess_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
               int ishot, int nshots, int fileno,
               int res_taper,
               float *hd1, float *hd2, float *hd3,
-              int param, int verbose);
+              int param, const float *comp_weights, int verbose);
+
+/* --- computeResidual.c: Misfit and adjoint source --- */
+float computeDataRMS(const char *filename);
+float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
+                      const char *res_file, misfitType mtype,
+                      const float *comp_weights, int verbose);
+
+/* --- scaling.c: Parameter scaling (0=none, 1=Brossier, 2=Yang) --- */
+void scaling_compute_m0(int scaling, const float *x, int nmodel, int nparam,
+                        float *m0, float *m_shift);
+void scaling_set_yang_bounds(float *m0, float *m_shift,
+                             const float *m_min, const float *m_max, int nparam);
+void scaling_normalize(float *v, int nmodel, int nparam,
+                       const float *m0, const float *m_shift);
+void scaling_denormalize(float *v, int nmodel, int nparam,
+                         const float *m0, const float *m_shift);
+void scaling_scale_gradient(float *g, int nmodel, int nparam, const float *m0);
+void scaling_scale_hessian_vec(float *Hd, int nmodel, int nparam, const float *m0);
+void scaling_denorm_direction(float *d, int nmodel, int nparam, const float *m0);
+
+/* --- yang_precond.c: Yang pseudo-Hessian block preconditioner --- */
+void buildBlockPrecond(
+    float *hess_lam, float *hess_muu, float *hess_rho,
+    float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
+    modPar *mod, bndPar *bnd,
+    int param, int elastic,
+    float precond_eps, float s1, float s2, float s3,
+    float *P11, float *P12, float *P13,
+    float *P22, float *P23, float *P33,
+    int nmodel, int mpi_rank);
+void applyBlockPrecond(
+    float *out, const float *in,
+    const float *P11, const float *P12, const float *P13,
+    const float *P22, const float *P23, const float *P33,
+    int nmodel, int nparam);
 
 /* --- fwi_gradient.c: Gradient kernels --- */
+void accumGradient(modPar *mod, bndPar *bnd,
+                   float *fwd_vx, float *fwd_vz,
+                   float *fwd_vx_prev, float *fwd_vz_prev,
+                   float *fwd_txx, float *fwd_tzz, float *fwd_txz,
+                   wflPar *wfl_adj, float dt,
+                   float *grad_lam, float *grad_muu, float *grad_rho,
+                   float *hess_lam, float *hess_muu, float *hess_rho,
+                   float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
+                   float *K_lam_tmp, float *K_muu_tmp, float *K_rho_tmp);
 void convertGradientToVelocity(float *grad1, float *grad2, float *grad3,
                                float *cp, float *cs, float *rho, size_t sizem);
 void accumGradient_rho_Dsig(modPar *mod, bndPar *bnd,
