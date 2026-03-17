@@ -5,6 +5,9 @@
  * scaling=1 : Brossier (2011) — m0[p] = mean(|x_init_p|), x̃ = x/m0
  * scaling=2 : Yang (2018) eq 47 — m̄ = (m - m_min)/(m_max - m_min)
  *             maps parameters to [0,1] using user-provided bounds.
+ * scaling=3 : Range normalization (Métivier, pers. comm.) —
+ *             m* = m / Δm,  Δm = m_max - m_min.
+ *             Divides by range only, NO shift. Requires bounds.
  *
  * For scaling=1:
  *   x_tilde = x / m0,  g_tilde = g * m0
@@ -15,9 +18,14 @@
  *   m_shift[p] = m_min[p]
  *   x_bar = (x - m_shift) / m0,  g_bar = g * m0
  *
- * When combined with the Yang pseudo-Hessian preconditioner,
+ * For scaling=3:
+ *   m0[p] = m_max[p] - m_min[p]  (range)
+ *   m_shift[p] = 0               (no shift)
+ *   x_star = x / m0,  g_star = g * m0
+ *
+ * When combined with the pseudo-Hessian preconditioner,
  * s_p = m0_p makes the pseudo-Hessian consistent with the
- * normalized gradient (eq 48).
+ * normalized gradient.
  *--------------------------------------------------------------------*/
 
 #include <stdlib.h>
@@ -67,15 +75,19 @@ void scaling_compute_m0(int scaling, const float *x, int nmodel, int nparam,
 /*--------------------------------------------------------------------
  * scaling_set_yang_bounds -- Set m0 and m_shift from user-provided bounds.
  *
- * For Yang eq 47: m̄ = (m - m_min) / (m_max - m_min)
+ * For scaling=2 (Yang eq 47): m̄ = (m - m_min) / (m_max - m_min)
+ *   → m_shift = m_min, m0 = Δm
+ *
+ * For scaling=3 (range-only): m* = m / (m_max - m_min)
+ *   → m_shift = 0, m0 = Δm
  *--------------------------------------------------------------------*/
 void scaling_set_yang_bounds(float *m0, float *m_shift,
                              const float *m_min, const float *m_max,
-                             int nparam)
+                             int nparam, int use_shift)
 {
     int p;
     for (p = 0; p < nparam; p++) {
-        m_shift[p] = m_min[p];
+        m_shift[p] = use_shift ? m_min[p] : 0.0f;
         m0[p] = m_max[p] - m_min[p];
         if (m0[p] < 1.0e-30f) m0[p] = 1.0f;
     }

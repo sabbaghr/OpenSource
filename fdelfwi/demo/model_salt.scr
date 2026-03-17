@@ -1,0 +1,126 @@
+#!/bin/bash
+#
+# Builds a centered symmetric salt diapir with the same shape as
+# model_flank.scr, but mirrored and moved to the center (x=4000).
+# Salt body widened ~1.5x relative to the original.
+# Embedded in a layered stratigraphy with a water layer.
+#
+# Uses suflip trick: makemod x-axis -> final depth, z-axis -> final horizontal.
+# 4 interfaces define left/right boundaries of the salt body.
+#
+# Wider half-widths (1.5x original):
+#   Main:  depth 1000->2250m, 1500->1200m, 2000->750m, 5000->1500m
+#   Stem:  depth 750->0m, 1000->2250m, 1250->0m
+#
+# Salt:  Vp=4500, Vs=2500, rho=2200
+# Output: model_cp.su, model_cs.su, model_ro.su
+#
+
+dx=5
+dz=5
+sizex=8000
+sizez=6000
+
+# ============================================================
+# 1. Layered background model
+# ============================================================
+# Water:          0 -  400 m   Vp=1500  Vs=0     rho=1000
+# Soft sediment: 400 - 1500 m  Vp=2200  Vs=900   rho=2100
+# Shale:        1500 - 3000 m  Vp=3000  Vs=1500  rho=2300
+# Limestone:    3000 - 5000 m  Vp=3500  Vs=1800  rho=2450
+# Deep sed:     5000 - 6000 m  Vp=4000  Vs=2100  rho=2550
+
+makemod sizex=$sizex sizez=$sizez dx=$dx dz=$dz \
+    cp0=1500 cs0=0 ro0=1000 \
+    intt=def cp=2200 cs=900  ro=2100 x=0,$sizex z=400,400 \
+    intt=def cp=3000 cs=1500 ro=2300 x=0,$sizex z=1500,1500 \
+    intt=def cp=3500 cs=1800 ro=2450 x=0,$sizex z=3000,3000 \
+    intt=def cp=4000 cs=2100 ro=2550 x=0,$sizex z=5000,5000 \
+    file_base=layered.su
+
+# ============================================================
+# 2. Salt body mask (in transposed coordinate system)
+# ============================================================
+# Pre-flip coordinates:
+#   makemod x-axis  ->  final z-axis (depth)
+#   makemod z-axis  ->  final x-axis (horizontal)
+#
+# Original half-widths (distance from edge) at each depth, scaled 1.5x:
+#   Stem:  depth 750 -> 0m,  depth 1000 -> 2250m,  depth 1250 -> 0m
+#   Main:  depth 1000 -> 2250m,  1500 -> 1200m,  2000 -> 750m,  5000 -> 1500m
+#
+# Centered at x=4000:
+#   left boundary  z_preflip = 4000 - half_width
+#   right boundary z_preflip = 4000 + half_width
+#
+# Interface order: stem-left, stem-right, main-left, main-right
+# (main overrides stem in the overlap region x=1000-1250)
+
+makemod sizex=$sizez sizez=$sizex dx=$dx dz=$dz \
+    cp0=0 cs0=0 ro0=0 \
+    intt=def poly=1 cp=4500 cs=2500 ro=2200 \
+        x=750,1000,1250 z=4000,1750,4000 \
+    intt=def poly=1 cp=0 cs=0 ro=0 \
+        x=750,1000,1250 z=4000,6250,4000 \
+    intt=def poly=1 cp=4500 cs=2500 ro=2200 \
+        x=1000,1500,2000,5000 z=1750,2800,3250,2500 \
+    intt=def poly=1 cp=0 cs=0 ro=0 \
+        x=1000,1500,2000,5000 z=6250,5200,4750,5500 \
+    file_base=salt.su
+
+# Transpose to create vertically-oriented diapir
+suflip flip=0 < salt_cp.su > saltT_cp.su
+suflip flip=0 < salt_cs.su > saltT_cs.su
+suflip flip=0 < salt_ro.su > saltT_ro.su
+
+# ============================================================
+# 3. Overlay salt onto layered model
+# ============================================================
+# NOTE: final suop2 op=sum puts layered as data1 so the output
+# inherits correct headers (d1,d2,gx,ns) for plotting.
+
+# --- Vp: posonly overlay (salt 4500 > max background 4000) ---
+suop2 saltT_cp.su layered_cp.su op=diff > nep.su
+suop op=posonly < nep.su > nep2.su
+suop2 layered_cp.su nep2.su op=sum > model_cp.su
+
+# --- Vs: posonly overlay (salt 2500 > max background 2100) ---
+suop2 saltT_cs.su layered_cs.su op=diff > nep_cs.su
+suop op=posonly < nep_cs.su > nep2_cs.su
+suop2 layered_cs.su nep2_cs.su op=sum > model_cs.su
+
+# --- Density: mask-based (salt rho=2200 < deep sed rho=2550) ---
+# sushw injects dt into header so sugain does not complain
+sushw key=dt a=1000 < saltT_cp.su | sugain scale=0.000222222 > mask.su
+suop2 saltT_ro.su layered_ro.su op=diff > diff_ro.su
+suop2 diff_ro.su mask.su op=prod > masked_diff_ro.su
+suop2 layered_ro.su masked_diff_ro.su op=sum > model_ro.su
+
+# ============================================================
+# 4. Smooth initial model for FWI
+# ============================================================
+# Heavy smoothing removes salt body and sharp layer boundaries,
+# keeping only the broad velocity/density trend.
+# smooth2 operates on raw binary: sustrip to remove headers,
+# smooth, then supaste to restore headers.
+
+n1=$(( sizez/dz + 1 ))   # 1201 depth samples
+n2=$(( sizex/dx + 1 ))   # 1601 horizontal samples
+r1=20                     # smoothing radius in depth (grid points)
+r2=20                     # smoothing radius in horizontal
+
+for par in cp cs ro; do
+    sustrip < model_${par}.su head=head_${par}.bin > model_${par}.bin
+    smooth2 < model_${par}.bin n1=$n1 n2=$n2 r1=$r1 r2=$r2 > smooth_${par}.bin
+    supaste < smooth_${par}.bin ns=$n1 head=head_${par}.bin > initial_${par}.su
+    rm -f head_${par}.bin model_${par}.bin smooth_${par}.bin
+done
+
+# ============================================================
+# 5. Cleanup
+# ============================================================
+rm -f nep.su nep2.su nep_cs.su nep2_cs.su
+rm -f mask.su diff_ro.su masked_diff_ro.su
+rm -f salt_cp.su salt_cs.su salt_ro.su
+rm -f saltT_cp.su saltT_cs.su saltT_ro.su
+rm -f layered_cp.su layered_cs.su layered_ro.su

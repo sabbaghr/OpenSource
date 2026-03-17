@@ -83,7 +83,7 @@ echo "  Wavelet: fp=5 Hz, fmax=10 Hz, dt=1ms, nt=1024"
 # =========================================================
 echo "--- Step 3: Generating observed data (5 shots) ---"
 
-NSHOTS=5
+NSHOTS=10
 XSRC_START=200
 XSRC_END=1800
 XSRC_STEP=$(( (XSRC_END - XSRC_START) / (NSHOTS - 1) ))
@@ -149,7 +149,7 @@ ${FDELFWI}/test_gradient_visual \
     ntaper=100 grad_taper=100 \
     left=4 right=4 top=4 bottom=4 \
     chk_skipdt=100 chk_base=chk_gv \
-    param=2 scaling=1 precond_eps=1e-3 \
+    param=2 scaling=3 precond_eps=1e-3 \
     comp=_rp \
     file_obs=obs out_base=grad
 

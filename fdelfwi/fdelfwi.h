@@ -258,6 +258,19 @@ typedef struct _adjSrcPar {
 } adjSrcPar;
 
 
+/* --- Parameter activity mask for selectable parameter updates --- */
+typedef struct _paramMask {
+    int update_p1;   /* 1 = active, 0 = frozen (lambda/Vp) */
+    int update_p2;   /* 1 = active, 0 = frozen (mu/Vs) */
+    int update_p3;   /* 1 = active, 0 = frozen (rho) */
+} paramMask;
+
+void applyParamMask(float *g, int nmodel, int nparam,
+                    const paramMask *pmask);
+void restoreFrozenParams(float *x, const float *x_frozen,
+                         int nmodel, int nparam,
+                         const paramMask *pmask);
+
 /* --- updateModel.c: Model vector / FD coefficient bridge for FWI --- */
 void recomputeFDcoefficients(modPar *mod, bndPar *bnd);
 void extractModelVector(float *x, modPar *mod, bndPar *bnd, int param);
@@ -306,17 +319,35 @@ int hess_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
               float *hd1, float *hd2, float *hd3,
               int param, const float *comp_weights, int verbose);
 
+/* --- bandpass_filter.c: Multiscale FWI frequency band filtering --- */
+#define MAX_BANDS 20
+typedef struct _bandPar {
+    int    nbands;                    /* Number of frequency bands (0 = disabled) */
+    float  flo[MAX_BANDS];            /* Low corner freq per band (Hz) */
+    float  fhi[MAX_BANDS];            /* High corner freq per band (Hz) */
+    int    niter_per_band[MAX_BANDS]; /* Max optimizer iterations per band */
+} bandPar;
+void bandpass_filter_sufile(const char *filename, float flo, float fhi);
+void bandpass_filter_wavelet(float *data, int nt, float dt_sec,
+                             float flo, float fhi);
+void bandpass_filter_obsdata(const char *file_obs, const char *comp_str,
+                             int nshots, float flo, float fhi,
+                             int iband, int mpi_rank);
+void bandpass_cleanup_obsbackups(const char *file_obs, const char *comp_str,
+                                 int nshots);
+
 /* --- computeResidual.c: Misfit and adjoint source --- */
 float computeDataRMS(const char *filename);
 float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
                       const char *res_file, misfitType mtype,
                       const float *comp_weights, int verbose);
 
-/* --- scaling.c: Parameter scaling (0=none, 1=Brossier, 2=Yang) --- */
+/* --- scaling.c: Parameter scaling (0=none, 1=Brossier, 2=Yang, 3=range) --- */
 void scaling_compute_m0(int scaling, const float *x, int nmodel, int nparam,
                         float *m0, float *m_shift);
 void scaling_set_yang_bounds(float *m0, float *m_shift,
-                             const float *m_min, const float *m_max, int nparam);
+                             const float *m_min, const float *m_max,
+                             int nparam, int use_shift);
 void scaling_normalize(float *v, int nmodel, int nparam,
                        const float *m0, const float *m_shift);
 void scaling_denormalize(float *v, int nmodel, int nparam,

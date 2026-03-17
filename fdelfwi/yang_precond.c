@@ -1,19 +1,23 @@
 /*
  * yang_precond.c -- Diagonal pseudo-Hessian preconditioner for FWI.
  *
- * Implements the Shin et al. (2001) diagonal preconditioner:
- *   Δm̃_i = g̃_i / (H̃_ii + β),  β = θ · max(H̃_ii)
+ * Implements the Shin et al. (2001) preconditioner with the norm-preserving
+ * formulation of Métivier et al. (2013):
+ *
+ *   C_k = max_j(H̃_jj)                              (eq 38)
+ *   P_θ = diag( 1 / (H̃_ii + θ·C_k) )               (eq 39)
+ *   P_{ν,θ} = ν · P_θ,  ν = ||∇f|| / ||P_θ·∇f||    (eq 40-41)
  *
  * The pseudo-Hessian diagonal H_ii = Σ_t K_i² is accumulated in Lamé
  * space (λ,μ,ρ) by accumGradient() in fwi_gradient.c. This file handles:
  *   1. Chain rule transformation to velocity diagonal (if param=2)
- *   2. Brossier m0 scaling: H̃_ii = m0_i² · H_ii
- *   3. Global damping: β = θ · max(H̃_ii) over all params and grid points
- *   4. Pointwise division: Δm̃_i = g̃_i / (H̃_ii + β)
+ *   2. Scaling: H̃_ii = m0_i² · H_ii  (chain rule for normalized space)
+ *   3. Global damping: C = max(H̃_ii), store H̃_ii + θ·C
+ *   4. Division in double precision + norm preservation
  *
  * References:
  *   Shin et al. (2001), Geophysics 66(6), 1895–1903.
- *   Brossier et al. (2011), Computers & Geosciences 37, 444–455.
+ *   Métivier et al. (2013), Geophys. J. Int. 194(3), 1490–1518, eq 37-41.
  */
 
 #include <stdlib.h>
@@ -32,14 +36,14 @@ void vmess(char *fmt, ...);
  * Pipeline:
  *   1. Extract padded diagonal hessian → flat arrays (3 arrays)
  *   2. Chain rule if param=2: H_v_pp = Σ_k J_kp² · H_L_kk
- *   3. Brossier scaling: H̃_ii = m0_i² · H_ii
- *   4. Global damping: β = θ · max(H̃_ii), store H̃_ii + β
+ *   3. Scaling: H̃_ii = m0_i² · H_ii
+ *   4. Global damping: C = max(H̃_ii), store P_ii = H̃_ii + θ·C
  *
- * Output: P11,P22,P33 = H̃_11+β, H̃_22+β, H̃_33+β
- *         P12,P13,P23 = 0 (unused, kept for signature compatibility)
+ * Output: P11,P22,P33 = H̃_ii + θ·C  (unnormalized)
+ *         P12,P13,P23 = 0 (unused)
  *
- * Off-diagonal hess arrays (hess_lam_muu etc.) are accepted for
- * signature compatibility but ignored.
+ * Off-diagonal hess arrays are accepted for signature compatibility
+ * but ignored.
  *--------------------------------------------------------------------*/
 void buildBlockPrecond(
 	float *hess_lam, float *hess_muu, float *hess_rho,
@@ -96,11 +100,7 @@ void buildBlockPrecond(
 	 * Jacobian J = ∂(λ,μ,ρ)/∂(Vp,Vs,ρ):
 	 *   j11 = 2ρVp,  j12 = -4ρVs,  j13 = Vp²-2Vs²
 	 *   j21 = 0,      j22 = 2ρVs,   j23 = Vs²
-	 *   j31 = 0,      j32 = 0,       j33 = 1
-	 *
-	 * H_VpVp  = j11² · H_ll
-	 * H_VsVs  = j12² · H_ll + j22² · H_mm
-	 * H_rhorho = j13² · H_ll + j23² · H_mm + H_rr                  */
+	 *   j31 = 0,      j32 = 0,       j33 = 1               */
 	if (param == 2 && elastic) {
 		for (i = 0; i < nmodel; i++) {
 			ix = i / mod->nz;
@@ -138,31 +138,28 @@ void buildBlockPrecond(
 		}
 	}
 
-	/* Brossier m0 scaling: H̃_ii = m0_i² · H_ii */
+	/* Scaling: H̃_ii = m0_i² · H_ii  (chain rule for normalized space) */
 	for (i = 0; i < nmodel; i++) {
 		h11[i] *= s1 * s1;
 		h22[i] *= s2 * s2;
 		h33[i] *= s3 * s3;
 	}
 
-	/* Normalize H̃ by global max and add damping θ:
-	 *   h_i = H̃_ii / max(H̃_ii) ∈ [0, 1]
-	 *   P_ii = h_i + θ            ∈ [θ, 1+θ]
-	 *
-	 * The 1/max(H̃) factor is a global scalar absorbed by the
-	 * L-BFGS γ-scaling or line search step length. */
-	float global_max = 0.0f;
+	/* Global damping (Métivier eq 38-39):
+	 *   C = max_j(H̃_jj)  over all params and grid points
+	 *   P_ii = H̃_ii + θ·C                                   */
+	double C_k = 0.0;
 	for (i = 0; i < nmodel; i++) {
-		if (h11[i] > global_max) global_max = h11[i];
-		if (h22[i] > global_max) global_max = h22[i];
-		if (h33[i] > global_max) global_max = h33[i];
+		if ((double)h11[i] > C_k) C_k = (double)h11[i];
+		if ((double)h22[i] > C_k) C_k = (double)h22[i];
+		if ((double)h33[i] > C_k) C_k = (double)h33[i];
 	}
-	float inv_max = (global_max > 0.0f) ? 1.0f / global_max : 1.0f;
+	double beta = (double)precond_eps * C_k;
 
 	for (i = 0; i < nmodel; i++) {
-		P11[i] = h11[i] * inv_max + precond_eps;
-		P22[i] = h22[i] * inv_max + precond_eps;
-		P33[i] = h33[i] * inv_max + precond_eps;
+		P11[i] = (float)((double)h11[i] + beta);
+		P22[i] = (float)((double)h22[i] + beta);
+		P33[i] = (float)((double)h33[i] + beta);
 	}
 
 	/* Off-diagonal outputs zeroed (unused in diagonal preconditioner) */
@@ -172,32 +169,30 @@ void buildBlockPrecond(
 
 	/* Diagnostics */
 	if (mpi_rank == 0) {
-		float max_P11 = 0.0f, max_P22 = 0.0f, max_P33 = 0.0f;
-		float min_P11 = P11[0], min_P22 = P22[0], min_P33 = P33[0];
-		for (i = 0; i < nmodel; i++) {
-			if (P11[i] > max_P11) max_P11 = P11[i];
-			if (P22[i] > max_P22) max_P22 = P22[i];
-			if (P33[i] > max_P33) max_P33 = P33[i];
-			if (P11[i] < min_P11) min_P11 = P11[i];
-			if (P22[i] < min_P22) min_P22 = P22[i];
-			if (P33[i] < min_P33) min_P33 = P33[i];
-		}
 		const char *lame_n[] = {"lam", "mu", "rho"};
 		const char *vel_n[]  = {"Vp", "Vs", "rho"};
 		const char **n = (param == 2) ? vel_n : lame_n;
-		float min_all = min_P11;
-		if (min_P22 < min_all) min_all = min_P22;
-		if (min_P33 < min_all) min_all = min_P33;
-		float max_all = max_P11;
-		if (max_P22 > max_all) max_all = max_P22;
-		if (max_P33 > max_all) max_all = max_P33;
-		vmess("Shin precond: global_max(H̃_ii)=%.4e  theta=%.4e",
-		      global_max, precond_eps);
-		vmess("Shin precond: P_%s = h_norm+θ: [%.6f, %.6f]", n[0], min_P11, max_P11);
-		vmess("Shin precond: P_%s = h_norm+θ: [%.6f, %.6f]", n[1], min_P22, max_P22);
-		vmess("Shin precond: P_%s = h_norm+θ: [%.6f, %.6f]", n[2], min_P33, max_P33);
-		vmess("Shin precond: cond(P) = %.2f  (max=%.6f, min=%.6f)",
-		      max_all / min_all, max_all, min_all);
+		vmess("Shin precond (Metivier eq 39): C_k=%.4e  theta=%.4e  beta=theta*C_k=%.4e",
+		      C_k, precond_eps, beta);
+		vmess("Shin precond: P_%s = H̃+β: [%.4e, %.4e]", n[0],
+		      (double)h11[0] + beta, C_k + beta);
+		vmess("Shin precond: P_%s = H̃+β: [%.4e, %.4e]", n[1],
+		      beta, (double)h22[0] + beta);
+		vmess("Shin precond: P_%s = H̃+β: [%.4e, %.4e]", n[2],
+		      beta, (double)h33[0] + beta);
+
+		/* Compute actual min/max for accurate diagnostics */
+		float min_all = P11[0], max_all = P11[0];
+		for (i = 0; i < nmodel; i++) {
+			if (P11[i] < min_all) min_all = P11[i];
+			if (P22[i] < min_all) min_all = P22[i];
+			if (P33[i] < min_all) min_all = P33[i];
+			if (P11[i] > max_all) max_all = P11[i];
+			if (P22[i] > max_all) max_all = P22[i];
+			if (P33[i] > max_all) max_all = P33[i];
+		}
+		vmess("Shin precond: P range [%.4e, %.4e]  cond=%.2f",
+		      min_all, max_all, (double)max_all / (double)min_all);
 	}
 
 	free(h11); free(h22); free(h33);
@@ -205,9 +200,18 @@ void buildBlockPrecond(
 
 
 /*--------------------------------------------------------------------
- * applyBlockPrecond -- Apply diagonal preconditioner: Δm̃_i = g̃_i / P_ii.
+ * applyBlockPrecond -- Apply Shin preconditioner with norm preservation.
  *
- * P11,P22,P33 store the damped diagonal H̃_ii + β from buildBlockPrecond.
+ * Métivier et al. (2013), eq 39-41:
+ *   z_i = g_i / P_ii                  (division in double precision)
+ *   ν = ||g|| / ||z||                 (norm preservation factor)
+ *   out_i = ν · z_i                   (preserves gradient norm)
+ *
+ * The preconditioner changes direction only, not magnitude.
+ * Double precision is used throughout to avoid underflow when
+ * g ~ O(10^-10) and P ~ O(10^30).
+ *
+ * P11,P22,P33 store H̃_ii + θ·C from buildBlockPrecond.
  * P12,P13,P23 are unused (zero).
  *
  * out and in may be the same pointer (in-place operation).
@@ -218,21 +222,43 @@ void applyBlockPrecond(
 	const float *P22, const float *P23, const float *P33,
 	int nmodel, int nparam)
 {
-	int i;
+	int i, ntot;
 
 	(void)P12; (void)P13; (void)P23;
 
+	ntot = nparam * nmodel;
+
+	/* Step 1: Compute ||g||² before the solve (needed for in-place case) */
+	double norm_in_sq = 0.0;
+	for (i = 0; i < ntot; i++)
+		norm_in_sq += (double)in[i] * (double)in[i];
+
+	/* Step 2: Apply P_θ · g = g / (H̃ + β) in double precision */
 	if (nparam == 3) {
 		for (i = 0; i < nmodel; i++) {
-			out[i]           = in[i]           / P11[i];
-			out[nmodel+i]    = in[nmodel+i]    / P22[i];
-			out[2*nmodel+i]  = in[2*nmodel+i]  / P33[i];
+			out[i]          = (float)((double)in[i]          / (double)P11[i]);
+			out[nmodel+i]   = (float)((double)in[nmodel+i]   / (double)P22[i]);
+			out[2*nmodel+i] = (float)((double)in[2*nmodel+i] / (double)P33[i]);
 		}
 	} else {
-		/* 2-parameter (acoustic): params 1 and 3 */
 		for (i = 0; i < nmodel; i++) {
-			out[i]        = in[i]        / P11[i];
-			out[nmodel+i] = in[nmodel+i] / P33[i];
+			out[i]        = (float)((double)in[i]        / (double)P11[i]);
+			out[nmodel+i] = (float)((double)in[nmodel+i] / (double)P33[i]);
 		}
+	}
+
+	/* Step 3: Norm preservation (Métivier eq 40-41):
+	 *   ν = ||g|| / ||P_θ·g||
+	 *   out = ν · P_θ · g
+	 * This ensures ||out|| = ||g||: the preconditioner changes
+	 * direction only, preserving the gradient magnitude. */
+	double norm_out_sq = 0.0;
+	for (i = 0; i < ntot; i++)
+		norm_out_sq += (double)out[i] * (double)out[i];
+
+	if (norm_out_sq > 0.0 && norm_in_sq > 0.0) {
+		float nu = (float)sqrt(norm_in_sq / norm_out_sq);
+		for (i = 0; i < ntot; i++)
+			out[i] *= nu;
 	}
 }

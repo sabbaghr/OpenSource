@@ -68,7 +68,7 @@ echo "  True model: anomalies at x=500(Vp=2200), x=1000(Vs=1250), x=1500(rho=220
 # =========================================================
 echo "--- Step 2: Creating wavelet ---"
 
-makewave fp=5 dt=0.001 nt=1024 fmax=10 file_out=wave.su t0=0.10 verbose=0
+makewave fp=10 dt=0.001 nt=1024 fmax=15 file_out=wave.su t0=0.10 verbose=0
 
 echo "  Wavelet: fp=5 Hz, fmax=10 Hz, dt=1ms, nt=1024"
 

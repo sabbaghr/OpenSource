@@ -77,6 +77,7 @@ SRCC	= fdfwimodc.c \
 		hess_shot.c  \
 		yang_precond.c  \
 		scaling.c  \
+		bandpass_filter.c  \
 		sourceOnSurface.c  \
 		getWaveletHeaders.c  \
 		boundaries.c  \

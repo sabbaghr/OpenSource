@@ -128,11 +128,19 @@ char *sdoc[] = {
 "   vs_min=,vs_max=    Vs bounds (m/s, optional)",
 "   rho_min=,rho_max=  density bounds (kg/m3, optional)",
 "   write_iter=1       write model every N iterations",
+"   misfit=0           misfit function: 0=L2, 1=normalized cross-correlation",
 "   scaling=0          parameter scaling: 0=none, 1=Brossier(mean), 2=Yang(max)",
 "   precond=0          Yang pseudo-Hessian preconditioner (0=off, 1=on)",
 "   precond_eps=1e-3   regularization epsilon for preconditioner",
 "   precond_scale_1/2/3=1.0  manual Yang scaling (overridden by scaling>0)",
 "   data_weight=auto    Brossier W_d data weighting: 0=off, 1=on (auto=1 when scaling>0)",
+"   active_params=      selectable parameter updates: comma-separated list of active params",
+"                        param=1: lam,mu,rho (default: all)  param=2: vp,vs,rho (default: all)",
+"                        frozen params keep initial values; their gradients are zeroed",
+"   freq_lo=            low corner frequencies per band (Hz), comma-separated (multiscale FWI)",
+"   freq_hi=            high corner frequencies per band (Hz), comma-separated",
+"   niter_band=         max iterations per band, comma-separated (default: niter for each)",
+"                        example: freq_lo=2,2,2 freq_hi=5,10,20 niter_band=5,10,15",
 " ",
 NULL};
 
@@ -299,6 +307,45 @@ static void taperGradientSrcRcv(float *grad, int n1, int nax,
 
 
 /*--------------------------------------------------------------------
+ * applyParamMask -- Zero gradient components for frozen parameters.
+ *
+ * Works on flat optimizer vector [nmodel | nmodel | nmodel].
+ * Also declared in fdelfwi.h for use by other modules.
+ *--------------------------------------------------------------------*/
+void applyParamMask(float *g, int nmodel, int nparam,
+                    const paramMask *pmask)
+{
+	if (!pmask) return;
+	if (!pmask->update_p1)
+		memset(g, 0, nmodel * sizeof(float));
+	if (nparam >= 2 && !pmask->update_p2)
+		memset(g + nmodel, 0, nmodel * sizeof(float));
+	if (nparam >= 3 && !pmask->update_p3)
+		memset(g + 2*nmodel, 0, nmodel * sizeof(float));
+}
+
+
+/*--------------------------------------------------------------------
+ * restoreFrozenParams -- Restore frozen parameter components from
+ *                        the saved initial model vector.
+ *
+ * Call after the optimizer modifies x, before injectModelVector.
+ *--------------------------------------------------------------------*/
+void restoreFrozenParams(float *x, const float *x_frozen,
+                         int nmodel, int nparam,
+                         const paramMask *pmask)
+{
+	if (!pmask || !x_frozen) return;
+	if (!pmask->update_p1)
+		memcpy(x, x_frozen, nmodel * sizeof(float));
+	if (nparam >= 2 && !pmask->update_p2)
+		memcpy(x + nmodel, x_frozen + nmodel, nmodel * sizeof(float));
+	if (nparam >= 3 && !pmask->update_p3)
+		memcpy(x + 2*nmodel, x_frozen + 2*nmodel, nmodel * sizeof(float));
+}
+
+
+/*--------------------------------------------------------------------
  * compute_fwi_gradient -- Compute total misfit and gradient.
  *
  * Distributes shots across MPI ranks, runs forward + residual +
@@ -319,6 +366,7 @@ static float compute_fwi_gradient(
 	int mpi_rank, int mpi_size,
 	int keep_checkpoints,
 	const float *comp_weights,
+	misfitType mtype,
 	int verbose)
 {
 	int ishot, k, i;
@@ -422,7 +470,7 @@ static float compute_fwi_gradient(
 
 			snprintf(res_file, sizeof(res_file), "%s/residual.su", work_dir);
 			misfit = computeResidual(ncomp, obs_arr, syn_arr, res_file,
-			                         MISFIT_L2, comp_weights, 0);
+			                         mtype, comp_weights, 0);
 			total_misfit += misfit;
 
 			/* Step 3: Read residuals and apply taper */
@@ -948,6 +996,15 @@ int main(int argc, char **argv)
 	if (!getparint("precond", &use_precond)) use_precond = 0;
 	if (!getparfloat("precond_eps", &precond_eps)) precond_eps = 1e-3f;
 	if (!getparint("scaling", &scaling)) scaling = 0;
+
+	/* Misfit function: 0=L2 (default), 1=normalized cross-correlation */
+	int misfit_type_int;
+	misfitType mtype;
+	if (!getparint("misfit", &misfit_type_int)) misfit_type_int = 0;
+	if (misfit_type_int < 0 || misfit_type_int > 1)
+		verr("misfit must be 0 (L2) or 1 (cross-correlation)");
+	mtype = (misfitType)misfit_type_int;
+
 	if (use_precond) {
 		getparfloat("precond_scale_1", &s1);
 		getparfloat("precond_scale_2", &s2);
@@ -1046,6 +1103,7 @@ int main(int argc, char **argv)
 #endif
 		vmess("Parameterization: %s", param == 1 ? "Lame" : "Velocity");
 		vmess("Algorithm: %s", alg_names[algorithm]);
+		vmess("Misfit: %s", mtype == MISFIT_CORRELATION ? "normalized cross-correlation" : "L2 waveform");
 		vmess("Max iterations: %d", niter);
 		vmess("Convergence tolerance: %.2e", conv);
 		if (algorithm == 1 || algorithm == 2 || algorithm == 7)
@@ -1068,6 +1126,11 @@ int main(int argc, char **argv)
 			      grad_taper);
 		} else {
 			vmess("Gradient taper: %d grid points", grad_taper);
+		}
+		{
+			char *active_str_tmp;
+			if (getparstring("active_params", &active_str_tmp))
+				vmess("Active parameters: %s", active_str_tmp);
 		}
 		vmess("*******************************************");
 	}
@@ -1116,13 +1179,46 @@ int main(int argc, char **argv)
 	/* Extract initial model into optimizer vector */
 	extractModelVector(x, &mod, &bnd, param);
 
-	/* Parameter scaling (0=none, 1=Brossier mean, 2=Yang max):
-	 * m0[p] computed from initial model, x_tilde = x / m0.
+	/* Parameter scaling:
+	 *   0 = none (raw physical units)
+	 *   1 = Brossier: m0 = mean(|x|), m* = x/m0
+	 *   2 = Yang: m0 = Δm, m* = (x - m_min)/Δm  (shift to [0,1])
+	 *   3 = Range: m0 = Δm, m* = x/Δm            (no shift)
+	 *
+	 * scaling=3 requires bounds (vp_min/max, vs_min/max, rho_min/max).
 	 * When preconditioner is active, s_p = m0_p automatically. */
 	float m0[3] = {1.0f, 1.0f, 1.0f};
 	float m_shift[3] = {0.0f, 0.0f, 0.0f};
 	if (scaling > 0) {
-		scaling_compute_m0(scaling, x, nmodel, nparam, m0, m_shift);
+		if (scaling == 3) {
+			/* Range normalization: m0 = m_max - m_min from bounds, no shift.
+			 * Parse bounds here (same params as setup_bounds). */
+			float vp_mn, vp_mx, vs_mn, vs_mx, rho_mn, rho_mx;
+			if (!getparfloat("vp_min", &vp_mn) || !getparfloat("vp_max", &vp_mx))
+				verr("scaling=3 requires vp_min= and vp_max= parameters");
+			if (!getparfloat("vs_min", &vs_mn)) vs_mn = 0.0f;
+			if (!getparfloat("vs_max", &vs_mx)) vs_mx = vp_mx * 0.7f;
+			if (!getparfloat("rho_min", &rho_mn)) rho_mn = 500.0f;
+			if (!getparfloat("rho_max", &rho_mx)) rho_mx = 5000.0f;
+
+			if (param == 2) {
+				/* Velocity parameterization: bounds directly */
+				float p_min[3] = {vp_mn, vs_mn, rho_mn};
+				float p_max[3] = {vp_mx, vs_mx, rho_mx};
+				scaling_set_yang_bounds(m0, m_shift, p_min, p_max, nparam, 0);
+			} else {
+				/* Lamé parameterization: convert bounds */
+				float lam_mn = rho_mn * (vp_mn*vp_mn - 2.0f*vs_mx*vs_mx);
+				float lam_mx = rho_mx * (vp_mx*vp_mx - 2.0f*vs_mn*vs_mn);
+				float mu_mn  = rho_mn * vs_mn * vs_mn;
+				float mu_mx  = rho_mx * vs_mx * vs_mx;
+				float p_min[3] = {lam_mn, mu_mn, rho_mn};
+				float p_max[3] = {lam_mx, mu_mx, rho_mx};
+				scaling_set_yang_bounds(m0, m_shift, p_min, p_max, nparam, 0);
+			}
+		} else {
+			scaling_compute_m0(scaling, x, nmodel, nparam, m0, m_shift);
+		}
 		scaling_normalize(x, nmodel, nparam, m0, m_shift);
 		if (use_precond) {
 			s1 = m0[0];
@@ -1130,12 +1226,170 @@ int main(int argc, char **argv)
 			if (nparam >= 3) s3 = m0[2];
 		}
 		if (mpi_rank == 0) {
-			const char *sname = (scaling == 1) ? "Brossier (mean)" : "Yang (max)";
+			const char *snames[] = {"", "Brossier (mean)", "Yang (shift+range)", "Range (no shift)"};
 			vmess("Scaling=%d (%s): m0 = [%.4e, %.4e, %.4e]",
-			      scaling, sname, m0[0],
+			      scaling, snames[scaling], m0[0],
 			      nparam >= 2 ? m0[1] : 0.0f,
 			      nparam >= 3 ? m0[2] : 0.0f);
+			if (scaling == 3)
+				vmess("  m_shift = [%.4e, %.4e, %.4e] (no shift)",
+				      m_shift[0], m_shift[1], m_shift[2]);
 		}
+	}
+
+	/* ============================================================ */
+	/* Parse active_params for selectable parameter updates          */
+	/* ============================================================ */
+	paramMask pmask = {1, 1, 1};  /* Default: all parameters active */
+	float *x_frozen = NULL;
+	{
+		char *active_str;
+		if (getparstring("active_params", &active_str)) {
+			char abuf[256];
+			char *tok;
+			pmask.update_p1 = 0;
+			pmask.update_p2 = 0;
+			pmask.update_p3 = 0;
+			strncpy(abuf, active_str, sizeof(abuf) - 1);
+			abuf[sizeof(abuf) - 1] = '\0';
+			tok = strtok(abuf, ",");
+			while (tok) {
+				/* Skip leading whitespace */
+				while (*tok == ' ') tok++;
+				if (strcmp(tok, "vp") == 0 || strcmp(tok, "lam") == 0 ||
+				    strcmp(tok, "lambda") == 0)
+					pmask.update_p1 = 1;
+				else if (strcmp(tok, "vs") == 0 || strcmp(tok, "mu") == 0)
+					pmask.update_p2 = 1;
+				else if (strcmp(tok, "rho") == 0)
+					pmask.update_p3 = 1;
+				else if (mpi_rank == 0)
+					vwarn("active_params: unknown parameter '%s' (expected vp/lam/vs/mu/rho)", tok);
+				tok = strtok(NULL, ",");
+			}
+
+			if (mpi_rank == 0) {
+				const char *p1name = (param == 1) ? "lambda" : "Vp";
+				const char *p2name = (param == 1) ? "mu" : "Vs";
+				vmess("Active parameters: %s=%s  %s=%s  rho=%s",
+				      p1name, pmask.update_p1 ? "UPDATE" : "FROZEN",
+				      p2name, pmask.update_p2 ? "UPDATE" : "FROZEN",
+				      "rho", pmask.update_p3 ? "UPDATE" : "FROZEN");
+			}
+		}
+
+		/* Save initial model for restoring frozen parameters */
+		if (!pmask.update_p1 || !pmask.update_p2 || !pmask.update_p3) {
+			x_frozen = (float *)malloc(nvec * sizeof(float));
+			memcpy(x_frozen, x, nvec * sizeof(float));
+		}
+	}
+
+	/* ============================================================ */
+	/* Parse frequency band schedule (multiscale FWI)                */
+	/* ============================================================ */
+	bandPar bands;
+	memset(&bands, 0, sizeof(bandPar));
+	{
+		int nflo = 0, nfhi = 0, nnit = 0;
+		float flo_arr[MAX_BANDS], fhi_arr[MAX_BANDS];
+		int nit_arr[MAX_BANDS];
+
+		nflo = getparfloat("freq_lo", flo_arr);
+		nfhi = getparfloat("freq_hi", fhi_arr);
+		nnit = getparint("niter_band", nit_arr);
+
+		if (nflo > 0 || nfhi > 0) {
+			if (nflo == 0 || nfhi == 0)
+				verr("freq_lo= and freq_hi= must both be specified for multiscale FWI");
+			if (nflo != nfhi)
+				verr("freq_lo= and freq_hi= must have the same number of entries (%d vs %d)",
+				     nflo, nfhi);
+			bands.nbands = nflo;
+			if (bands.nbands > MAX_BANDS)
+				verr("Too many frequency bands (%d > %d)", bands.nbands, MAX_BANDS);
+			for (i = 0; i < bands.nbands; i++) {
+				bands.flo[i] = flo_arr[i];
+				bands.fhi[i] = fhi_arr[i];
+				bands.niter_per_band[i] = (i < nnit) ? nit_arr[i] : niter;
+			}
+			if (mpi_rank == 0) {
+				vmess("Multiscale FWI: %d frequency bands", bands.nbands);
+				for (i = 0; i < bands.nbands; i++)
+					vmess("  Band %d: [%.1f, %.1f] Hz, %d iterations",
+					      i + 1, bands.flo[i], bands.fhi[i],
+					      bands.niter_per_band[i]);
+			}
+		} else {
+			/* No frequency scheduling — single pass (current behavior) */
+			bands.nbands = 1;
+			bands.flo[0] = 0.0f;
+			bands.fhi[0] = 0.0f;
+			bands.niter_per_band[0] = niter;
+		}
+	}
+
+	float current_flo = bands.flo[0];
+	float current_fhi = bands.fhi[0];
+
+	int keep_chk = (algorithm == 4 || algorithm == 5 || algorithm == 6 || algorithm == 7) ? 1 : 0;
+
+	/* ============================================================ */
+	/* Outer band loop (multiscale FWI)                              */
+	/* ============================================================ */
+	int iband;
+	int total_opt_iter = 0;
+	optim_type opt;
+	optFlag flag = OPT_INIT;
+	float fcost = 0.0f;
+	float *comp_weights = NULL;
+
+	/* Save unfiltered wavelet backup for multiscale band switching */
+	float **src_nwav_backup = NULL;
+	if (bands.nbands > 1) {
+		src_nwav_backup = (float **)calloc(wav.nx, sizeof(float *));
+		for (i = 0; i < wav.nx; i++) {
+			src_nwav_backup[i] = (float *)malloc(wav.nt * sizeof(float));
+			memcpy(src_nwav_backup[i], src_nwav[i], wav.nt * sizeof(float));
+		}
+	}
+
+	for (iband = 0; iband < bands.nbands; iband++) {
+
+	current_flo = bands.flo[iband];
+	current_fhi = bands.fhi[iband];
+
+	if (mpi_rank == 0 && bands.nbands > 1)
+		vmess("=== Frequency band %d/%d: [%.1f, %.1f] Hz, %d iterations ===",
+		      iband + 1, bands.nbands, current_flo, current_fhi,
+		      bands.niter_per_band[iband]);
+
+	/* Filter source wavelet and observed data for this band */
+	if (current_flo > 0.0f || current_fhi > 0.0f) {
+
+		/* Restore wavelet from backup and apply bandpass filter */
+		if (src_nwav_backup) {
+			for (i = 0; i < wav.nx; i++) {
+				memcpy(src_nwav[i], src_nwav_backup[i],
+				       wav.nt * sizeof(float));
+				bandpass_filter_wavelet(src_nwav[i], wav.nt, wav.dt,
+				                       current_flo, current_fhi);
+			}
+			if (mpi_rank == 0)
+				vmess("Source wavelet filtered to [%.1f, %.1f] Hz",
+				      current_flo, current_fhi);
+		}
+
+		/* Filter observed data (sufilter, rank 0 only) */
+		if (mpi_rank == 0) {
+			vmess("Filtering observed data for band [%.1f, %.1f] Hz...",
+			      current_flo, current_fhi);
+			bandpass_filter_obsdata(file_obs, comp_str, shot.n,
+			                       current_flo, current_fhi, iband, mpi_rank);
+		}
+#ifdef USE_MPI
+		MPI_Barrier(MPI_COMM_WORLD);
+#endif
 	}
 
 	/* ============================================================ */
@@ -1147,9 +1401,8 @@ int main(int argc, char **argv)
 	float diag_gnorm_raw = 0.0f;
 	float diag_gnorm_raw_start = 0.0f;
 
-	optim_type opt;
 	memset(&opt, 0, sizeof(optim_type));
-	opt.niter_max = niter;
+	opt.niter_max = bands.niter_per_band[iband];
 	opt.conv = conv;
 	opt.l = lbfgs_mem;
 	opt.nls_max = nls_max;
@@ -1190,8 +1443,6 @@ int main(int argc, char **argv)
 	if (mpi_rank == 0)
 		vmess("Computing initial gradient...");
 
-	int keep_chk = (algorithm == 4 || algorithm == 5 || algorithm == 6 || algorithm == 7) ? 1 : 0;
-
 	/* ============================================================ */
 	/* Compute Brossier W_d data weights from shot 0 observed data  */
 	/* w_c = 1/rms(d_obs_c) per component, so each component        */
@@ -1202,7 +1453,7 @@ int main(int argc, char **argv)
 	if (!getparint("data_weight", &data_weight))
 		data_weight = (scaling > 0) ? 1 : 0;
 
-	float *comp_weights = NULL;
+	comp_weights = NULL;
 	int ncomp_w = 0;
 	{
 		char comp_buf_w[1024];
@@ -1231,14 +1482,14 @@ int main(int argc, char **argv)
 		}
 	}
 
-	float fcost = compute_fwi_gradient(
+	fcost = compute_fwi_gradient(
 		&mod, &src, &wav, &bnd, &rec, &sna, &shot, src_nwav,
 		file_obs, comp_str, res_taper, param,
 		grad1, grad2, grad3,
 		hess_lam, hess_muu, hess_rho,
 		hess_lam_muu, hess_lam_rho, hess_muu_rho,
 		chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk,
-		comp_weights, verbose);
+		comp_weights, mtype, verbose);
 
 	/* Taper gradient near source and receiver positions */
 	{
@@ -1263,6 +1514,9 @@ int main(int argc, char **argv)
 		extractGradientVector(grad_vec, grad1, grad2, grad3,
 		                      &mod, &bnd, param);
 
+		/* Zero gradient for frozen parameters */
+		applyParamMask(grad_vec, nmodel, nparam, &pmask);
+
 		/* Capture raw gradient norm before scaling */
 		if (verbose >= 2) {
 			double g2 = 0.0;
@@ -1282,9 +1536,11 @@ int main(int argc, char **argv)
 			    P11, P12, P13, P22, P23, P33,
 			    nmodel, mpi_rank);
 			if (grad_preco_vec &&
-			    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7))
+			    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)) {
 				applyBlockPrecond(grad_preco_vec, grad_vec,
 				    P11, P12, P13, P22, P23, P33, nmodel, nparam);
+				applyParamMask(grad_preco_vec, nmodel, nparam, &pmask);
+			}
 		}
 		vmess("Initial misfit: %.6e", fcost);
 
@@ -1325,7 +1581,7 @@ int main(int argc, char **argv)
 	/* ============================================================ */
 	/* Optimization loop                                             */
 	/* ============================================================ */
-	optFlag flag = OPT_INIT;
+	flag = OPT_INIT;
 	int opt_iter = 0;
 
 	while (flag != OPT_CONV && flag != OPT_FAIL) {
@@ -1408,6 +1664,9 @@ int main(int argc, char **argv)
 			if (scaling > 0)
 				scaling_denormalize(x, nmodel, nparam, m0, m_shift);
 
+			/* Restore frozen parameters to initial values */
+			restoreFrozenParams(x, x_frozen, nmodel, nparam, &pmask);
+
 			/* Broadcast new model vector from rank 0 */
 #ifdef USE_MPI
 			MPI_Bcast(x, nvec, MPI_FLOAT, 0, MPI_COMM_WORLD);
@@ -1428,7 +1687,7 @@ int main(int argc, char **argv)
 				hess_lam, hess_muu, hess_rho,
 				hess_lam_muu, hess_lam_rho, hess_muu_rho,
 				chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk,
-				comp_weights, verbose);
+				comp_weights, mtype, verbose);
 
 			/* Taper gradient near source and receiver positions */
 			{
@@ -1445,6 +1704,9 @@ int main(int argc, char **argv)
 			if (mpi_rank == 0) {
 				extractGradientVector(grad_vec, grad1, grad2, grad3,
 				                      &mod, &bnd, param);
+
+				/* Zero gradient for frozen parameters */
+				applyParamMask(grad_vec, nmodel, nparam, &pmask);
 
 				/* Capture raw gradient norm before scaling */
 				if (verbose >= 2) {
@@ -1465,9 +1727,11 @@ int main(int argc, char **argv)
 					    P11, P12, P13, P22, P23, P33,
 					    nmodel, mpi_rank);
 					if (grad_preco_vec &&
-					    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7))
+					    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)) {
 						applyBlockPrecond(grad_preco_vec, grad_vec,
 						    P11, P12, P13, P22, P23, P33, nmodel, nparam);
+						applyParamMask(grad_preco_vec, nmodel, nparam, &pmask);
+					}
 				}
 
 				/* NaN guard: if forward modeling went unstable,
@@ -1525,6 +1789,9 @@ int main(int argc, char **argv)
 			if (scaling > 0)
 				scaling_denormalize(opt.d, nmodel, nparam, m0, m_shift);
 
+			/* Zero perturbation for frozen parameters */
+			applyParamMask(opt.d, nmodel, nparam, &pmask);
+
 			/* Broadcast CG direction from rank 0 to all ranks */
 #ifdef USE_MPI
 			MPI_Bcast(opt.d, nvec, MPI_FLOAT, 0, MPI_COMM_WORLD);
@@ -1538,6 +1805,9 @@ int main(int argc, char **argv)
 				opt.d, opt.Hd, nvec,
 				grad_taper,
 				comp_weights, verbose);
+
+			/* Zero Hessian output for frozen parameters */
+			applyParamMask(opt.Hd, nmodel, nparam, &pmask);
 
 			/* Re-normalize d and scale Hd to tilde-space */
 			if (scaling > 0) {
@@ -1624,6 +1894,30 @@ int main(int argc, char **argv)
 	if (algorithm == 4 || algorithm == 5 || algorithm == 6 || algorithm == 7)
 		clean_shot_checkpoints(&mod, &shot, chk_base, mpi_rank, mpi_size);
 
+	total_opt_iter += opt.cpt_iter;
+
+	if (mpi_rank == 0 && bands.nbands > 1)
+		vmess("Band %d/%d complete: misfit=%.6e (%d iterations)",
+		      iband + 1, bands.nbands, fcost, opt.cpt_iter);
+
+	/* Finalize optimizer (free L-BFGS history etc.) */
+	if (mpi_rank == 0) {
+		optim_finalize(&opt);
+		if (opt.lb) { free(opt.lb); opt.lb = NULL; }
+		if (opt.ub) { free(opt.ub); opt.ub = NULL; }
+	}
+
+	/* Free comp_weights — will be recomputed for next band */
+	if (comp_weights) { free(comp_weights); comp_weights = NULL; }
+
+	} /* end band loop */
+
+	/* Clean up observed data backups from multiscale filtering */
+	if (bands.nbands > 1 && (bands.flo[0] > 0.0f || bands.fhi[0] > 0.0f)) {
+		if (mpi_rank == 0)
+			bandpass_cleanup_obsbackups(file_obs, comp_str, shot.n);
+	}
+
 	/* ============================================================ */
 	/* Write final results                                           */
 	/* ============================================================ */
@@ -1636,20 +1930,22 @@ int main(int argc, char **argv)
 #endif
 
 		if (flag == OPT_CONV)
-			vmess("Optimization CONVERGED in %d iterations", opt.cpt_iter);
+			vmess("Optimization CONVERGED in %d total iterations", total_opt_iter);
+		else if (bands.nbands > 1)
+			vmess("Multiscale FWI completed: %d bands, %d total iterations",
+			      bands.nbands, total_opt_iter);
 		else
 			vmess("Optimization FAILED (linesearch failure) at iteration %d",
-			      opt.cpt_iter);
+			      total_opt_iter);
 
-		vmess("Final misfit: %.6e (%.4f%% of initial)", fcost,
-		      100.0f * fcost / opt.f0);
-		vmess("Total forward problems: %d", opt.nfwd_pb);
+		vmess("Final misfit: %.6e", fcost);
+		vmess("Total iterations: %d", total_opt_iter);
 		vmess("Total time: %.1f s", t_total);
 
 		/* Write final model (denormalize to physical units) */
 		if (scaling > 0)
 			scaling_denormalize(x, nmodel, nparam, m0, m_shift);
-		write_iteration_model(opt.cpt_iter, x, &mod, &bnd, param);
+		write_iteration_model(total_opt_iter, x, &mod, &bnd, param);
 
 		/* Write final gradient */
 		float *grad_interior = (float *)malloc(nmodel * sizeof(float));
@@ -1700,13 +1996,8 @@ int main(int argc, char **argv)
 	/* ============================================================ */
 	/* Cleanup                                                       */
 	/* ============================================================ */
-	if (mpi_rank == 0) {
-		optim_finalize(&opt);
-		if (opt.lb) free(opt.lb);
-		if (opt.ub) free(opt.ub);
-	}
-
 	free(x);
+	if (x_frozen) free(x_frozen);
 	free(grad_vec);
 	if (grad_preco_vec) free(grad_preco_vec);
 	free(grad1); free(grad3);
@@ -1724,6 +2015,11 @@ int main(int argc, char **argv)
 	if (P23) free(P23);
 	if (P33) free(P33);
 
+	if (src_nwav_backup) {
+		for (i = 0; i < wav.nx; i++)
+			free(src_nwav_backup[i]);
+		free(src_nwav_backup);
+	}
 	for (i = 0; i < wav.nx; i++)
 		free(src_nwav[i]);
 	free(src_nwav);

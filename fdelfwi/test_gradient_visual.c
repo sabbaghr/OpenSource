@@ -595,7 +595,31 @@ int main(int argc, char **argv)
 	extractModelVector(x_model, &mod, &bnd, param);
 
 	/* Compute m0 scaling factors */
-	scaling_compute_m0(scaling, x_model, nmodel, nparam, m0, m_shift);
+	if (scaling == 3) {
+		/* Range normalization: m0 = m_max - m_min from bounds, no shift */
+		float vp_mn, vp_mx, vs_mn, vs_mx, rho_mn, rho_mx;
+		if (!getparfloat("vp_min", &vp_mn) || !getparfloat("vp_max", &vp_mx))
+			verr("scaling=3 requires vp_min= and vp_max= parameters");
+		if (!getparfloat("vs_min", &vs_mn)) vs_mn = 0.0f;
+		if (!getparfloat("vs_max", &vs_mx)) vs_mx = vp_mx * 0.7f;
+		if (!getparfloat("rho_min", &rho_mn)) rho_mn = 500.0f;
+		if (!getparfloat("rho_max", &rho_mx)) rho_mx = 5000.0f;
+		if (param == 2) {
+			float p_min[3] = {vp_mn, vs_mn, rho_mn};
+			float p_max[3] = {vp_mx, vs_mx, rho_mx};
+			scaling_set_yang_bounds(m0, m_shift, p_min, p_max, nparam, 0);
+		} else {
+			float lam_mn = rho_mn * (vp_mn*vp_mn - 2.0f*vs_mx*vs_mx);
+			float lam_mx = rho_mx * (vp_mx*vp_mx - 2.0f*vs_mn*vs_mn);
+			float mu_mn  = rho_mn * vs_mn * vs_mn;
+			float mu_mx  = rho_mx * vs_mx * vs_mx;
+			float p_min[3] = {lam_mn, mu_mn, rho_mn};
+			float p_max[3] = {lam_mx, mu_mx, rho_mx};
+			scaling_set_yang_bounds(m0, m_shift, p_min, p_max, nparam, 0);
+		}
+	} else {
+		scaling_compute_m0(scaling, x_model, nmodel, nparam, m0, m_shift);
+	}
 	vmess("  m0[0] = %.6e  m0[1] = %.6e  m0[2] = %.6e", m0[0], m0[1], m0[2]);
 	vmess("  m_shift[0] = %.6e  m_shift[1] = %.6e  m_shift[2] = %.6e",
 		m_shift[0], m_shift[1], m_shift[2]);

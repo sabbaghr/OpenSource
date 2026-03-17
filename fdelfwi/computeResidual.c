@@ -160,8 +160,8 @@ float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
 	if (!obs_files || !syn_files || !res_file || ncomp < 1)
 		verr("computeResidual: Invalid arguments.");
 
-	if (mtype != MISFIT_L2)
-		verr("computeResidual: Only MISFIT_L2 is currently implemented (requested %d).", (int)mtype);
+	if (mtype != MISFIT_L2 && mtype != MISFIT_CORRELATION)
+		verr("computeResidual: Unknown misfit type %d (0=L2, 1=correlation).", (int)mtype);
 
 	/* Open output residual file */
 	fp_res = fopen(res_file, "w");
@@ -264,16 +264,52 @@ float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
 				      "obs(gx=%d,gelev=%d) vs syn(gx=%d,gelev=%d)",
 				      k, itr, hdr_obs.gx, hdr_obs.gelev, hdr_syn.gx, hdr_syn.gelev);
 
-			/* Compute adjoint source and misfit (L2)
-			 * With Brossier weighting:
-			 *   J = 0.5 * w^2 * sum(r^2)
-			 *   dJ/dd = w^2 * r
-			 * When w=1/rms(d_obs), each component contributes ~N/2
-			 * regardless of amplitude, making J ~ O(N_total/2). */
-			for (isamp = 0; isamp < ns; isamp++) {
-				float r = buf_syn[isamp] - buf_obs[isamp];
-				misfit += 0.5f * w2 * r * r;
-				buf_obs[isamp] = w2 * r;  /* weighted adjoint source */
+			if (mtype == MISFIT_CORRELATION) {
+				/* Normalized cross-correlation misfit (zero-lag):
+				 *
+				 *   J_i = 1 - <d_obs, d_syn> / (||d_obs|| * ||d_syn||)
+				 *       = 1 - cos(theta)
+				 *
+				 * Adjoint source (dJ/dd_syn):
+				 *   psi(t) = -d_obs(t)/(||d_obs||*||d_syn||)
+				 *            + cos(theta) * d_syn(t) / ||d_syn||^2
+				 *
+				 * Amplitude-insensitive, robust to cycle-skipping
+				 * for moderate phase errors. */
+				double norm_obs2 = 0.0, norm_syn2 = 0.0, dot_os = 0.0;
+				for (isamp = 0; isamp < ns; isamp++) {
+					norm_obs2 += (double)buf_obs[isamp] * (double)buf_obs[isamp];
+					norm_syn2 += (double)buf_syn[isamp] * (double)buf_syn[isamp];
+					dot_os    += (double)buf_obs[isamp] * (double)buf_syn[isamp];
+				}
+				double norm_obs = sqrt(norm_obs2);
+				double norm_syn = sqrt(norm_syn2);
+
+				if (norm_obs < 1.0e-30 || norm_syn < 1.0e-30) {
+					/* Zero-amplitude trace — skip (write zeros) */
+					memset(buf_obs, 0, ns * sizeof(float));
+				} else {
+					double cos_theta = dot_os / (norm_obs * norm_syn);
+
+					misfit += (float)(w2 * (1.0 - cos_theta));
+
+					for (isamp = 0; isamp < ns; isamp++) {
+						double adj = -(double)buf_obs[isamp] / (norm_obs * norm_syn)
+						             + cos_theta * (double)buf_syn[isamp] / norm_syn2;
+						buf_obs[isamp] = (float)(w2 * adj);
+					}
+				}
+			} else {
+				/* L2 waveform misfit:
+				 *   J = 0.5 * w^2 * sum(r^2)
+				 *   dJ/dd_syn = w^2 * r
+				 * With Brossier weighting w=1/rms(d_obs), each
+				 * component contributes ~N/2 regardless of amplitude. */
+				for (isamp = 0; isamp < ns; isamp++) {
+					float r = buf_syn[isamp] - buf_obs[isamp];
+					misfit += 0.5f * w2 * r * r;
+					buf_obs[isamp] = w2 * r;
+				}
 			}
 
 			/* Prepare output header: copy observed header, set TRID */
