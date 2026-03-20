@@ -8,16 +8,15 @@
  *   P_θ = diag( 1 / (H̃_ii + θ·C_k) )               (eq 39)
  *   P_{ν,θ} = ν · P_θ,  ν = ||∇f|| / ||P_θ·∇f||    (eq 40-41)
  *
- * The pseudo-Hessian diagonal H_ii = Σ_t K_i² is accumulated in Lamé
- * space (λ,μ,ρ) by accumGradient() in fwi_gradient.c. This file handles:
- *   1. Chain rule transformation to velocity diagonal (if param=2)
- *   2. Scaling: H̃_ii = m0_i² · H_ii  (chain rule for normalized space)
- *   3. Global damping: C = max(H̃_ii), store H̃_ii + θ·C
- *   4. Division in double precision + norm preservation
+ * Near-surface blending (Métivier, pers. comm.):
+ *   Near sources/receivers, the pseudo-Hessian has singularities.
+ *   A smooth depth-averaged scaling is blended with the full H̃:
+ *     H̃_blend(x,z) = (1-w(z)) · H̃_avg(z) + w(z) · H̃(x,z)
+ *   where w(z) ramps from 0 at surface to 1 at blend_depth.
  *
  * References:
  *   Shin et al. (2001), Geophysics 66(6), 1895–1903.
- *   Métivier et al. (2013), Geophys. J. Int. 194(3), 1490–1518, eq 37-41.
+ *   Métivier et al. (2014), Geophys. J. Int. 194(3), 1490–1518, eq 37-41.
  */
 
 #include <stdlib.h>
@@ -29,6 +28,47 @@
 /* External logging */
 void vmess(char *fmt, ...);
 
+/* File-scope state shared between build and apply */
+static int stored_blend_nz = 0;
+static int stored_nx = 0;
+static int stored_nz = 0;
+
+
+/*--------------------------------------------------------------------
+ * applyDepthTaper -- Multiply array by exponential depth weight w(z).
+ *
+ *   w(iz) = 1 - exp( -(alpha * iz / ntaper)² )
+ *
+ *   ntaper = blend_nz (blend depth in grid points)
+ *   alpha  = steepness parameter (user-supplied):
+ *     alpha=0.30 → gentle taper, w(ntaper)=0.91
+ *     alpha=0.50 → moderate,     w(ntaper)=0.97
+ *     alpha=1.00 → steep,        w(ntaper)=1.00
+ *
+ * At iz=0: w=0 (full suppression).
+ * For iz >> ntaper: w→1 asymptotically.
+ *
+ * Applied to H̃ before β (removes surface spikes from max),
+ * and to the preconditioned gradient (removes surface artifacts).
+ *--------------------------------------------------------------------*/
+static float stored_taper_alpha = 0.30f;
+
+static void applyDepthTaper(float *h, int nx, int nz, int blend_nz)
+{
+	int ix, iz;
+	float alpha = stored_taper_alpha;
+	if (blend_nz <= 0) return;
+	float inv_ntaper = 1.0f / (float)blend_nz;
+
+	for (iz = 0; iz < nz; iz++) {
+		float arg = alpha * (float)iz * inv_ntaper;
+		float w = 1.0f - expf(-arg * arg);
+		if (w > 0.9999f) break;  /* w ≈ 1 for remaining depths */
+		for (ix = 0; ix < nx; ix++)
+			h[ix * nz + iz] *= w;
+	}
+}
+
 
 /*--------------------------------------------------------------------
  * buildBlockPrecond -- Build Shin diagonal pseudo-Hessian preconditioner.
@@ -37,13 +77,14 @@ void vmess(char *fmt, ...);
  *   1. Extract padded diagonal hessian → flat arrays (3 arrays)
  *   2. Chain rule if param=2: H_v_pp = Σ_k J_kp² · H_L_kk
  *   3. Scaling: H̃_ii = m0_i² · H_ii
- *   4. Global damping: C = max(H̃_ii), store P_ii = H̃_ii + θ·C
+ *   4. Depth blending: smooth near surface, full H̃ at depth
+ *   5. Global damping: C = max(H̃_ii), store P_ii = H̃_ii + θ·C
  *
- * Output: P11,P22,P33 = H̃_ii + θ·C  (unnormalized)
+ * Output: P11,P22,P33 = H̃_ii + θ·C
  *         P12,P13,P23 = 0 (unused)
  *
- * Off-diagonal hess arrays are accepted for signature compatibility
- * but ignored.
+ * blend_depth: depth in meters for the near-surface blending zone.
+ *   0 = no blending (original Shin formula).
  *--------------------------------------------------------------------*/
 void buildBlockPrecond(
 	float *hess_lam, float *hess_muu, float *hess_rho,
@@ -53,12 +94,20 @@ void buildBlockPrecond(
 	float precond_eps, float s1, float s2, float s3,
 	float *P11, float *P12, float *P13,
 	float *P22, float *P23, float *P33,
-	int nmodel, int mpi_rank)
+	int nmodel, int mpi_rank,
+	float blend_depth, float taper_alpha,
+	float *wfld_energy,
+	float xmin, float xmax)
 {
 	int i, ix, iz;
 	int ibndx, ibndz, n1;
+	int nx = mod->nx;
+	int nz = mod->nz;
 
 	(void)hess_lam_muu; (void)hess_lam_rho; (void)hess_muu_rho;
+
+	/* Store alpha for applyBlockPrecond's depth taper */
+	stored_taper_alpha = (taper_alpha > 0.0f) ? taper_alpha : 5.0f;
 
 	n1 = mod->naz;
 	ibndx = mod->ioPx;
@@ -71,10 +120,10 @@ void buildBlockPrecond(
 	float *h22 = (float *)calloc(nmodel, sizeof(float));
 	float *h33 = (float *)calloc(nmodel, sizeof(float));
 
-	for (ix = 0; ix < mod->nx; ix++) {
-		for (iz = 0; iz < mod->nz; iz++) {
+	for (ix = 0; ix < nx; ix++) {
+		for (iz = 0; iz < nz; iz++) {
 			int ig = (ix + ibndx) * n1 + (iz + ibndz);
-			int im = ix * mod->nz + iz;
+			int im = ix * nz + iz;
 			h11[im] = hess_lam[ig];
 			h22[im] = hess_muu ? hess_muu[ig] : 0.0f;
 			h33[im] = hess_rho[ig];
@@ -90,21 +139,16 @@ void buildBlockPrecond(
 			v = fabsf(h22[i]); if (v > max_h22) max_h22 = v;
 			v = fabsf(h33[i]); if (v > max_h33) max_h33 = v;
 		}
-		vmess("Precond diag: raw Lame H: |H_ll|=%.4e |H_mm|=%.4e |H_rr|=%.4e",
+		vmess("Precond: raw Lame H: |H_ll|=%.4e |H_mm|=%.4e |H_rr|=%.4e",
 		      max_h11, max_h22, max_h33);
 	}
 
 	/* If param=2: diagonal chain rule Lamé → velocity
-	 * H_v_pp = Σ_k J_kp² · H_L_kk  (only diagonal of J^T diag(H_L) J)
-	 *
-	 * Jacobian J = ∂(λ,μ,ρ)/∂(Vp,Vs,ρ):
-	 *   j11 = 2ρVp,  j12 = -4ρVs,  j13 = Vp²-2Vs²
-	 *   j21 = 0,      j22 = 2ρVs,   j23 = Vs²
-	 *   j31 = 0,      j32 = 0,       j33 = 1               */
+	 * H_v_pp = Σ_k J_kp² · H_L_kk  (diagonal of J^T diag(H_L) J) */
 	if (param == 2 && elastic) {
 		for (i = 0; i < nmodel; i++) {
-			ix = i / mod->nz;
-			iz = i % mod->nz;
+			ix = i / nz;
+			iz = i % nz;
 			int ig = (ix + ibndx) * n1 + (iz + ibndz);
 			float rho_val = mod->rho[ig];
 			float vp  = mod->cp[ig];
@@ -124,18 +168,6 @@ void buildBlockPrecond(
 			h22[i] = j12*j12 * Hll + j22*j22 * Hmm;
 			h33[i] = j13*j13 * Hll + j23*j23 * Hmm + Hrr;
 		}
-
-		if (mpi_rank == 0) {
-			float max_h11 = 0.0f, max_h22 = 0.0f, max_h33 = 0.0f;
-			for (i = 0; i < nmodel; i++) {
-				float v;
-				v = fabsf(h11[i]); if (v > max_h11) max_h11 = v;
-				v = fabsf(h22[i]); if (v > max_h22) max_h22 = v;
-				v = fabsf(h33[i]); if (v > max_h33) max_h33 = v;
-			}
-			vmess("Precond diag: post chain-rule H_vel: |H_VpVp|=%.4e |H_VsVs|=%.4e |H_rhorho|=%.4e",
-			      max_h11, max_h22, max_h33);
-		}
 	}
 
 	/* Scaling: H̃_ii = m0_i² · H_ii  (chain rule for normalized space) */
@@ -145,9 +177,75 @@ void buildBlockPrecond(
 		h33[i] *= s3 * s3;
 	}
 
+	/* Depth taper on H̃ (Métivier, pers. comm.):
+	 * Zero out H̃ near the surface to remove source/receiver singularities.
+	 * This ensures β = θ·max(H̃) is driven by depth values, not surface spikes.
+	 * The same taper is applied to the output in applyBlockPrecond. */
+	int blend_nz = (blend_depth > 0.0f && mod->dz > 0.0f)
+	             ? (int)(blend_depth / mod->dz + 0.5f) : 0;
+	stored_blend_nz = blend_nz;
+	stored_nx = nx;
+	stored_nz = nz;
+	if (blend_nz > 0) {
+		applyDepthTaper(h11, nx, nz, blend_nz);
+		applyDepthTaper(h22, nx, nz, blend_nz);
+		applyDepthTaper(h33, nx, nz, blend_nz);
+		if (mpi_rank == 0)
+			vmess("Precond: depth taper = %.0f m (%d grid points)",
+			      blend_depth, blend_nz);
+	}
+
+	/* ================================================================
+	 * Build preconditioner diagonal P_ii.
+	 *
+	 * If wfld_energy is provided: Plessix & Mulder (2004) EPRECOND=3
+	 *   We(x,z) = sqrt(Ws(x,z)) * [asinh((xmax-x)/z) - asinh((xmin-x)/z)]
+	 *   P_ii = We * s_i² + β
+	 *
+	 * Otherwise: Yang/Shin diagonal pseudo-Hessian
+	 *   P_ii = H̃_ii + β
+	 *
+	 * In both cases: β = θ · max(P_ii)  (Métivier eq 38-39)
+	 * ================================================================ */
+	if (wfld_energy) {
+		/* Plessix & Mulder (2004): source energy × analytical receiver term */
+		float *We = (float *)calloc(nmodel, sizeof(float));
+		float dz = mod->dz;
+		float dx_grid = mod->dx;
+
+		for (ix = 0; ix < nx; ix++) {
+			for (iz = 0; iz < nz; iz++) {
+				int ig = (ix + ibndx) * n1 + (iz + ibndz);
+				int im = ix * nz + iz;
+				float x_phys = (float)(ix + ibndx) * dx_grid;
+				float z_phys = (float)(iz + ibndz) * dz;
+
+				/* Avoid division by zero at z=0 */
+				if (z_phys < dz) z_phys = dz;
+
+				float Ws = wfld_energy[ig];
+				float rcv_term = asinhf((xmax - x_phys) / z_phys)
+				               - asinhf((xmin - x_phys) / z_phys);
+				We[im] = sqrtf(Ws > 0.0f ? Ws : 0.0f) * rcv_term;
+			}
+		}
+
+		/* Apply parameter scaling and store in P arrays */
+		for (i = 0; i < nmodel; i++) {
+			h11[i] = We[i] * s1 * s1;
+			h22[i] = We[i] * s2 * s2;
+			h33[i] = We[i] * s3 * s3;
+		}
+		free(We);
+
+		if (mpi_rank == 0)
+			vmess("Precond: Plessix & Mulder (EPRECOND=3), xmin=%.0f xmax=%.0f",
+			      xmin, xmax);
+	}
+
 	/* Global damping (Métivier eq 38-39):
-	 *   C = max_j(H̃_jj)  over all params and grid points
-	 *   P_ii = H̃_ii + θ·C                                   */
+	 *   C = max_j(P_jj)  over all params and grid points
+	 *   P_ii = P_ii + θ·C                                   */
 	double C_k = 0.0;
 	for (i = 0; i < nmodel; i++) {
 		if ((double)h11[i] > C_k) C_k = (double)h11[i];
@@ -172,16 +270,9 @@ void buildBlockPrecond(
 		const char *lame_n[] = {"lam", "mu", "rho"};
 		const char *vel_n[]  = {"Vp", "Vs", "rho"};
 		const char **n = (param == 2) ? vel_n : lame_n;
-		vmess("Shin precond (Metivier eq 39): C_k=%.4e  theta=%.4e  beta=theta*C_k=%.4e",
+		vmess("Precond (Shin/Metivier): C_k=%.4e  theta=%.4e  beta=%.4e",
 		      C_k, precond_eps, beta);
-		vmess("Shin precond: P_%s = H̃+β: [%.4e, %.4e]", n[0],
-		      (double)h11[0] + beta, C_k + beta);
-		vmess("Shin precond: P_%s = H̃+β: [%.4e, %.4e]", n[1],
-		      beta, (double)h22[0] + beta);
-		vmess("Shin precond: P_%s = H̃+β: [%.4e, %.4e]", n[2],
-		      beta, (double)h33[0] + beta);
 
-		/* Compute actual min/max for accurate diagnostics */
 		float min_all = P11[0], max_all = P11[0];
 		for (i = 0; i < nmodel; i++) {
 			if (P11[i] < min_all) min_all = P11[i];
@@ -191,7 +282,13 @@ void buildBlockPrecond(
 			if (P22[i] > max_all) max_all = P22[i];
 			if (P33[i] > max_all) max_all = P33[i];
 		}
-		vmess("Shin precond: P range [%.4e, %.4e]  cond=%.2f",
+		vmess("Precond: P_%s range [%.4e, %.4e]", n[0],
+		      P11[0], P11[(nx/2)*nz]);
+		vmess("Precond: P_%s range [%.4e, %.4e]", n[1],
+		      P22[0], P22[(nx/2)*nz]);
+		vmess("Precond: P_%s range [%.4e, %.4e]", n[2],
+		      P33[0], P33[(nx/2)*nz]);
+		vmess("Precond: P global [%.4e, %.4e]  cond=%.2f",
 		      min_all, max_all, (double)max_all / (double)min_all);
 	}
 
@@ -202,17 +299,13 @@ void buildBlockPrecond(
 /*--------------------------------------------------------------------
  * applyBlockPrecond -- Apply Shin preconditioner with norm preservation.
  *
- * Métivier et al. (2013), eq 39-41:
+ * Métivier et al. (2014), eq 39-41:
  *   z_i = g_i / P_ii                  (division in double precision)
  *   ν = ||g|| / ||z||                 (norm preservation factor)
  *   out_i = ν · z_i                   (preserves gradient norm)
  *
  * The preconditioner changes direction only, not magnitude.
- * Double precision is used throughout to avoid underflow when
- * g ~ O(10^-10) and P ~ O(10^30).
- *
- * P11,P22,P33 store H̃_ii + θ·C from buildBlockPrecond.
- * P12,P13,P23 are unused (zero).
+ * Double precision avoids underflow when g ~ O(10^-10) and P ~ O(10^30).
  *
  * out and in may be the same pointer (in-place operation).
  *--------------------------------------------------------------------*/
@@ -250,8 +343,7 @@ void applyBlockPrecond(
 	/* Step 3: Norm preservation (Métivier eq 40-41):
 	 *   ν = ||g|| / ||P_θ·g||
 	 *   out = ν · P_θ · g
-	 * This ensures ||out|| = ||g||: the preconditioner changes
-	 * direction only, preserving the gradient magnitude. */
+	 * Ensures ||out|| = ||g||: preconditioner changes direction only. */
 	double norm_out_sq = 0.0;
 	for (i = 0; i < ntot; i++)
 		norm_out_sq += (double)out[i] * (double)out[i];
@@ -260,5 +352,14 @@ void applyBlockPrecond(
 		float nu = (float)sqrt(norm_in_sq / norm_out_sq);
 		for (i = 0; i < ntot; i++)
 			out[i] *= nu;
+	}
+
+	/* Step 4: Depth taper — zero out near-surface artifacts.
+	 * Same w(z) taper that was applied to H̃ in buildBlockPrecond. */
+	if (stored_blend_nz > 0 && stored_nx > 0 && stored_nz > 0) {
+		int p;
+		for (p = 0; p < nparam; p++)
+			applyDepthTaper(out + (size_t)p * nmodel,
+			                stored_nx, stored_nz, stored_blend_nz);
 	}
 }

@@ -42,7 +42,7 @@ makemod sizex=${SIZEX} sizez=${SIZEZ} dx=${DX} dz=${DX} \
     intt=def poly=0 x=1400,1500,1600 z=400,400,400 cp=${VP0} cs=${VS0} ro=2200 gradcp=0 gradcs=0 \
     orig=0,0 file_base=model_true.su verbose=0
 
-makewave fp=15 dt=0.001 nt=1024 fmax=25 file_out=wave.su t0=0.10 verbose=0
+makewave fp=15 fmin=2 fmax=25 dt=0.001 nt=1024 file_out=wave.su t0=0.10 verbose=0
 
 # =========================================================
 # Generate observed data (10 shots)
@@ -84,7 +84,7 @@ COMMON="file_cp=model_bg_cp.su file_cs=model_bg_cs.su file_den=model_bg_ro.su \
     left=4 right=4 top=4 bottom=4 \
     chk_skipdt=100 chk_base=chk_gv \
     param=2 precond_eps=0.01 \
-    comp=_rvz \
+    comp=_rp \
     file_obs=obs"
 
 # =========================================================

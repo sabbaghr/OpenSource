@@ -109,7 +109,7 @@ void optim_print_info(int n, const char *tag, optim_type *opt,
 	if (flag == OPT_INIT) {
 		char fname[64];
 		snprintf(fname, sizeof(fname), "iterate_%s.dat", tag);
-		_print_fp = fopen(fname, "w");
+		_print_fp = fopen(fname, opt->print_append ? "a" : "w");
 		if (!_print_fp) return;
 
 		fprintf(_print_fp,
@@ -120,6 +120,9 @@ void optim_print_info(int n, const char *tag, optim_type *opt,
 		else if (strcmp(tag, "LB") == 0)
 			fprintf(_print_fp,
 				"             l-BFGS ALGORITHM\n");
+		else if (strcmp(tag, "PL") == 0)
+			fprintf(_print_fp,
+				"       PRECONDITIONED l-BFGS ALGORITHM\n");
 		fprintf(_print_fp,
 			"**********************************************************************\n");
 		fprintf(_print_fp, "     Convergence criterion  : %10.2e\n", opt->conv);

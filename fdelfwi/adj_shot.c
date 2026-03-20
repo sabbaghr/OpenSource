@@ -178,7 +178,8 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              float *grad1, float *grad2, float *grad3,
              float *hess_lam, float *hess_muu, float *hess_rho,
              float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
-             int param, int verbose)
+             int param, int verbose,
+             float *wfld_energy)
 {
 	wflPar wfl_fwd, wfl_adj;
 	float *buf_vx, *buf_vz;
@@ -422,7 +423,8 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 				grad_lam, grad_muu, NULL,
 				hess_lam, hess_muu, hess_rho,
 				hess_lam_muu, hess_lam_rho, hess_muu_rho,
-				K_lam_tmp, K_muu_tmp, K_rho_tmp);
+				K_lam_tmp, K_muu_tmp, K_rho_tmp,
+				wfld_energy);
 
 			/* Advance adjoint wavefield with multicomponent source injection.
 			 * The adjoint kernel injects force residuals (Fx,Fz) at the
@@ -479,7 +481,8 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 					NULL, NULL, grad_rho,
 					NULL, NULL, NULL,
 					NULL, NULL, NULL,
-					NULL, NULL, NULL);
+					NULL, NULL, NULL,
+					NULL);
 			}
 
 			/* Write adjoint wavefield snapshot if requested. */

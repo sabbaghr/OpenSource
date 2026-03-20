@@ -2,30 +2,17 @@
  * scaling.c -- Parameter scaling for multi-parameter FWI
  *
  * scaling=0 : none (raw physical units)
- * scaling=1 : Brossier (2011) — m0[p] = mean(|x_init_p|), x̃ = x/m0
- * scaling=2 : Yang (2018) eq 47 — m̄ = (m - m_min)/(m_max - m_min)
- *             maps parameters to [0,1] using user-provided bounds.
- * scaling=3 : Range normalization (Métivier, pers. comm.) —
+ * scaling=1 : Range normalization (Métivier, pers. comm.)
  *             m* = m / Δm,  Δm = m_max - m_min.
- *             Divides by range only, NO shift. Requires bounds.
+ *             Divides by expected parameter range, no shift.
+ *             Requires user-supplied bounds (vp_min/max, etc.).
  *
- * For scaling=1:
- *   x_tilde = x / m0,  g_tilde = g * m0
- *   m_shift = 0 (no shift)
+ * Chain rule:
+ *   g* = g · Δm         (gradient)
+ *   H* = Δm² · H        (Hessian diagonal)
+ *   d_phys = d* · Δm    (perturbation direction)
  *
- * For scaling=2:
- *   m0[p] = m_max[p] - m_min[p]  (range)
- *   m_shift[p] = m_min[p]
- *   x_bar = (x - m_shift) / m0,  g_bar = g * m0
- *
- * For scaling=3:
- *   m0[p] = m_max[p] - m_min[p]  (range)
- *   m_shift[p] = 0               (no shift)
- *   x_star = x / m0,  g_star = g * m0
- *
- * When combined with the pseudo-Hessian preconditioner,
- * s_p = m0_p makes the pseudo-Hessian consistent with the
- * normalized gradient.
+ * Reference: Métivier (2025), personal communication.
  *--------------------------------------------------------------------*/
 
 #include <stdlib.h>
@@ -33,68 +20,26 @@
 #include <math.h>
 
 /*--------------------------------------------------------------------
- * scaling_compute_m0 -- Compute scaling constants from initial model.
+ * scaling_compute_m0 -- Compute m0 = Δm = m_max - m_min from bounds.
  *
- *   scaling : 1 = Brossier (mean |x|), 2 = Yang (uses bounds)
- *   x       : model vector [nparam * nmodel]
- *   nmodel  : grid points per parameter
- *   nparam  : number of parameter classes (2 or 3)
- *   m0      : output array [nparam] — scale factor
- *   m_shift : output array [nparam] — shift (0 for Brossier)
+ *   m_min, m_max : parameter bounds [nparam]
+ *   m0           : output scale factors [nparam] (= Δm)
+ *   m_shift      : output shift [nparam] (always 0)
  *--------------------------------------------------------------------*/
-void scaling_compute_m0(int scaling, const float *x, int nmodel, int nparam,
-                        float *m0, float *m_shift)
-{
-    int p, i;
-    for (p = 0; p < nparam; p++) {
-        m_shift[p] = 0.0f;
-        const float *xp = x + (size_t)p * nmodel;
-        if (scaling == 1) {
-            /* Brossier: mean absolute value */
-            double sum = 0.0;
-            for (i = 0; i < nmodel; i++)
-                sum += fabsf(xp[i]);
-            m0[p] = (nmodel > 0) ? (float)(sum / nmodel) : 1.0f;
-        } else if (scaling == 2) {
-            /* Yang eq 47: m0 = m_max - m_min from bounds (set by caller).
-             * If called before bounds are set, compute from initial model. */
-            float mn = xp[0], mx = xp[0];
-            for (i = 1; i < nmodel; i++) {
-                if (xp[i] < mn) mn = xp[i];
-                if (xp[i] > mx) mx = xp[i];
-            }
-            m0[p] = mx - mn;
-            m_shift[p] = mn;
-        } else {
-            m0[p] = 1.0f;
-        }
-        if (m0[p] < 1.0e-30f) m0[p] = 1.0f;  /* safety for zero/constant fields */
-    }
-}
-
-/*--------------------------------------------------------------------
- * scaling_set_yang_bounds -- Set m0 and m_shift from user-provided bounds.
- *
- * For scaling=2 (Yang eq 47): m̄ = (m - m_min) / (m_max - m_min)
- *   → m_shift = m_min, m0 = Δm
- *
- * For scaling=3 (range-only): m* = m / (m_max - m_min)
- *   → m_shift = 0, m0 = Δm
- *--------------------------------------------------------------------*/
-void scaling_set_yang_bounds(float *m0, float *m_shift,
-                             const float *m_min, const float *m_max,
-                             int nparam, int use_shift)
+void scaling_compute_m0_from_bounds(const float *m_min, const float *m_max,
+                                    int nparam, float *m0, float *m_shift)
 {
     int p;
     for (p = 0; p < nparam; p++) {
-        m_shift[p] = use_shift ? m_min[p] : 0.0f;
         m0[p] = m_max[p] - m_min[p];
+        m_shift[p] = 0.0f;
         if (m0[p] < 1.0e-30f) m0[p] = 1.0f;
     }
 }
 
 /*--------------------------------------------------------------------
- * scaling_normalize -- x̃ = (x - m_shift) / m0
+ * scaling_normalize -- m* = (m - shift) / m0
+ * With shift=0: m* = m / Δm
  *--------------------------------------------------------------------*/
 void scaling_normalize(float *v, int nmodel, int nparam,
                        const float *m0, const float *m_shift)
@@ -110,7 +55,8 @@ void scaling_normalize(float *v, int nmodel, int nparam,
 }
 
 /*--------------------------------------------------------------------
- * scaling_denormalize -- x = x̃ * m0 + m_shift
+ * scaling_denormalize -- m = m* · m0 + shift
+ * With shift=0: m = m* · Δm
  *--------------------------------------------------------------------*/
 void scaling_denormalize(float *v, int nmodel, int nparam,
                          const float *m0, const float *m_shift)
@@ -124,7 +70,7 @@ void scaling_denormalize(float *v, int nmodel, int nparam,
 }
 
 /*--------------------------------------------------------------------
- * scaling_scale_gradient -- ḡ = g * m0  (chain rule, no shift)
+ * scaling_scale_gradient -- g* = g · m0  (chain rule)
  *--------------------------------------------------------------------*/
 void scaling_scale_gradient(float *g, int nmodel, int nparam, const float *m0)
 {
@@ -137,10 +83,10 @@ void scaling_scale_gradient(float *g, int nmodel, int nparam, const float *m0)
 }
 
 /*--------------------------------------------------------------------
- * scaling_scale_hessian_vec -- H̄d = m0 * H * (m0 * d̃)
+ * scaling_scale_hessian_vec -- Hd* = m0 · (H · (m0 · d*))
  *
+ * For Hessian-vector products in normalized space.
  * Caller must: (1) denorm_direction d before H*d, (2) call this on Hd.
- * Note: for Hessian-vector products, only m0 scaling applies (no shift).
  *--------------------------------------------------------------------*/
 void scaling_scale_hessian_vec(float *Hd, int nmodel, int nparam,
                                const float *m0)
@@ -149,11 +95,9 @@ void scaling_scale_hessian_vec(float *Hd, int nmodel, int nparam,
 }
 
 /*--------------------------------------------------------------------
- * scaling_denorm_direction -- d_phys = d̃ * m0  (direction only, no shift)
+ * scaling_denorm_direction -- d_phys = d* · m0
  *
- * For Hessian-vector products: the perturbation direction d must be
- * converted from normalized to physical space. Since d is a PERTURBATION
- * (not a model), only the scale applies: d_phys = m0 * d̃.
+ * Perturbation direction: only scale applies (no shift).
  *--------------------------------------------------------------------*/
 void scaling_denorm_direction(float *d, int nmodel, int nparam, const float *m0)
 {

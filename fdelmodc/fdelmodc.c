@@ -5,6 +5,9 @@
 #include<string.h>
 #include"par.h"
 #include"fdelmodc.h"
+#ifdef USE_CUDA
+#include"fdelmodc_gpu.h"
+#endif
 #ifdef MPI
 #include <mpi.h>
 #endif
@@ -487,6 +490,13 @@ int main(int argc, char **argv)
 	}
 	if (verbose>3 && pe==0) writeSrcRecPos(&mod, &rec, &src, &shot);
 
+#ifdef USE_CUDA
+	/* Initialize GPU: upload model, allocate wavefields, set FD coeffs */
+	if (mod.ischeme == 3) {
+		fdelmodc_gpu_init(mod, bnd, rec, rox, roz, l2m, lam, mul, verbose);
+	}
+#endif
+
 	/* Outer loop over number of shots */
 #ifdef MPI
     npeshot = MAX((((float)shot.n)/((float)npes)), 1.0);
@@ -549,6 +559,21 @@ int main(int argc, char **argv)
 			its=1;
 		}
         perc=it1/100;if(!perc)perc=1;
+
+#ifdef USE_CUDA
+		/* GPU path for elastic scheme */
+		if (mod.ischeme == 3) {
+			fdelmodc_gpu_elastic(mod, src, wav, bnd, rec, sna,
+				ixsrc, izsrc, ishot, shot.n,
+				src_nwav, rox, roz, l2m, lam, mul,
+				vx, vz, tzz, txx, txz,
+				rec_vx, rec_vz, rec_txx, rec_tzz, rec_txz,
+				rec_p, rec_pp, rec_ss,
+				it0, it1, verbose);
+			/* Skip CPU time loop — jump to post-shot I/O */
+			goto gpu_post_shot;
+		}
+#endif
 
 		/* Main loop over the number of time steps */
 		for (it=it0; it<it1; it++) {
@@ -699,6 +724,9 @@ shared (shot, bnd, mod, src, wav, rec, ixsrc, izsrc, it, src_nwav, verbose)
 
 		} /* end of loop over time steps it */
 
+#ifdef USE_CUDA
+gpu_post_shot:
+#endif
 		/* write output files: receivers and or beams */
 		if (fileno) fileno++;
 		
@@ -751,6 +779,10 @@ shared (shot, bnd, mod, src, wav, rec, ixsrc, izsrc, it, src_nwav, verbose)
 //    vmess("MPI: pe=%d before barrier", pe);
 //    MPI_Barrier(MPI_COMM_WORLD);
     closeRec(rec);
+#endif
+
+#ifdef USE_CUDA
+	fdelmodc_gpu_cleanup();
 #endif
 
 	t1= wallclock_time();

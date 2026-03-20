@@ -66,6 +66,7 @@ typedef struct {
 	optAlg  algorithm;
 	int     debug;
 	int     print_flag;     /* 1=write convergence file */
+	int     print_append;   /* 1=append to existing file (multiscale bands) */
 
 	/* Dimensions */
 	int     n;              /* model vector length (set by init) */

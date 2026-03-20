@@ -64,7 +64,8 @@ void accumGradient(modPar *mod, bndPar *bnd,
                    float *grad_lam, float *grad_muu, float *grad_rho,
                    float *hess_lam, float *hess_muu, float *hess_rho,
                    float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
-                   float *K_lam_tmp, float *K_muu_tmp, float *K_rho_tmp)
+                   float *K_lam_tmp, float *K_muu_tmp, float *K_rho_tmp,
+                   float *wfld_energy)
 {
 	int ix, iz, n1, nax;
 	int ibPx, iePx, ibPz, iePz;
@@ -416,6 +417,26 @@ void accumGradient(modPar *mod, bndPar *bnd,
 				hess_lam_muu[ig] += Kl * Km;
 				hess_lam_rho[ig] += Kl * Kr;
 				hess_muu_rho[ig] += Km * Kr;
+			}
+		}
+	}
+
+	/* ================================================================
+	 * Forward wavefield energy: Ws += vx² + vz²
+	 *
+	 * Used by the Plessix & Mulder (2004) preconditioner (EPRECOND=3
+	 * in DENISE). Accumulated at the P grid by averaging staggered
+	 * velocity components to the cell center.
+	 * ================================================================ */
+	if (wfld_energy && fwd_vx && fwd_vz) {
+		for (ix = ibPx; ix < iePx; ix++) {
+			for (iz = ibPz; iz < iePz; iz++) {
+				int ig = ix*n1+iz;
+				/* Average vx to P grid: 0.5*(vx[ix,iz] + vx[ix+1,iz]) */
+				float vx_avg = 0.5f*(fwd_vx[ig] + fwd_vx[(ix+1)*n1+iz]);
+				/* Average vz to P grid: 0.5*(vz[ix,iz] + vz[ix,iz+1]) */
+				float vz_avg = 0.5f*(fwd_vz[ig] + fwd_vz[ig+1]);
+				wfld_energy[ig] += vx_avg*vx_avg + vz_avg*vz_avg;
 			}
 		}
 	}

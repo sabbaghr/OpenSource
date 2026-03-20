@@ -83,7 +83,8 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              float *grad1, float *grad2, float *grad3,
              float *hess_lam, float *hess_muu, float *hess_rho,
              float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
-             int param, int verbose);
+             int param, int verbose,
+             float *wfld_energy);
 
 int writesufile(char *filename, float *data, size_t n1, size_t n2,
                 float f1, float f2, float d1, float d2);
@@ -532,7 +533,8 @@ int main(int argc, char **argv)
 			adj_shot(&mod, &src, &wav, &bnd, &rec, &adj,
 				ixsrc, izsrc, src_nwav, &chk, sna_adj_ptr,
 				shot_grad1, shot_grad2, shot_grad3,
-				NULL, NULL, NULL, NULL, NULL, NULL, param, 0);
+				NULL, NULL, NULL, NULL, NULL, NULL, param, 0,
+				NULL);
 
 			freeResidual(&adj);
 		}

@@ -85,7 +85,8 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              float *grad1, float *grad2, float *grad3,
              float *hess_lam, float *hess_muu, float *hess_rho,
              float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
-             int param, int verbose);
+             int param, int verbose,
+             float *wfld_energy);
 
 int writesufile(char *filename, float *data, size_t n1, size_t n2,
                 float f1, float f2, float d1, float d2);
@@ -129,7 +130,7 @@ char *sdoc[] = {
 "   rho_min=,rho_max=  density bounds (kg/m3, optional)",
 "   write_iter=1       write model every N iterations",
 "   misfit=0           misfit function: 0=L2, 1=normalized cross-correlation",
-"   scaling=0          parameter scaling: 0=none, 1=Brossier(mean), 2=Yang(max)",
+"   scaling=0          parameter scaling: 0=none, 1=range(Δm=m_max-m_min)",
 "   precond=0          Yang pseudo-Hessian preconditioner (0=off, 1=on)",
 "   precond_eps=1e-3   regularization epsilon for preconditioner",
 "   precond_scale_1/2/3=1.0  manual Yang scaling (overridden by scaling>0)",
@@ -367,7 +368,9 @@ static float compute_fwi_gradient(
 	int keep_checkpoints,
 	const float *comp_weights,
 	misfitType mtype,
-	int verbose)
+	int verbose,
+	float srt_radius, int srt_filtsize,
+	float *wfld_energy)
 {
 	int ishot, k, i;
 	int n1 = mod->naz;
@@ -387,6 +390,7 @@ static float compute_fwi_gradient(
 	if (hess_lam_muu) memset(hess_lam_muu, 0, sizem * sizeof(float));
 	if (hess_lam_rho) memset(hess_lam_rho, 0, sizem * sizeof(float));
 	if (hess_muu_rho) memset(hess_muu_rho, 0, sizem * sizeof(float));
+	if (wfld_energy) memset(wfld_energy, 0, sizem * sizeof(float));
 
 	/* Determine shots for this rank */
 	int my_nshots = 0;
@@ -402,6 +406,11 @@ static float compute_fwi_gradient(
 	snprintf(work_dir, sizeof(work_dir), "fwi_rank%03d", mpi_rank);
 	mkdir(work_dir, 0755);
 
+	/* Boundary offsets for padded→interior source position conversion */
+	int ibndx = mod->ioPx, ibndz = mod->ioPz;
+	if (bnd->lef == 4 || bnd->lef == 2) ibndx += bnd->ntap;
+	if (bnd->top == 4 || bnd->top == 2) ibndz += bnd->ntap;
+
 	/* Process assigned shots */
 	for (k = 0; k < my_nshots; k++) {
 		ishot = my_shots[k];
@@ -415,6 +424,23 @@ static float compute_fwi_gradient(
 		float *shot_grad3 = (float *)calloc(sizem, sizeof(float));
 		if (mod->ischeme > 2)
 			shot_grad2 = (float *)calloc(sizem, sizeof(float));
+
+		/* Per-shot wavefield energy for Plessix & Mulder preconditioner */
+		float *shot_wfld_energy = NULL;
+		if (hess_lam)
+			shot_wfld_energy = (float *)calloc(sizem, sizeof(float));
+
+		/* Per-shot Hessian diagonal arrays (zeroed) */
+		float *shot_hess_lam = NULL, *shot_hess_muu = NULL, *shot_hess_rho = NULL;
+		float *shot_hess_lm = NULL, *shot_hess_lr = NULL, *shot_hess_mr = NULL;
+		if (hess_lam) {
+			shot_hess_lam = (float *)calloc(sizem, sizeof(float));
+			shot_hess_rho = (float *)calloc(sizem, sizeof(float));
+			if (hess_muu) shot_hess_muu = (float *)calloc(sizem, sizeof(float));
+			if (hess_lam_muu) shot_hess_lm = (float *)calloc(sizem, sizeof(float));
+			if (hess_lam_rho) shot_hess_lr = (float *)calloc(sizem, sizeof(float));
+			if (hess_muu_rho) shot_hess_mr = (float *)calloc(sizem, sizeof(float));
+		}
 
 		/* Step 1: Forward modeling with checkpointing */
 		if (keep_checkpoints)
@@ -486,12 +512,62 @@ static float compute_fwi_gradient(
 			adj_shot(mod, src, wav, bnd, rec, &adj,
 			         ixsrc, izsrc, src_nwav, &chk, NULL,
 			         shot_grad1, shot_grad2, shot_grad3,
-			         hess_lam, hess_muu, hess_rho,
-			         hess_lam_muu, hess_lam_rho, hess_muu_rho,
-			         1, 0);
+			         shot_hess_lam ? shot_hess_lam : hess_lam,
+			         shot_hess_muu ? shot_hess_muu : hess_muu,
+			         shot_hess_rho ? shot_hess_rho : hess_rho,
+			         shot_hess_lm ? shot_hess_lm : hess_lam_muu,
+			         shot_hess_lr ? shot_hess_lr : hess_lam_rho,
+			         shot_hess_mr ? shot_hess_mr : hess_muu_rho,
+			         1, 0,
+			         shot_wfld_energy);
 
 			freeResidual(&adj);
 		}
+
+		/* Per-shot radial source taper (erf-based, DENISE convention).
+		 * Applied to BOTH gradient and Hessian before accumulation.
+		 * This removes source singularities so the preconditioner's
+		 * β = θ·max(H̃) is driven by illumination, not artifacts. */
+		if (srt_radius > 0.0f) {
+			int sx_pad = ixsrc + ibndx;
+			int sz_pad = izsrc + ibndz;
+			float *src_mask = buildSourceTaperMask(
+				mod->nax, mod->naz, sx_pad, sz_pad,
+				srt_radius, mod->dx, srt_filtsize);
+
+			applySourceTaper(shot_grad1, src_mask, sizem);
+			applySourceTaper(shot_grad3, src_mask, sizem);
+			if (shot_grad2) applySourceTaper(shot_grad2, src_mask, sizem);
+
+			applySourceTaper(shot_hess_lam, src_mask, sizem);
+			applySourceTaper(shot_hess_rho, src_mask, sizem);
+			applySourceTaper(shot_hess_muu, src_mask, sizem);
+			applySourceTaper(shot_hess_lm, src_mask, sizem);
+			applySourceTaper(shot_hess_lr, src_mask, sizem);
+			applySourceTaper(shot_hess_mr, src_mask, sizem);
+			applySourceTaper(shot_wfld_energy, src_mask, sizem);
+
+			free(src_mask);
+		}
+
+		/* Accumulate per-shot Hessian and wavefield energy into totals */
+		if (shot_hess_lam) {
+			for (i = 0; i < (int)sizem; i++) {
+				hess_lam[i] += shot_hess_lam[i];
+				hess_rho[i] += shot_hess_rho[i];
+			}
+			if (hess_muu && shot_hess_muu)
+				for (i = 0; i < (int)sizem; i++) hess_muu[i] += shot_hess_muu[i];
+			if (hess_lam_muu && shot_hess_lm)
+				for (i = 0; i < (int)sizem; i++) hess_lam_muu[i] += shot_hess_lm[i];
+			if (hess_lam_rho && shot_hess_lr)
+				for (i = 0; i < (int)sizem; i++) hess_lam_rho[i] += shot_hess_lr[i];
+			if (hess_muu_rho && shot_hess_mr)
+				for (i = 0; i < (int)sizem; i++) hess_muu_rho[i] += shot_hess_mr[i];
+		}
+		if (shot_wfld_energy && wfld_energy)
+			for (i = 0; i < (int)sizem; i++)
+				wfld_energy[i] += shot_wfld_energy[i];
 
 		/* Accumulate into local gradient sum */
 		for (i = 0; i < (int)sizem; i++) {
@@ -513,6 +589,13 @@ static float compute_fwi_gradient(
 		free(shot_grad1);
 		free(shot_grad3);
 		if (shot_grad2) free(shot_grad2);
+		if (shot_hess_lam) free(shot_hess_lam);
+		if (shot_hess_rho) free(shot_hess_rho);
+		if (shot_hess_muu) free(shot_hess_muu);
+		if (shot_hess_lm) free(shot_hess_lm);
+		if (shot_hess_lr) free(shot_hess_lr);
+		if (shot_hess_mr) free(shot_hess_mr);
+		if (shot_wfld_energy) free(shot_wfld_energy);
 		if (!keep_checkpoints)
 			cleanCheckpoints(&chk);
 	}
@@ -570,6 +653,10 @@ static float compute_fwi_gradient(
 			if (hess_muu_rho) {
 				MPI_Allreduce(hess_muu_rho, tmp_h, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
 				memcpy(hess_muu_rho, tmp_h, sizem * sizeof(float));
+			}
+			if (wfld_energy) {
+				MPI_Allreduce(wfld_energy, tmp_h, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+				memcpy(wfld_energy, tmp_h, sizem * sizeof(float));
 			}
 			free(tmp_h);
 		}
@@ -994,7 +1081,15 @@ int main(int argc, char **argv)
 	if (!getparint("write_iter", &write_iter)) write_iter = 1;
 	if (!getparint("niter_cg", &niter_cg)) niter_cg = 5;
 	if (!getparint("precond", &use_precond)) use_precond = 0;
-	if (!getparfloat("precond_eps", &precond_eps)) precond_eps = 1e-3f;
+	if (!getparfloat("precond_eps", &precond_eps)) precond_eps = 1e-2f;
+	float precond_blend = 0.0f;
+	float precond_alpha = 0.30f;
+	float srt_radius = 0.0f;
+	if (!getparfloat("precond_blend", &precond_blend)) precond_blend = 0.0f;
+	if (!getparfloat("precond_alpha", &precond_alpha)) precond_alpha = 0.30f;
+	if (!getparfloat("srt_radius", &srt_radius)) srt_radius = 0.0f;
+	int srt_filtsize = 1;
+	if (!getparint("srt_filtsize", &srt_filtsize)) srt_filtsize = 1;
 	if (!getparint("scaling", &scaling)) scaling = 0;
 
 	/* Misfit function: 0=L2 (default), 1=normalized cross-correlation */
@@ -1152,9 +1247,11 @@ int main(int argc, char **argv)
 	float *grad2 = NULL;
 	if (elastic) grad2 = (float *)calloc(sizem, sizeof(float));
 
-	/* Yang pseudo-Hessian arrays (padded grid, accumulated in adj_shot) */
+	/* Pseudo-Hessian arrays (padded grid, accumulated in adj_shot) */
 	float *hess_lam = NULL, *hess_muu = NULL, *hess_rho = NULL;
 	float *hess_lam_muu = NULL, *hess_lam_rho = NULL, *hess_muu_rho = NULL;
+	/* Forward wavefield energy for Plessix & Mulder preconditioner */
+	float *wfld_energy = NULL;
 	/* Block preconditioner matrix (6 upper-triangle, flat nmodel each) */
 	float *P11 = NULL, *P12 = NULL, *P13 = NULL;
 	float *P22 = NULL, *P23 = NULL, *P33 = NULL;
@@ -1166,6 +1263,7 @@ int main(int argc, char **argv)
 		hess_lam_muu = (float *)calloc(sizem, sizeof(float));
 		hess_lam_rho = (float *)calloc(sizem, sizeof(float));
 		hess_muu_rho = (float *)calloc(sizem, sizeof(float));
+		wfld_energy = (float *)calloc(sizem, sizeof(float));
 		P11 = (float *)calloc(nmodel, sizeof(float));
 		P12 = (float *)calloc(nmodel, sizeof(float));
 		P13 = (float *)calloc(nmodel, sizeof(float));
@@ -1179,45 +1277,35 @@ int main(int argc, char **argv)
 	/* Extract initial model into optimizer vector */
 	extractModelVector(x, &mod, &bnd, param);
 
-	/* Parameter scaling:
+	/* Parameter scaling (Métivier, pers. comm.):
 	 *   0 = none (raw physical units)
-	 *   1 = Brossier: m0 = mean(|x|), m* = x/m0
-	 *   2 = Yang: m0 = Δm, m* = (x - m_min)/Δm  (shift to [0,1])
-	 *   3 = Range: m0 = Δm, m* = x/Δm            (no shift)
+	 *   1 = Range normalization: m* = m / Δm,  Δm = m_max - m_min
+	 *       Requires bounds: vp_min, vp_max, vs_min, vs_max, rho_min, rho_max
 	 *
-	 * scaling=3 requires bounds (vp_min/max, vs_min/max, rho_min/max).
-	 * When preconditioner is active, s_p = m0_p automatically. */
+	 * When preconditioner is active, s_p = m0_p = Δm_p automatically. */
 	float m0[3] = {1.0f, 1.0f, 1.0f};
 	float m_shift[3] = {0.0f, 0.0f, 0.0f};
-	if (scaling > 0) {
-		if (scaling == 3) {
-			/* Range normalization: m0 = m_max - m_min from bounds, no shift.
-			 * Parse bounds here (same params as setup_bounds). */
-			float vp_mn, vp_mx, vs_mn, vs_mx, rho_mn, rho_mx;
-			if (!getparfloat("vp_min", &vp_mn) || !getparfloat("vp_max", &vp_mx))
-				verr("scaling=3 requires vp_min= and vp_max= parameters");
-			if (!getparfloat("vs_min", &vs_mn)) vs_mn = 0.0f;
-			if (!getparfloat("vs_max", &vs_mx)) vs_mx = vp_mx * 0.7f;
-			if (!getparfloat("rho_min", &rho_mn)) rho_mn = 500.0f;
-			if (!getparfloat("rho_max", &rho_mx)) rho_mx = 5000.0f;
+	if (scaling == 1) {
+		float vp_mn, vp_mx, vs_mn, vs_mx, rho_mn, rho_mx;
+		if (!getparfloat("vp_min", &vp_mn) || !getparfloat("vp_max", &vp_mx))
+			verr("scaling=1 requires vp_min= and vp_max= parameters");
+		if (!getparfloat("vs_min", &vs_mn)) vs_mn = 0.0f;
+		if (!getparfloat("vs_max", &vs_mx)) vs_mx = vp_mx * 0.7f;
+		if (!getparfloat("rho_min", &rho_mn)) rho_mn = 500.0f;
+		if (!getparfloat("rho_max", &rho_mx)) rho_mx = 5000.0f;
 
-			if (param == 2) {
-				/* Velocity parameterization: bounds directly */
-				float p_min[3] = {vp_mn, vs_mn, rho_mn};
-				float p_max[3] = {vp_mx, vs_mx, rho_mx};
-				scaling_set_yang_bounds(m0, m_shift, p_min, p_max, nparam, 0);
-			} else {
-				/* Lamé parameterization: convert bounds */
-				float lam_mn = rho_mn * (vp_mn*vp_mn - 2.0f*vs_mx*vs_mx);
-				float lam_mx = rho_mx * (vp_mx*vp_mx - 2.0f*vs_mn*vs_mn);
-				float mu_mn  = rho_mn * vs_mn * vs_mn;
-				float mu_mx  = rho_mx * vs_mx * vs_mx;
-				float p_min[3] = {lam_mn, mu_mn, rho_mn};
-				float p_max[3] = {lam_mx, mu_mx, rho_mx};
-				scaling_set_yang_bounds(m0, m_shift, p_min, p_max, nparam, 0);
-			}
+		if (param == 2) {
+			float p_min[3] = {vp_mn, vs_mn, rho_mn};
+			float p_max[3] = {vp_mx, vs_mx, rho_mx};
+			scaling_compute_m0_from_bounds(p_min, p_max, nparam, m0, m_shift);
 		} else {
-			scaling_compute_m0(scaling, x, nmodel, nparam, m0, m_shift);
+			float lam_mn = rho_mn * (vp_mn*vp_mn - 2.0f*vs_mx*vs_mx);
+			float lam_mx = rho_mx * (vp_mx*vp_mx - 2.0f*vs_mn*vs_mn);
+			float mu_mn  = rho_mn * vs_mn * vs_mn;
+			float mu_mx  = rho_mx * vs_mx * vs_mx;
+			float p_min[3] = {lam_mn, mu_mn, rho_mn};
+			float p_max[3] = {lam_mx, mu_mx, rho_mx};
+			scaling_compute_m0_from_bounds(p_min, p_max, nparam, m0, m_shift);
 		}
 		scaling_normalize(x, nmodel, nparam, m0, m_shift);
 		if (use_precond) {
@@ -1226,14 +1314,10 @@ int main(int argc, char **argv)
 			if (nparam >= 3) s3 = m0[2];
 		}
 		if (mpi_rank == 0) {
-			const char *snames[] = {"", "Brossier (mean)", "Yang (shift+range)", "Range (no shift)"};
-			vmess("Scaling=%d (%s): m0 = [%.4e, %.4e, %.4e]",
-			      scaling, snames[scaling], m0[0],
+			vmess("Scaling=1 (range): Δm = [%.4e, %.4e, %.4e]",
+			      m0[0],
 			      nparam >= 2 ? m0[1] : 0.0f,
 			      nparam >= 3 ? m0[2] : 0.0f);
-			if (scaling == 3)
-				vmess("  m_shift = [%.4e, %.4e, %.4e] (no shift)",
-				      m_shift[0], m_shift[1], m_shift[2]);
 		}
 	}
 
@@ -1407,6 +1491,7 @@ int main(int argc, char **argv)
 	opt.l = lbfgs_mem;
 	opt.nls_max = nls_max;
 	opt.print_flag = (mpi_rank == 0) ? 1 : 0;
+	opt.print_append = (iband > 0) ? 1 : 0;
 	opt.debug = (verbose > 1) ? 1 : 0;
 
 	/* TRN/Enriched-specific: max inner CG iterations */
@@ -1489,7 +1574,8 @@ int main(int argc, char **argv)
 		hess_lam, hess_muu, hess_rho,
 		hess_lam_muu, hess_lam_rho, hess_muu_rho,
 		chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk,
-		comp_weights, mtype, verbose);
+		comp_weights, mtype, verbose, srt_radius, srt_filtsize,
+		wfld_energy);
 
 	/* Taper gradient near source and receiver positions */
 	{
@@ -1534,7 +1620,9 @@ int main(int argc, char **argv)
 			    &mod, &bnd, param, elastic,
 			    precond_eps, s1, s2, s3,
 			    P11, P12, P13, P22, P23, P33,
-			    nmodel, mpi_rank);
+			    nmodel, mpi_rank, precond_blend, precond_alpha,
+			    (use_precond == 2) ? wfld_energy : NULL,
+			    mod.x0, mod.x0 + (mod.nx-1)*mod.dx);
 			if (grad_preco_vec &&
 			    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)) {
 				applyBlockPrecond(grad_preco_vec, grad_vec,
@@ -1687,7 +1775,8 @@ int main(int argc, char **argv)
 				hess_lam, hess_muu, hess_rho,
 				hess_lam_muu, hess_lam_rho, hess_muu_rho,
 				chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk,
-				comp_weights, mtype, verbose);
+				comp_weights, mtype, verbose, srt_radius, srt_filtsize,
+		wfld_energy);
 
 			/* Taper gradient near source and receiver positions */
 			{
@@ -1725,7 +1814,9 @@ int main(int argc, char **argv)
 					    &mod, &bnd, param, elastic,
 					    precond_eps, s1, s2, s3,
 					    P11, P12, P13, P22, P23, P33,
-					    nmodel, mpi_rank);
+					    nmodel, mpi_rank, precond_blend, precond_alpha,
+					    (use_precond == 2) ? wfld_energy : NULL,
+					    mod.x0, mod.x0 + (mod.nx-1)*mod.dx);
 					if (grad_preco_vec &&
 					    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)) {
 						applyBlockPrecond(grad_preco_vec, grad_vec,
@@ -2008,6 +2099,7 @@ int main(int argc, char **argv)
 	if (hess_lam_muu) free(hess_lam_muu);
 	if (hess_lam_rho) free(hess_lam_rho);
 	if (hess_muu_rho) free(hess_muu_rho);
+	if (wfld_energy) free(wfld_energy);
 	if (P11) free(P11);
 	if (P12) free(P12);
 	if (P13) free(P13);

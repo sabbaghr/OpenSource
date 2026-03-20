@@ -342,12 +342,9 @@ float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
                       const char *res_file, misfitType mtype,
                       const float *comp_weights, int verbose);
 
-/* --- scaling.c: Parameter scaling (0=none, 1=Brossier, 2=Yang, 3=range) --- */
-void scaling_compute_m0(int scaling, const float *x, int nmodel, int nparam,
-                        float *m0, float *m_shift);
-void scaling_set_yang_bounds(float *m0, float *m_shift,
-                             const float *m_min, const float *m_max,
-                             int nparam, int use_shift);
+/* --- scaling.c: Parameter scaling (0=none, 1=range normalization) --- */
+void scaling_compute_m0_from_bounds(const float *m_min, const float *m_max,
+                                    int nparam, float *m0, float *m_shift);
 void scaling_normalize(float *v, int nmodel, int nparam,
                        const float *m0, const float *m_shift);
 void scaling_denormalize(float *v, int nmodel, int nparam,
@@ -356,7 +353,12 @@ void scaling_scale_gradient(float *g, int nmodel, int nparam, const float *m0);
 void scaling_scale_hessian_vec(float *Hd, int nmodel, int nparam, const float *m0);
 void scaling_denorm_direction(float *d, int nmodel, int nparam, const float *m0);
 
-/* --- yang_precond.c: Yang pseudo-Hessian block preconditioner --- */
+/* --- taper_source.c: Per-shot radial source taper --- */
+float *buildSourceTaperMask(int nax, int naz, int sx, int sz,
+                            float radius, float dx, int filtsize);
+void applySourceTaper(float *arr, const float *mask, size_t sizem);
+
+/* --- preconditioner.c: Shin/Métivier diagonal pseudo-Hessian preconditioner --- */
 void buildBlockPrecond(
     float *hess_lam, float *hess_muu, float *hess_rho,
     float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
@@ -365,7 +367,10 @@ void buildBlockPrecond(
     float precond_eps, float s1, float s2, float s3,
     float *P11, float *P12, float *P13,
     float *P22, float *P23, float *P33,
-    int nmodel, int mpi_rank);
+    int nmodel, int mpi_rank,
+    float blend_depth, float taper_alpha,
+    float *wfld_energy,
+    float xmin, float xmax);
 void applyBlockPrecond(
     float *out, const float *in,
     const float *P11, const float *P12, const float *P13,
@@ -381,7 +386,8 @@ void accumGradient(modPar *mod, bndPar *bnd,
                    float *grad_lam, float *grad_muu, float *grad_rho,
                    float *hess_lam, float *hess_muu, float *hess_rho,
                    float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
-                   float *K_lam_tmp, float *K_muu_tmp, float *K_rho_tmp);
+                   float *K_lam_tmp, float *K_muu_tmp, float *K_rho_tmp,
+                   float *wfld_energy);
 void convertGradientToVelocity(float *grad1, float *grad2, float *grad3,
                                float *cp, float *cs, float *rho, size_t sizem);
 void accumGradient_rho_Dsig(modPar *mod, bndPar *bnd,

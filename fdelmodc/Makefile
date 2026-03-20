@@ -19,7 +19,9 @@ ALLINC  = -I.
 #LDFLAGS += -Mprof=lines
 #LDFLAGS += -Wl,-z,muldefs
 
-ifdef MPICC
+ifdef USE_CUDA
+all: fdelmodc fdelmodc_gpu
+else ifdef MPICC
 all: fdelmodc  fdelmodc_mpi
 else
 all: fdelmodc
@@ -75,6 +77,23 @@ $(PRG):	$(OBJC) fdelmodc.h
 	$(CC) $(CFLAGS) $(OPTC) -c fdelmodc.c 
 	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o fdelmodc $(OBJC) fileOpen.o writeRec.o $(LIBS)
 
+# CUDA GPU target
+# Build with: make USE_CUDA=1
+# Requires: nvcc in PATH, CUDA toolkit installed
+NVCC ?= nvcc
+CUDA_ARCH ?= -arch=sm_70
+CUDA_FLAGS = -O3 --use_fast_math -lineinfo -Xcompiler "$(OPTC)"
+
+fdelmodc_gpu: $(OBJC) fdelmodc.h fdelmodc_gpu.h
+	$(CC) $(CFLAGS) $(OPTC) -DUSE_CUDA -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -DUSE_CUDA -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -DUSE_CUDA -c fdelmodc.c
+	$(NVCC) $(CUDA_FLAGS) $(CUDA_ARCH) -DUSE_CUDA -I. -c fdelmodc_cuda.cu -o fdelmodc_cuda.o
+	$(NVCC) $(CUDA_FLAGS) $(CUDA_ARCH) -DUSE_CUDA -I. -c fdelmodc_gpu.cu -o fdelmodc_gpu.o
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o fdelmodc_gpu \
+		$(OBJC) fileOpen.o writeRec.o fdelmodc_cuda.o fdelmodc_gpu.o \
+		$(LIBS) -lcudart -lstdc++
+
 ifdef MPICC
 fdelmodc_mpi: $(OBJC) fdelmodc.h
 	$(MPICC) -DMPI $(CFLAGS) $(OPTC) -c fileOpen.c 
@@ -93,10 +112,10 @@ install: fdelmodc
 endif
 
 clean:
-		rm -f core $(OBJC) $(OBJM) fdelmodc 
+		rm -f core $(OBJC) $(OBJM) fdelmodc fdelmodc_gpu fdelmodc_cuda.o fdelmodc_gpu.o
 
 realclean:
-		rm -f core $(OBJC) $(OBJM) $(PRG) $B/fdelmodc 
+		rm -f core $(OBJC) $(OBJM) $(PRG) fdelmodc_gpu fdelmodc_cuda.o fdelmodc_gpu.o $B/fdelmodc $B/fdelmodc_gpu
 
 
 print:	Makefile $(SRC)

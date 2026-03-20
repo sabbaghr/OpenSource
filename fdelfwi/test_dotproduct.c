@@ -64,7 +64,8 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              float *grad1, float *grad2, float *grad3,
              float *hess_lam, float *hess_muu, float *hess_rho,
              float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
-             int param, int verbose);
+             int param, int verbose,
+             float *wfld_energy);
 
 void convertGradientToVelocity(float *grad1, float *grad2, float *grad3,
                                float *cp, float *cs, float *rho,
@@ -817,7 +818,8 @@ int main(int argc, char **argv)
 		adj_shot(&mod, &src, &wav, &bnd, &rec, &adj,
 			ixsrc, izsrc, src_nwav, &chk, &sna_adj,
 			grad_vp, grad_vs, grad_rho,
-			NULL, NULL, NULL, NULL, NULL, NULL, 1, verbose);
+			NULL, NULL, NULL, NULL, NULL, NULL, 1, verbose,
+			         NULL);
 	}
 
 	vmess("Adjoint backpropagation complete (Lamé space).");

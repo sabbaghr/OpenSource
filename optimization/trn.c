@@ -243,7 +243,7 @@ void print_info_trn(int n, optim_type *opt, float fcost, optFlag flag)
 	if (!opt->print_flag) return;
 
 	if (flag == OPT_INIT) {
-		_trn_fp = fopen("iterate_TRN.dat", "w");
+		_trn_fp = fopen("iterate_TRN.dat", opt->print_append ? "a" : "w");
 		if (_trn_fp) {
 			fprintf(_trn_fp,
 				"******************************************************************************************\n");
@@ -271,7 +271,7 @@ void print_info_trn(int n, optim_type *opt, float fcost, optFlag flag)
 			fflush(_trn_fp);
 		}
 
-		_trn_cg_fp = fopen("iterate_TRN_CG.dat", "w");
+		_trn_cg_fp = fopen("iterate_TRN_CG.dat", opt->print_append ? "a" : "w");
 		if (_trn_cg_fp) {
 			fprintf(_trn_cg_fp,
 				"******************************************************************************************\n");

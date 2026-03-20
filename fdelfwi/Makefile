@@ -75,7 +75,8 @@ SRCC	= fdfwimodc.c \
 		born_vsrc.c  \
 		born_shot.c  \
 		hess_shot.c  \
-		yang_precond.c  \
+		preconditioner.c  \
+		taper_source.c  \
 		scaling.c  \
 		bandpass_filter.c  \
 		sourceOnSurface.c  \
