@@ -137,6 +137,9 @@ char *sdoc[] = {
 "   precond_boost_1/2/3=1.0  additional tunable boost for pseudo-Hessian per parameter",
 "                              (Yang et al. 2018, eq 48: multiplies s_i on top of scaling)",
 "                              e.g. precond_boost_3=5 boosts density preconditioner 25x",
+"   smooth_grad=0     2D Gaussian smoothing half-width for gradient (grid pts, 0=off)",
+"   smooth_hess=0     2D Gaussian smoothing half-width for pseudo-Hessian (grid pts, 0=off)",
+"                       removes source/receiver singularities before preconditioner build",
 "   data_weight=auto    Brossier W_d data weighting: 0=off, 1=on (auto=1 when scaling>0)",
 "   active_params=      selectable parameter updates: comma-separated list of active params",
 "                        param=1: lam,mu,rho (default: all)  param=2: vp,vs,rho (default: all)",
@@ -1067,6 +1070,7 @@ int main(int argc, char **argv)
 	float  conv, precond_eps;
 	float  s1 = 1.0f, s2 = 1.0f, s3 = 1.0f;  /* Yang scaling (eq 48) */
 	float  boost1 = 1.0f, boost2 = 1.0f, boost3 = 1.0f; /* additional tunable boost */
+	int    smooth_grad = 0, smooth_hess = 0;  /* 2D Gaussian smoothing half-widths */
 
 #ifdef USE_MPI
 	MPI_Init(&argc, &argv);
@@ -1132,6 +1136,8 @@ int main(int argc, char **argv)
 		getparfloat("precond_boost_2", &boost2);
 		getparfloat("precond_boost_3", &boost3);
 	}
+	getparint("smooth_grad", &smooth_grad);
+	getparint("smooth_hess", &smooth_hess);
 
 	/* When illumination preconditioner is active AND algorithm uses it
 	 * natively, disable gradient taper — the preconditioner handles
@@ -1629,6 +1635,46 @@ int main(int argc, char **argv)
 		taperGradientSrcRcv(grad3, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper);
 	}
 
+	/* 2D Gaussian smoothing of gradient and pseudo-Hessian (Liu et al. 2022).
+	 * Removes source/receiver singularities before buildBlockPrecond so that
+	 * β = θ·max(H̃) is driven by illumination, not point-source artifacts. */
+	if (mpi_rank == 0) {
+		int ibx_s = mod.ioPx, ibz_s = mod.ioPz;
+		if (bnd.lef == 4 || bnd.lef == 2) ibx_s += bnd.ntap;
+		if (bnd.top == 4 || bnd.top == 2) ibz_s += bnd.ntap;
+
+		if (smooth_grad > 0) {
+			smooth2d_padded(grad1, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx_s, ibz_s, smooth_grad, smooth_grad);
+			if (mod.ischeme > 2)
+				smooth2d_padded(grad2, mod.nax, mod.naz, mod.nx, mod.nz,
+				                ibx_s, ibz_s, smooth_grad, smooth_grad);
+			smooth2d_padded(grad3, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx_s, ibz_s, smooth_grad, smooth_grad);
+		}
+		if (smooth_hess > 0 && hess_lam) {
+			smooth2d_padded(hess_lam, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx_s, ibz_s, smooth_hess, smooth_hess);
+			if (hess_muu)
+				smooth2d_padded(hess_muu, mod.nax, mod.naz, mod.nx, mod.nz,
+				                ibx_s, ibz_s, smooth_hess, smooth_hess);
+			smooth2d_padded(hess_rho, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx_s, ibz_s, smooth_hess, smooth_hess);
+			if (hess_lam_muu)
+				smooth2d_padded(hess_lam_muu, mod.nax, mod.naz, mod.nx, mod.nz,
+				                ibx_s, ibz_s, smooth_hess, smooth_hess);
+			if (hess_lam_rho)
+				smooth2d_padded(hess_lam_rho, mod.nax, mod.naz, mod.nx, mod.nz,
+				                ibx_s, ibz_s, smooth_hess, smooth_hess);
+			if (hess_muu_rho)
+				smooth2d_padded(hess_muu_rho, mod.nax, mod.naz, mod.nx, mod.nz,
+				                ibx_s, ibz_s, smooth_hess, smooth_hess);
+			if (wfld_energy)
+				smooth2d_padded(wfld_energy, mod.nax, mod.naz, mod.nx, mod.nz,
+				                ibx_s, ibz_s, smooth_hess, smooth_hess);
+		}
+	}
+
 	/* Extract gradient to flat vector, apply preconditioner.
 	 *
 	 * For PLBFGS/PNLCG: preconditioner is applied through the
@@ -1829,6 +1875,44 @@ int main(int argc, char **argv)
 				if (mod.ischeme > 2)
 					taperGradientSrcRcv(grad2, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper);
 				taperGradientSrcRcv(grad3, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper);
+			}
+
+			/* 2D Gaussian smoothing of gradient and pseudo-Hessian */
+			if (mpi_rank == 0) {
+				int ibx_s = mod.ioPx, ibz_s = mod.ioPz;
+				if (bnd.lef == 4 || bnd.lef == 2) ibx_s += bnd.ntap;
+				if (bnd.top == 4 || bnd.top == 2) ibz_s += bnd.ntap;
+
+				if (smooth_grad > 0) {
+					smooth2d_padded(grad1, mod.nax, mod.naz, mod.nx, mod.nz,
+					                ibx_s, ibz_s, smooth_grad, smooth_grad);
+					if (mod.ischeme > 2)
+						smooth2d_padded(grad2, mod.nax, mod.naz, mod.nx, mod.nz,
+						                ibx_s, ibz_s, smooth_grad, smooth_grad);
+					smooth2d_padded(grad3, mod.nax, mod.naz, mod.nx, mod.nz,
+					                ibx_s, ibz_s, smooth_grad, smooth_grad);
+				}
+				if (smooth_hess > 0 && hess_lam) {
+					smooth2d_padded(hess_lam, mod.nax, mod.naz, mod.nx, mod.nz,
+					                ibx_s, ibz_s, smooth_hess, smooth_hess);
+					if (hess_muu)
+						smooth2d_padded(hess_muu, mod.nax, mod.naz, mod.nx, mod.nz,
+						                ibx_s, ibz_s, smooth_hess, smooth_hess);
+					smooth2d_padded(hess_rho, mod.nax, mod.naz, mod.nx, mod.nz,
+					                ibx_s, ibz_s, smooth_hess, smooth_hess);
+					if (hess_lam_muu)
+						smooth2d_padded(hess_lam_muu, mod.nax, mod.naz, mod.nx, mod.nz,
+						                ibx_s, ibz_s, smooth_hess, smooth_hess);
+					if (hess_lam_rho)
+						smooth2d_padded(hess_lam_rho, mod.nax, mod.naz, mod.nx, mod.nz,
+						                ibx_s, ibz_s, smooth_hess, smooth_hess);
+					if (hess_muu_rho)
+						smooth2d_padded(hess_muu_rho, mod.nax, mod.naz, mod.nx, mod.nz,
+						                ibx_s, ibz_s, smooth_hess, smooth_hess);
+					if (wfld_energy)
+						smooth2d_padded(wfld_energy, mod.nax, mod.naz, mod.nx, mod.nz,
+						                ibx_s, ibz_s, smooth_hess, smooth_hess);
+				}
 			}
 
 			/* Rank 0: extract gradient and apply preconditioner */
