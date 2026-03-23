@@ -77,6 +77,8 @@ SRCC	= fdfwimodc.c \
 		hess_shot.c  \
 		preconditioner.c  \
 		taper_source.c  \
+		precond_shot.c  \
+		smooth2d.c  \
 		scaling.c  \
 		bandpass_filter.c  \
 		sourceOnSurface.c  \

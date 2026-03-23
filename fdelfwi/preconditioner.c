@@ -32,6 +32,7 @@ void vmess(char *fmt, ...);
 static int stored_blend_nz = 0;
 static int stored_nx = 0;
 static int stored_nz = 0;
+static int stored_precond_mode = 1;  /* 1=diagonal, 3=block inverse */
 
 
 /*--------------------------------------------------------------------
@@ -97,7 +98,8 @@ void buildBlockPrecond(
 	int nmodel, int mpi_rank,
 	float blend_depth, float taper_alpha,
 	float *wfld_energy,
-	float xmin, float xmax)
+	float xmin, float xmax,
+	int precond_mode)
 {
 	int i, ix, iz;
 	int ibndx, ibndz, n1;
@@ -106,7 +108,8 @@ void buildBlockPrecond(
 
 	(void)hess_lam_muu; (void)hess_lam_rho; (void)hess_muu_rho;
 
-	/* Store alpha for applyBlockPrecond's depth taper */
+	/* Store mode and alpha for applyBlockPrecond */
+	stored_precond_mode = precond_mode;
 	stored_taper_alpha = (taper_alpha > 0.0f) ? taper_alpha : 5.0f;
 
 	n1 = mod->naz;
@@ -143,9 +146,44 @@ void buildBlockPrecond(
 		      max_h11, max_h22, max_h33);
 	}
 
-	/* If param=2: diagonal chain rule Lamé → velocity
-	 * H_v_pp = Σ_k J_kp² · H_L_kk  (diagonal of J^T diag(H_L) J) */
+	/* If param=2: chain rule Lamé → velocity.
+	 *
+	 * H_vel = J^T · H_Lamé · J  where J = ∂(λ,μ,ρ)/∂(Vp,Vs,ρ).
+	 *
+	 * In Lamé space (proven analytically from radiation patterns):
+	 *   H_λμ = H_λλ  (always identical)
+	 *   H_λρ = H_μρ = 0  (stress vs velocity subspaces are orthogonal)
+	 *
+	 * Jacobian:
+	 *   j11=2ρVp   j12=-4ρVs  j13=Vp²-2Vs²
+	 *   j21=0      j22=2ρVs   j23=Vs²
+	 *   j31=0      j32=0      j33=1
+	 *
+	 * Full 6-element chain rule (for precond=2 diagonal AND precond=3 block):
+	 *
+	 * Diagonal (Liu et al. 2022, eq A21):
+	 *   H_VpVp = j11²·Hll
+	 *   H_VsVs = j12²·Hll + 2·j12·j22·Hll + j22²·Hmm  (using Hlm=Hll)
+	 *   H_ρρ   = j13²·Hll + 2·j13·j23·Hll + j23²·Hmm + Hrr
+	 *
+	 * Off-diagonal (for precond=3,5 block):
+	 *   H_VpVs = j11·j12·Hll + j11·j22·Hll  (using Hlm=Hll, Hlr=0)
+	 *          = j11·Hll·(j12 + j22)
+	 *   H_Vpρ  = j11·j13·Hll + j11·j23·Hll  (using Hlm=Hll, Hlr=0)
+	 *          = j11·Hll·(j13 + j23)
+	 *   H_Vsρ  = j12·j13·Hll + (j12·j23+j22·j13)·Hll + j22·j23·Hmm
+	 *          = Hll·(j12·j13 + j12·j23 + j22·j13) + j22·j23·Hmm
+	 *
+	 * Store off-diagonals in h12_vel, h13_vel, h23_vel (allocated only
+	 * for block modes precond=3,5). */
+	float *h12_vel = NULL, *h13_vel = NULL, *h23_vel = NULL;
 	if (param == 2 && elastic) {
+		if (precond_mode == 3 || precond_mode == 5) {
+			h12_vel = (float *)calloc(nmodel, sizeof(float));
+			h13_vel = (float *)calloc(nmodel, sizeof(float));
+			h23_vel = (float *)calloc(nmodel, sizeof(float));
+		}
+
 		for (i = 0; i < nmodel; i++) {
 			ix = i / nz;
 			iz = i % nz;
@@ -164,9 +202,28 @@ void buildBlockPrecond(
 
 			float Hll = h11[i], Hmm = h22[i], Hrr = h33[i];
 
+			/* Diagonal elements */
 			h11[i] = j11*j11 * Hll;
-			h22[i] = j12*j12 * Hll + j22*j22 * Hmm;
-			h33[i] = j13*j13 * Hll + j23*j23 * Hmm + Hrr;
+			h22[i] = j12*j12 * Hll + 2.0f*j12*j22 * Hll + j22*j22 * Hmm;
+			h33[i] = j13*j13 * Hll + 2.0f*j13*j23 * Hll + j23*j23 * Hmm + Hrr;
+
+			/* Off-diagonal elements (block modes only) */
+			if (h12_vel) {
+				h12_vel[i] = j11 * Hll * (j12 + j22);
+				h13_vel[i] = j11 * Hll * (j13 + j23);
+				h23_vel[i] = Hll * (j12*j13 + j12*j23 + j22*j13)
+				           + j22*j23 * Hmm;
+			}
+		}
+	} else if (precond_mode == 3 || precond_mode == 5) {
+		/* Lamé parameterization: extract off-diags directly
+		 * H_λμ = H_λλ (from hess_lam_muu), H_λρ = H_μρ = 0 */
+		h12_vel = (float *)calloc(nmodel, sizeof(float));
+		h13_vel = (float *)calloc(nmodel, sizeof(float));
+		h23_vel = (float *)calloc(nmodel, sizeof(float));
+		for (i = 0; i < nmodel; i++) {
+			h12_vel[i] = h11[i];  /* H_λμ = H_λλ */
+			/* h13_vel[i] = 0, h23_vel[i] = 0 (already from calloc) */
 		}
 	}
 
@@ -254,16 +311,78 @@ void buildBlockPrecond(
 	}
 	double beta = (double)precond_eps * C_k;
 
-	for (i = 0; i < nmodel; i++) {
-		P11[i] = (float)((double)h11[i] + beta);
-		P22[i] = (float)((double)h22[i] + beta);
-		P33[i] = (float)((double)h33[i] + beta);
-	}
+	if (precond_mode == 3 || precond_mode == 5) {
+		/* ============================================================
+		 * Block-diagonal preconditioner (Wang et al. 2016, eq 12-14).
+		 *
+		 * Off-diagonal elements h12_vel/h13_vel/h23_vel were computed
+		 * during the chain rule step above (or from Lamé identities).
+		 * Apply m0² scaling, then per grid point: compute
+		 * (H̃_b + βI)^{-1} via Cramer's rule in double precision.
+		 * Store 6 elements of the inverse.
+		 * ============================================================ */
 
-	/* Off-diagonal outputs zeroed (unused in diagonal preconditioner) */
-	memset(P12, 0, nmodel * sizeof(float));
-	memset(P13, 0, nmodel * sizeof(float));
-	memset(P23, 0, nmodel * sizeof(float));
+		/* Apply m0² scaling to off-diagonals */
+		if (h12_vel) {
+			for (i = 0; i < nmodel; i++) {
+				h12_vel[i] *= s1 * s2;
+				h13_vel[i] *= s1 * s3;
+				h23_vel[i] *= s2 * s3;
+			}
+		}
+
+		/* Per grid point: Cramer's rule on (H̃_b + βI) in double */
+		for (i = 0; i < nmodel; i++) {
+			double a11 = (double)h11[i] + beta;
+			double a22 = (double)h22[i] + beta;
+			double a33 = (double)h33[i] + beta;
+			double a12 = h12_vel ? (double)h12_vel[i] : 0.0;
+			double a13 = h13_vel ? (double)h13_vel[i] : 0.0;
+			double a23 = h23_vel ? (double)h23_vel[i] : 0.0;
+
+			/* Determinant */
+			double det = a11*(a22*a33 - a23*a23)
+			           - a12*(a12*a33 - a23*a13)
+			           + a13*(a12*a23 - a22*a13);
+
+			if (det == 0.0) det = 1.0;  /* safety */
+			double idet = 1.0 / det;
+
+			/* Cofactors (symmetric adjugate) = inverse * det */
+			double c11 = a22*a33 - a23*a23;
+			double c12 = a13*a23 - a12*a33;
+			double c13 = a12*a23 - a13*a22;
+			double c22 = a11*a33 - a13*a13;
+			double c23 = a12*a13 - a11*a23;
+			double c33 = a11*a22 - a12*a12;
+
+			/* Store inverse elements */
+			P11[i] = (float)(idet * c11);
+			P22[i] = (float)(idet * c22);
+			P33[i] = (float)(idet * c33);
+			P12[i] = (float)(idet * c12);
+			P13[i] = (float)(idet * c13);
+			P23[i] = (float)(idet * c23);
+		}
+
+		if (mpi_rank == 0)
+			vmess("Precond: Block-diagonal (Wang et al. 2016), beta=%.4e", beta);
+
+		if (h12_vel) free(h12_vel);
+		if (h13_vel) free(h13_vel);
+		if (h23_vel) free(h23_vel);
+		h12_vel = h13_vel = h23_vel = NULL;
+	} else {
+		/* Diagonal preconditioner: store H̃_ii + β */
+		for (i = 0; i < nmodel; i++) {
+			P11[i] = (float)((double)h11[i] + beta);
+			P22[i] = (float)((double)h22[i] + beta);
+			P33[i] = (float)((double)h33[i] + beta);
+		}
+		memset(P12, 0, nmodel * sizeof(float));
+		memset(P13, 0, nmodel * sizeof(float));
+		memset(P23, 0, nmodel * sizeof(float));
+	}
 
 	/* Diagnostics */
 	if (mpi_rank == 0) {
@@ -317,8 +436,6 @@ void applyBlockPrecond(
 {
 	int i, ntot;
 
-	(void)P12; (void)P13; (void)P23;
-
 	ntot = nparam * nmodel;
 
 	/* Step 1: Compute ||g||² before the solve (needed for in-place case) */
@@ -326,14 +443,28 @@ void applyBlockPrecond(
 	for (i = 0; i < ntot; i++)
 		norm_in_sq += (double)in[i] * (double)in[i];
 
-	/* Step 2: Apply P_θ · g = g / (H̃ + β) in double precision */
-	if (nparam == 3) {
+	/* Step 2: Apply preconditioner */
+	if ((stored_precond_mode == 3 || stored_precond_mode == 5) && nparam == 3) {
+		/* Block-diagonal: P stores (H̃+γI)^{-1}, do matrix-vector multiply.
+		 * out = P^{-1} · in where P^{-1} is stored in P11-P33, P12-P23. */
+		for (i = 0; i < nmodel; i++) {
+			double g1 = in[i], g2 = in[nmodel+i], g3 = in[2*nmodel+i];
+			double p11 = P11[i], p12 = P12[i], p13 = P13[i];
+			double p22 = P22[i], p23 = P23[i], p33 = P33[i];
+
+			out[i]          = (float)(p11*g1 + p12*g2 + p13*g3);
+			out[nmodel+i]   = (float)(p12*g1 + p22*g2 + p23*g3);
+			out[2*nmodel+i] = (float)(p13*g1 + p23*g2 + p33*g3);
+		}
+	} else if (nparam == 3) {
+		/* Diagonal: P stores H̃_ii + β, divide */
 		for (i = 0; i < nmodel; i++) {
 			out[i]          = (float)((double)in[i]          / (double)P11[i]);
 			out[nmodel+i]   = (float)((double)in[nmodel+i]   / (double)P22[i]);
 			out[2*nmodel+i] = (float)((double)in[2*nmodel+i] / (double)P33[i]);
 		}
 	} else {
+		/* 2-parameter (acoustic) */
 		for (i = 0; i < nmodel; i++) {
 			out[i]        = (float)((double)in[i]        / (double)P11[i]);
 			out[nmodel+i] = (float)((double)in[nmodel+i] / (double)P33[i]);

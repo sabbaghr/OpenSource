@@ -43,7 +43,7 @@ echo "========================================================="
 # =========================================================
 DX=5
 SIZEX=2000
-SIZEZ=800
+SIZEZ=600
 VP0=2000
 VS0=1150
 RO0=2000
@@ -51,20 +51,28 @@ RO0=2000
 # =========================================================
 # Acquisition
 # =========================================================
-NSHOTS=10
-XSRC_START=200
-XSRC_END=1800
+NSHOTS=21
+XSRC_START=0
+XSRC_END=2000
 XSRC_STEP=$(( (XSRC_END - XSRC_START) / (NSHOTS - 1) ))
 
 # =========================================================
 # Preconditioner parameters
 # =========================================================
-PRECOND=1                # 1=Yang/Shin (K_i²), 2=Plessix&Mulder (sqrt(Ws)*asinh)
+PRECOND=5                # 1=Yang/Shin (K_i²), 2=Plessix&Mulder (sqrt(Ws)*asinh)
 PRECOND_EPS=0.01          # θ damping (Métivier eq 39)
 PRECOND_BLEND=0           # depth taper zone in meters (0=disabled)
 PRECOND_ALPHA=0.30        # depth taper steepness
-SRT_RADIUS=0        # per-shot source taper radius in meters (0=disabled)
-SRT_FILTSIZE=0         # hard-zero half-width in grid points (zone = (2n+1)²)
+SRT_RADIUS=0              # per-shot source taper radius in meters (0=disabled)
+SRT_FILTSIZE=0            # hard-zero half-width in grid points (zone = (2n+1)²)
+SMOOTH_GRAD=10             # gradient smoothing half-width (grid pts, 0=off)
+SMOOTH_HESS=10            # Hessian smoothing half-width (grid pts, 0=off)
+
+# Preconditioner boost (Yang et al. 2018, eq 48)
+# Tunable per-parameter scaling: boost weak parameters (density)
+BOOST_1=1                 # param 1 (lambda/Vp) boost
+BOOST_2=2                 # param 2 (mu/Vs) boost
+BOOST_3=10                # param 3 (rho) boost — compensate weak density sensitivity
 
 # Scaling bounds (for range normalization) 
 VP_MIN=1500;  VP_MAX=4500
@@ -81,26 +89,29 @@ echo "--- Step 1: Creating models ---"
 
 makemod sizex=${SIZEX} sizez=${SIZEZ} dx=${DX} dz=${DX} \
     cp0=${VP0} cs0=${VS0} ro0=${RO0} \
+    intt=def poly=0 x=0,2000 z=500,500 cp=3000 cs=1700 ro=2200 \
     orig=0,0 file_base=model_bg.su verbose=0
-
+    
 makemod sizex=${SIZEX} sizez=${SIZEZ} dx=${DX} dz=${DX} \
     cp0=${VP0} cs0=${VS0} ro0=${RO0} \
-    intt=diffr dtype=2 x=1000 z=400 cp=2200 cs=${VS0} ro=${RO0} var=20 \
-    intt=diffr dtype=2 x=500 z=400 cp=${VP0} cs=1250 ro=${RO0} var=20 \
-    intt=diffr dtype=2 x=1500 z=400 cp=${VP0} cs=${VS0} ro=2200 var=20 \
+    intt=def poly=0 x=0,2000 z=500,500 cp=3000 cs=1700 ro=2200 \
+    intt=diffr dtype=2 x=1000 z=300 cp=2200 cs=${VS0} ro=${RO0} var=20 \
+    intt=diffr dtype=2 x=500  z=300 cp=${VP0} cs=1250 ro=${RO0} var=20 \
+    intt=diffr dtype=2 x=1500 z=300 cp=${VP0} cs=${VS0} ro=2200 var=20 \
     orig=0,0 file_base=model_true.su verbose=0
 
 echo "  Background: Vp=${VP0}, Vs=${VS0}, rho=${RO0}"
-echo "  Anomalies: x=1000(Vp=2200), x=500(Vs=1250), x=1500(rho=2200)"
+echo "  Layer at z=500m: Vp=3000, Vs=1700, rho=2200"
+echo "  Anomalies: x=1000(Vp=2200), x=500(Vs=1250), x=1500(rho=2200) at z=300m"
 
 # =========================================================
 # STEP 2: Create wavelet
 # =========================================================
 echo "--- Step 2: Creating wavelet ---"
 
-makewave fp=15 fmin=2 fmax=20 dt=0.001 nt=1024 file_out=wave.su t0=0.10 verbose=0
+makewave fp=14 fmin=2 fmax=25 dt=0.001 nt=1024 file_out=wave.su t0=0.10 verbose=0
 
-echo "  Wavelet: fp=15 Hz, fmin=2 Hz, fmax=20 Hz"
+echo "  Wavelet: fp=10 Hz, fmin=2 Hz, fmax=25 Hz"
 
 # =========================================================
 # STEP 3: Generate observed data
@@ -116,9 +127,9 @@ for ((ishot=0; ishot<NSHOTS; ishot++)); do
         ischeme=3 iorder=4 src_type=1 \
         rec_type_vx=1 rec_type_vz=1 rec_type_txx=1 rec_type_tzz=1 \
         dtrcv=0.004 tmod=1.5 verbose=0 \
-        xrcv1=100 xrcv2=1900 zrcv1=20 zrcv2=20 dxrcv=10 \
+        xrcv1=100 xrcv2=1900 zrcv1=50 zrcv2=50 dxrcv=10 \
         xsrc=${XSRC} zsrc=10 ntaper=100 \
-        left=4 right=4 top=4 bottom=4
+        left=4 right=4 top=1 bottom=4
 
     SHOTID=$(printf "%03d" ${ishot})
     mv obs_${ishot}_rvx.su obs_${SHOTID}_rvx.su
@@ -145,17 +156,19 @@ ${FDELFWI}/test_gradient_visual \
     ischeme=3 iorder=4 src_type=1 \
     rec_type_vx=1 rec_type_vz=1 rec_type_txx=1 rec_type_tzz=1 \
     dtrcv=0.004 tmod=1.5 verbose=1 \
-    xrcv1=100 xrcv2=1900 zrcv1=20 zrcv2=20 dxrcv=10 \
+    xrcv1=100 xrcv2=1900 zrcv1=50 zrcv2=50 dxrcv=10 \
     xsrc=${XSRC_START} zsrc=10 nshot=${NSHOTS} dxshot=${XSRC_STEP} \
     ntaper=100 grad_taper=0 \
-    left=4 right=4 top=4 bottom=4 \
+    left=4 right=4 top=1 bottom=4 \
     chk_skipdt=100 chk_base=chk_gv \
     param=2 scaling=1 precond=${PRECOND} \
     precond_eps=${PRECOND_EPS} precond_blend=${PRECOND_BLEND} precond_alpha=${PRECOND_ALPHA} \
     srt_radius=${SRT_RADIUS} srt_filtsize=${SRT_FILTSIZE} \
+    smooth_grad=${SMOOTH_GRAD} smooth_hess=${SMOOTH_HESS} \
     vp_min=${VP_MIN} vp_max=${VP_MAX} \
     vs_min=${VS_MIN} vs_max=${VS_MAX} \
     rho_min=${RHO_MIN} rho_max=${RHO_MAX} \
+    precond_boost_1=${BOOST_1} precond_boost_2=${BOOST_2} precond_boost_3=${BOOST_3} \
     comp=${COMP} \
     file_obs=obs out_base=grad
 

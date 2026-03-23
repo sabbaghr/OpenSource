@@ -67,9 +67,9 @@ void accumGradient_rho_Dsig(modPar *mod, bndPar *bnd,
 /***********************************************************************
  * callKernel -- Dispatch to the appropriate FD kernel.
  ***********************************************************************/
-static void callKernel(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
-                       int it, int ixsrc, int izsrc, float **src_nwav,
-                       wflPar *wfl, int verbose)
+void callKernel(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
+                int it, int ixsrc, int izsrc, float **src_nwav,
+                wflPar *wfl, int verbose)
 {
 	switch (mod->ischeme) {
 		case 1:
@@ -107,9 +107,9 @@ static void callKernel(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
  *   - Force residuals (Fx, Fz) after velocity update
  *   - Stress residuals (P, Txx, Tzz, Txz) after stress update
  ***********************************************************************/
-static void callAdjKernel(modPar *mod, adjSrcPar *adj, bndPar *bnd,
-                          int it, wflPar *wfl,
-                          int rec_delay, int rec_skipdt, int verbose)
+void callAdjKernel(modPar *mod, adjSrcPar *adj, bndPar *bnd,
+                   int it, wflPar *wfl,
+                   int rec_delay, int rec_skipdt, int verbose)
 {
 	switch (mod->ischeme) {
 		case 1:

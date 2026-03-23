@@ -386,8 +386,11 @@ int main(int argc, char **argv)
 	if (!getparint("grad_taper", &grad_taper)) grad_taper = 0;
 	if (!getparint("scaling", &scaling)) scaling = 1;
 	if (!getparfloat("precond_eps", &precond_eps)) precond_eps = 1e-2f;
-	int precond_mode = 1;  /* 1=Yang/Shin, 2=Plessix&Mulder */
+	int precond_mode = 1;  /* 1-5, see preconditioner modes */
 	if (!getparint("precond", &precond_mode)) precond_mode = 1;
+	int smooth_grad = 0, smooth_hess = 0;
+	if (!getparint("smooth_grad", &smooth_grad)) smooth_grad = 0;
+	if (!getparint("smooth_hess", &smooth_hess)) smooth_hess = 0;
 	float precond_blend = 0.0f;
 	float precond_alpha = 0.30f;
 	float srt_radius = 0.0f;
@@ -524,22 +527,40 @@ int main(int argc, char **argv)
 			computeHydrophone(syn_tzz, syn_txx, syn_p, verbose);
 		}
 
-		/* ----- Compute residual ----- */
+		/* ----- Compute residual (multi-component aware) ----- */
 		{
-			char obs_fname[1024], syn_fname[1024], res_fname[1024];
-			const char *obs_files[1], *syn_files[1];
+			#define TGV_MAX_COMP 8
+			char comp_buf[1024];
+			char *comp_suffixes[TGV_MAX_COMP];
+			int ncomp = 0;
+			char *token_c;
 			float shot_misfit;
+			char res_fname[1024];
 
-			snprintf(obs_fname, sizeof(obs_fname), "%s_%03d%s.su",
-				file_obs, ishot, comp_str);
-			snprintf(syn_fname, sizeof(syn_fname), "%s_%03d%s.su",
-				rec.file_rcv, ishot, comp_str);
+			/* Parse comma-separated comp_str */
+			strncpy(comp_buf, comp_str, sizeof(comp_buf) - 1);
+			comp_buf[sizeof(comp_buf) - 1] = '\0';
+			token_c = strtok(comp_buf, ",");
+			while (token_c && ncomp < TGV_MAX_COMP) {
+				comp_suffixes[ncomp++] = token_c;
+				token_c = strtok(NULL, ",");
+			}
+
+			char obs_names[TGV_MAX_COMP][512], syn_names[TGV_MAX_COMP][512];
+			const char *obs_arr[TGV_MAX_COMP], *syn_arr[TGV_MAX_COMP];
+
+			for (int ic = 0; ic < ncomp; ic++) {
+				snprintf(obs_names[ic], sizeof(obs_names[ic]), "%s_%03d%s.su",
+					file_obs, ishot, comp_suffixes[ic]);
+				snprintf(syn_names[ic], sizeof(syn_names[ic]), "%s_%03d%s.su",
+					rec.file_rcv, ishot, comp_suffixes[ic]);
+				obs_arr[ic] = obs_names[ic];
+				syn_arr[ic] = syn_names[ic];
+			}
+
 			snprintf(res_fname, sizeof(res_fname), "res_%03d.su", ishot);
 
-			obs_files[0] = obs_fname;
-			syn_files[0] = syn_fname;
-
-			shot_misfit = computeResidual(1, obs_files, syn_files,
+			shot_misfit = computeResidual(ncomp, obs_arr, syn_arr,
 				res_fname, MISFIT_L2, NULL, verbose);
 
 			total_misfit += shot_misfit;
@@ -560,7 +581,7 @@ int main(int argc, char **argv)
 			float *sh_lam = NULL, *sh_muu = NULL, *sh_rho = NULL;
 			float *sh_lm = NULL, *sh_lr = NULL, *sh_mr = NULL;
 			float *sh_wfld = (float *)calloc(sizem, sizeof(float));
-			if (srt_radius > 0.0f) {
+			if (srt_radius > 0.0f || precond_mode >= 4) {
 				sh_lam = (float *)calloc(sizem, sizeof(float));
 				sh_muu = (float *)calloc(sizem, sizeof(float));
 				sh_rho = (float *)calloc(sizem, sizeof(float));
@@ -586,6 +607,23 @@ int main(int argc, char **argv)
 					sh_wfld);
 			}
 
+			/* For precond=4,5: overwrite per-shot Hessian with P4 cross-correlation */
+			if (precond_mode >= 4 && sh_lam) {
+				memset(sh_lam, 0, sizem * sizeof(float));
+				memset(sh_muu, 0, sizem * sizeof(float));
+				memset(sh_rho, 0, sizem * sizeof(float));
+				memset(sh_lm, 0, sizem * sizeof(float));
+				memset(sh_lr, 0, sizem * sizeof(float));
+				memset(sh_mr, 0, sizem * sizeof(float));
+
+				precond_shot(&mod, &src, &wav, &bnd, &rec,
+				             ixsrc, izsrc, src_nwav, &chk,
+				             sh_lam, sh_muu, sh_rho,
+				             sh_lm, sh_lr, sh_mr,
+				             verbose,
+				             rec.file_rcv, ishot, comp_str);
+			}
+
 			/* Per-shot radial source taper */
 			if (srt_radius > 0.0f) {
 				int ibx = mod.ioPx, ibz = mod.ioPz;
@@ -607,8 +645,11 @@ int main(int argc, char **argv)
 				applySourceTaper(sh_wfld, src_mask, sizem);
 
 				free(src_mask);
+			}
 
-				/* Accumulate tapered per-shot Hessian into total */
+			/* Accumulate per-shot Hessian into total
+			 * (always, regardless of source taper) */
+			if (sh_lam) {
 				for (i = 0; i < (int)sizem; i++) {
 					hess_lam[i] += sh_lam[i];
 					hess_muu[i] += sh_muu[i];
@@ -640,6 +681,42 @@ int main(int argc, char **argv)
 	}
 
 	vmess("=== Total misfit: %.6e ===", total_misfit);
+
+	/* ============================================================ */
+	/* Smoothing (optional)                                          */
+	/* ============================================================ */
+	{
+		int ibx = mod.ioPx, ibz = mod.ioPz;
+		if (bnd.lef == 4 || bnd.lef == 2) ibx += bnd.ntap;
+		if (bnd.top == 4 || bnd.top == 2) ibz += bnd.ntap;
+
+		if (smooth_grad > 0) {
+			vmess("Smoothing gradient: half-width=%d grid points", smooth_grad);
+			smooth2d_padded(grad1, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx, ibz, smooth_grad, smooth_grad);
+			smooth2d_padded(grad2, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx, ibz, smooth_grad, smooth_grad);
+			smooth2d_padded(grad3, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx, ibz, smooth_grad, smooth_grad);
+		}
+		if (smooth_hess > 0) {
+			vmess("Smoothing Hessian: half-width=%d grid points", smooth_hess);
+			smooth2d_padded(hess_lam, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx, ibz, smooth_hess, smooth_hess);
+			smooth2d_padded(hess_muu, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx, ibz, smooth_hess, smooth_hess);
+			smooth2d_padded(hess_rho, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx, ibz, smooth_hess, smooth_hess);
+			smooth2d_padded(hess_lam_muu, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx, ibz, smooth_hess, smooth_hess);
+			smooth2d_padded(hess_lam_rho, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx, ibz, smooth_hess, smooth_hess);
+			smooth2d_padded(hess_muu_rho, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx, ibz, smooth_hess, smooth_hess);
+			smooth2d_padded(wfld_energy, mod.nax, mod.naz, mod.nx, mod.nz,
+			                ibx, ibz, smooth_hess, smooth_hess);
+		}
+	}
 
 	/* ============================================================ */
 	/* Extract gradient to flat vector (with chain rule if param=2)  */
@@ -727,9 +804,20 @@ int main(int argc, char **argv)
 		float s1 = (scaling > 0) ? m0[0] : 1.0f;
 		float s2 = (scaling > 0) ? m0[1] : 1.0f;
 		float s3 = (scaling > 0) ? m0[2] : 1.0f;
+
+		/* Additional tunable boost per parameter (Yang et al. 2018, eq 48) */
+		float boost1 = 1.0f, boost2 = 1.0f, boost3 = 1.0f;
+		getparfloat("precond_boost_1", &boost1);
+		getparfloat("precond_boost_2", &boost2);
+		getparfloat("precond_boost_3", &boost3);
+		s1 *= boost1;
+		s2 *= boost2;
+		s3 *= boost3;
+
 		int elastic = (mod.ischeme > 2);
 
-		vmess("  s1=%.6e  s2=%.6e  s3=%.6e", s1, s2, s3);
+		vmess("  s1=%.6e  s2=%.6e  s3=%.6e (boost: %.2f, %.2f, %.2f)",
+		      s1, s2, s3, boost1, boost2, boost3);
 
 		buildBlockPrecond(hess_lam, hess_muu, hess_rho,
 			hess_lam_muu, hess_lam_rho, hess_muu_rho,
@@ -737,8 +825,9 @@ int main(int argc, char **argv)
 			precond_eps, s1, s2, s3,
 			P11, P12, P13, P22, P23, P33,
 			nmodel, 0, precond_blend, precond_alpha,
-			(precond_mode == 2) ? wfld_energy : NULL,
-			mod.x0, mod.x0 + (mod.nx-1)*mod.dx);
+			(precond_mode == 1) ? wfld_energy : NULL,
+			mod.x0, mod.x0 + (mod.nx-1)*mod.dx,
+			precond_mode);
 	}
 
 	/* Apply preconditioner: solve P * z = g_scaled at each grid point.

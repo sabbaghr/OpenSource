@@ -134,6 +134,9 @@ char *sdoc[] = {
 "   precond=0          Yang pseudo-Hessian preconditioner (0=off, 1=on)",
 "   precond_eps=1e-3   regularization epsilon for preconditioner",
 "   precond_scale_1/2/3=1.0  manual Yang scaling (overridden by scaling>0)",
+"   precond_boost_1/2/3=1.0  additional tunable boost for pseudo-Hessian per parameter",
+"                              (Yang et al. 2018, eq 48: multiplies s_i on top of scaling)",
+"                              e.g. precond_boost_3=5 boosts density preconditioner 25x",
 "   data_weight=auto    Brossier W_d data weighting: 0=off, 1=on (auto=1 when scaling>0)",
 "   active_params=      selectable parameter updates: comma-separated list of active params",
 "                        param=1: lam,mu,rho (default: all)  param=2: vp,vs,rho (default: all)",
@@ -370,7 +373,8 @@ static float compute_fwi_gradient(
 	misfitType mtype,
 	int verbose,
 	float srt_radius, int srt_filtsize,
-	float *wfld_energy)
+	float *wfld_energy,
+	int use_precond)
 {
 	int ishot, k, i;
 	int n1 = mod->naz;
@@ -522,6 +526,25 @@ static float compute_fwi_gradient(
 			         shot_wfld_energy);
 
 			freeResidual(&adj);
+		}
+
+		/* For precond=4,5: overwrite Hessian with P4 cross-correlation.
+		 * Zero per-shot Hessian arrays and recompute using precond_shot
+		 * which backpropagates the synthetic data. */
+		if (use_precond >= 4 && shot_hess_lam) {
+			memset(shot_hess_lam, 0, sizem * sizeof(float));
+			memset(shot_hess_rho, 0, sizem * sizeof(float));
+			if (shot_hess_muu) memset(shot_hess_muu, 0, sizem * sizeof(float));
+			if (shot_hess_lm) memset(shot_hess_lm, 0, sizem * sizeof(float));
+			if (shot_hess_lr) memset(shot_hess_lr, 0, sizem * sizeof(float));
+			if (shot_hess_mr) memset(shot_hess_mr, 0, sizem * sizeof(float));
+
+			precond_shot(mod, src, wav, bnd, rec,
+			             ixsrc, izsrc, src_nwav, &chk,
+			             shot_hess_lam, shot_hess_muu, shot_hess_rho,
+			             shot_hess_lm, shot_hess_lr, shot_hess_mr,
+			             verbose,
+			             rec->file_rcv, ishot, comp_str);
 		}
 
 		/* Per-shot radial source taper (erf-based, DENISE convention).
@@ -1043,6 +1066,7 @@ int main(int argc, char **argv)
 	int    use_precond, scaling;
 	float  conv, precond_eps;
 	float  s1 = 1.0f, s2 = 1.0f, s3 = 1.0f;  /* Yang scaling (eq 48) */
+	float  boost1 = 1.0f, boost2 = 1.0f, boost3 = 1.0f; /* additional tunable boost */
 
 #ifdef USE_MPI
 	MPI_Init(&argc, &argv);
@@ -1104,6 +1128,9 @@ int main(int argc, char **argv)
 		getparfloat("precond_scale_1", &s1);
 		getparfloat("precond_scale_2", &s2);
 		getparfloat("precond_scale_3", &s3);
+		getparfloat("precond_boost_1", &boost1);
+		getparfloat("precond_boost_2", &boost2);
+		getparfloat("precond_boost_3", &boost3);
 	}
 
 	/* When illumination preconditioner is active AND algorithm uses it
@@ -1319,6 +1346,20 @@ int main(int argc, char **argv)
 			      nparam >= 2 ? m0[1] : 0.0f,
 			      nparam >= 3 ? m0[2] : 0.0f);
 		}
+	}
+
+	/* Apply preconditioner boost (Yang et al. 2018, eq 48).
+	 * Multiplies on top of whatever s1,s2,s3 already are (from Brossier
+	 * scaling or manual precond_scale). Since the pseudo-Hessian is
+	 * scaled as H̃_ij *= s_i·s_j, a boost of b on parameter i gives
+	 * (s_i·b)² = b² amplification on the diagonal. */
+	if (use_precond && (boost1 != 1.0f || boost2 != 1.0f || boost3 != 1.0f)) {
+		s1 *= boost1;
+		s2 *= boost2;
+		s3 *= boost3;
+		if (mpi_rank == 0)
+			vmess("Precond boost: b1=%.2f b2=%.2f b3=%.2f → s=[%.4e, %.4e, %.4e]",
+			      boost1, boost2, boost3, s1, s2, s3);
 	}
 
 	/* ============================================================ */
@@ -1575,7 +1616,7 @@ int main(int argc, char **argv)
 		hess_lam_muu, hess_lam_rho, hess_muu_rho,
 		chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk,
 		comp_weights, mtype, verbose, srt_radius, srt_filtsize,
-		wfld_energy);
+		wfld_energy, use_precond);
 
 	/* Taper gradient near source and receiver positions */
 	{
@@ -1621,8 +1662,9 @@ int main(int argc, char **argv)
 			    precond_eps, s1, s2, s3,
 			    P11, P12, P13, P22, P23, P33,
 			    nmodel, mpi_rank, precond_blend, precond_alpha,
-			    (use_precond == 2) ? wfld_energy : NULL,
-			    mod.x0, mod.x0 + (mod.nx-1)*mod.dx);
+			    (use_precond == 1) ? wfld_energy : NULL,
+			    mod.x0, mod.x0 + (mod.nx-1)*mod.dx,
+			    use_precond);
 			if (grad_preco_vec &&
 			    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)) {
 				applyBlockPrecond(grad_preco_vec, grad_vec,
@@ -1776,7 +1818,7 @@ int main(int argc, char **argv)
 				hess_lam_muu, hess_lam_rho, hess_muu_rho,
 				chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk,
 				comp_weights, mtype, verbose, srt_radius, srt_filtsize,
-		wfld_energy);
+		wfld_energy, use_precond);
 
 			/* Taper gradient near source and receiver positions */
 			{
@@ -1815,8 +1857,9 @@ int main(int argc, char **argv)
 					    precond_eps, s1, s2, s3,
 					    P11, P12, P13, P22, P23, P33,
 					    nmodel, mpi_rank, precond_blend, precond_alpha,
-					    (use_precond == 2) ? wfld_energy : NULL,
-					    mod.x0, mod.x0 + (mod.nx-1)*mod.dx);
+					    (use_precond == 1) ? wfld_energy : NULL,
+					    mod.x0, mod.x0 + (mod.nx-1)*mod.dx,
+					    use_precond);
 					if (grad_preco_vec &&
 					    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)) {
 						applyBlockPrecond(grad_preco_vec, grad_vec,

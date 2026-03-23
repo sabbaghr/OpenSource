@@ -358,6 +358,32 @@ float *buildSourceTaperMask(int nax, int naz, int sx, int sz,
                             float radius, float dx, int filtsize);
 void applySourceTaper(float *arr, const float *mask, size_t sizem);
 
+/* --- precond_shot.c: Receiver wavefield backprop for P4 preconditioner --- */
+int precond_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
+                 recPar *rec,
+                 int ixsrc, int izsrc, float **src_nwav,
+                 checkpointPar *chk,
+                 float *hess_lam, float *hess_muu, float *hess_rho,
+                 float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho,
+                 int verbose,
+                 const char *syn_base, int fileno, const char *comp_str);
+
+/* --- fwi_gradient.c: P4 Hessian cross-correlation --- */
+void accumHessianP4(modPar *mod, bndPar *bnd,
+                    float *fwd_vx, float *fwd_vz,
+                    float *fwd_vx_prev, float *fwd_vz_prev,
+                    float *rcv_vx, float *rcv_vz,
+                    float *rcv_vx_prev, float *rcv_vz_prev,
+                    float dt,
+                    float *hess_lam, float *hess_muu, float *hess_rho,
+                    float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho);
+
+/* --- smooth2d.c: 2D Gaussian smoothing --- */
+void smooth2d(float *data, int nx, int nz, int smooth_x, int smooth_z);
+void smooth2d_padded(float *data, int nax, int naz,
+                     int nx, int nz, int ibndx, int ibndz,
+                     int smooth_x, int smooth_z);
+
 /* --- preconditioner.c: Shin/Métivier diagonal pseudo-Hessian preconditioner --- */
 void buildBlockPrecond(
     float *hess_lam, float *hess_muu, float *hess_rho,
@@ -370,7 +396,8 @@ void buildBlockPrecond(
     int nmodel, int mpi_rank,
     float blend_depth, float taper_alpha,
     float *wfld_energy,
-    float xmin, float xmax);
+    float xmin, float xmax,
+    int precond_mode);
 void applyBlockPrecond(
     float *out, const float *in,
     const float *P11, const float *P12, const float *P13,

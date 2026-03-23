@@ -86,17 +86,11 @@ void accumGradient(modPar *mod, bndPar *bnd,
 	sdx = 1.0f / mod->dx;
 	sdz = 1.0f / mod->dz;
 
-	/* Yang pseudo-Hessian requires forward stress AND scratch arrays */
-	do_hess = (hess_lam && fwd_txx && fwd_tzz && fwd_txz &&
-	           K_lam_tmp && K_muu_tmp && K_rho_tmp);
+	/* Pseudo-Hessian accumulation active if any diagonal array is provided.
+	 * New formulation (Liu et al. 2022) uses only forward velocities,
+	 * not forward stress or scratch arrays. */
+	do_hess = (hess_lam != NULL);
 
-	/* Zero scratch arrays for this time step */
-	if (do_hess) {
-		size_t sz = (size_t)nax * n1;
-		memset(K_lam_tmp, 0, sz * sizeof(float));
-		memset(K_muu_tmp, 0, sz * sizeof(float));
-		memset(K_rho_tmp, 0, sz * sizeof(float));
-	}
 
 	/* ================================================================
 	 * Order-dependent FD coefficients (must match forward kernels)
@@ -234,12 +228,16 @@ void accumGradient(modPar *mod, bndPar *bnd,
 					grad_lam[ig] += dt*(wfl_adj->txx[ig] + wfl_adj->tzz[ig])
 					                   * div_f;
 
-				/* Yang pseudo-Hessian kernels at P grid */
+				/* Pseudo-Hessian diagonal at P grid (Liu et al. 2022, eq A20-A21).
+				 * K_λ = (∂C/∂λ)Dv = [div, div, 0] → |K_λ|² = 2·div²
+				 * K_μ normal part = [2exx, 2ezz, 0] → 4exx² + 4ezz²
+				 * K_λ·K_μ = 2·div² = H_λλ (always identical) */
 				if (do_hess) {
-					float S = fwd_txx[ig] + fwd_tzz[ig];
-					K_lam_tmp[ig] = S * div_f;
-					/* K_μ normal-stress part (shear part added in Txz loop) */
-					K_muu_tmp[ig] = 2.0f*(fwd_txx[ig]*dvxdx_f + fwd_tzz[ig]*dvzdz_f);
+					hess_lam[ig]     += 2.0f * div_f * div_f;
+					hess_muu[ig]     += 4.0f * (dvxdx_f*dvxdx_f + dvzdz_f*dvzdz_f);
+					if (hess_lam_muu)
+						hess_lam_muu[ig] += 2.0f * div_f * div_f;
+					/* H_λρ = H_μρ = 0 in Lamé space (orthogonal subspaces) */
 				}
 			}
 		}
@@ -323,13 +321,16 @@ void accumGradient(modPar *mod, bndPar *bnd,
 					grad_muu[(ix-1)*n1+iz]   += 0.25f * shear;
 					grad_muu[ig]             += 0.25f * shear;
 				}
-				/* Scatter K_μ_S to P grid (Yang pseudo-Hessian) */
+				/* H_μμ shear part: (dvx/dz + dvz/dx)² scattered to P grid.
+				 * K_μ shear component = dvx/dz + dvz/dx
+				 * |K_μ_shear|² = (dvx/dz + dvz/dx)² */
 				if (do_hess) {
-					float K_muu_S = fwd_txz[ig] * (dvxdz_f + dvzdx_f);
-					K_muu_tmp[(ix-1)*n1+iz-1] += 0.25f * K_muu_S;
-					K_muu_tmp[ix*n1+iz-1]     += 0.25f * K_muu_S;
-					K_muu_tmp[(ix-1)*n1+iz]   += 0.25f * K_muu_S;
-					K_muu_tmp[ig]             += 0.25f * K_muu_S;
+					float dvxdz_dvzdx = dvxdz_f + dvzdx_f;
+					float shear_sq = dvxdz_dvzdx * dvxdz_dvzdx;
+					hess_muu[(ix-1)*n1+iz-1] += 0.25f * shear_sq;
+					hess_muu[ix*n1+iz-1]     += 0.25f * shear_sq;
+					hess_muu[(ix-1)*n1+iz]   += 0.25f * shear_sq;
+					hess_muu[ig]             += 0.25f * shear_sq;
 				}
 			}
 		}
@@ -367,12 +368,13 @@ void accumGradient(modPar *mod, bndPar *bnd,
 					grad_rho[(ix-1)*n1+iz] += 0.5f * vx_contrib / rho[(ix-1)*n1+iz];
 					grad_rho[ig]           += 0.5f * vx_contrib / rho[ig];
 				}
-				/* Yang K_ρ: (1/ρ)(vx·dvx/dt), scattered to P grid */
+				/* H_ρρ: (dvx/dt)² scattered to P grid.
+				 * K_ρ = [∂ₜvx, ∂ₜvz] → |K_ρ|² = (∂ₜvx)² + (∂ₜvz)²
+				 * (Liu et al. 2022, eq A21) */
 				if (do_hess) {
-					float K_rho_vx = fwd_vx[ig] * dvx_dt;
-					float r1 = rho[(ix-1)*n1+iz], r2 = rho[ig];
-					K_rho_tmp[(ix-1)*n1+iz] += 0.5f * K_rho_vx / r1;
-					K_rho_tmp[ig]           += 0.5f * K_rho_vx / r2;
+					float dvx_dt_sq = dvx_dt * dvx_dt;
+					hess_rho[(ix-1)*n1+iz] += 0.5f * dvx_dt_sq;
+					hess_rho[ig]           += 0.5f * dvx_dt_sq;
 				}
 			}
 		}
@@ -386,55 +388,37 @@ void accumGradient(modPar *mod, bndPar *bnd,
 					grad_rho[ig-1] += 0.5f * vz_contrib / rho[ig-1];
 					grad_rho[ig]   += 0.5f * vz_contrib / rho[ig];
 				}
-				/* Yang K_ρ: (1/ρ)(vz·dvz/dt), scattered to P grid */
+				/* H_ρρ: (dvz/dt)² scattered to P grid */
 				if (do_hess) {
-					float K_rho_vz = fwd_vz[ig] * dvz_dt;
-					float r1 = rho[ig-1], r2 = rho[ig];
-					K_rho_tmp[ig-1] += 0.5f * K_rho_vz / r1;
-					K_rho_tmp[ig]   += 0.5f * K_rho_vz / r2;
+					float dvz_dt_sq = dvz_dt * dvz_dt;
+					hess_rho[ig-1] += 0.5f * dvz_dt_sq;
+					hess_rho[ig]   += 0.5f * dvz_dt_sq;
 				}
 			}
 		}
 	}
 
 	/* ================================================================
-	 * Final sweep: accumulate Yang pseudo-Hessian H̃_ij = Σ K_i·K_j
+	 * Note: H_λλ, H_μμ, H_ρρ, H_λμ are accumulated DIRECTLY in their
+	 * respective loops above (P grid, Txz grid, Vx/Vz grid).
+	 * No final K_i·K_j sweep needed.
 	 *
-	 * All three kernels (K_λ, K_μ, K_ρ) are now collocated at P grid
-	 * in the scratch arrays. Compute all 6 upper-triangle products.
+	 * H_λρ = H_μρ = 0 in Lamé space (stress-space and velocity-space
+	 * virtual sources are orthogonal). These arrays are not touched.
 	 * ================================================================ */
-	if (do_hess) {
-		for (ix = ibPx; ix < iePx; ix++) {
-			for (iz = ibPz; iz < iePz; iz++) {
-				int ig = ix*n1+iz;
-				float Kl = K_lam_tmp[ig];
-				float Km = K_muu_tmp[ig];
-				float Kr = K_rho_tmp[ig];
-
-				hess_lam[ig]     += Kl * Kl;
-				hess_muu[ig]     += Km * Km;
-				hess_rho[ig]     += Kr * Kr;
-				hess_lam_muu[ig] += Kl * Km;
-				hess_lam_rho[ig] += Kl * Kr;
-				hess_muu_rho[ig] += Km * Kr;
-			}
-		}
-	}
 
 	/* ================================================================
 	 * Forward wavefield energy: Ws += vx² + vz²
 	 *
-	 * Used by the Plessix & Mulder (2004) preconditioner (EPRECOND=3
-	 * in DENISE). Accumulated at the P grid by averaging staggered
-	 * velocity components to the cell center.
+	 * Particle velocity energy (DENISE convention, eprecond.c).
+	 * Used by precond=1 (Plessix & Mulder / DENISE EPRECOND=3).
+	 * Averaged to P grid from staggered Vx/Vz grids.
 	 * ================================================================ */
 	if (wfld_energy && fwd_vx && fwd_vz) {
 		for (ix = ibPx; ix < iePx; ix++) {
 			for (iz = ibPz; iz < iePz; iz++) {
 				int ig = ix*n1+iz;
-				/* Average vx to P grid: 0.5*(vx[ix,iz] + vx[ix+1,iz]) */
 				float vx_avg = 0.5f*(fwd_vx[ig] + fwd_vx[(ix+1)*n1+iz]);
-				/* Average vz to P grid: 0.5*(vz[ix,iz] + vz[ix,iz+1]) */
 				float vz_avg = 0.5f*(fwd_vz[ig] + fwd_vz[ig+1]);
 				wfld_energy[ig] += vx_avg*vx_avg + vz_avg*vz_avg;
 			}
@@ -613,5 +597,190 @@ void convertGradientToVelocity(float *grad1, float *grad2, float *grad3,
 		if (grad1) grad1[i] = g_vp;
 		if (grad2) grad2[i] = g_vs;
 		if (grad3) grad3[i] = g_rho_full;
+	}
+}
+
+
+/***********************************************************************
+ * accumHessianP4 -- Cross-correlate forward × receiver wavefield kernels
+ *                   for preconditioner P4 (Liu et al. 2022, eq A22).
+ *
+ * At each timestep, computes:
+ *   H_λλ += 2 · div(v_fwd) · div(v_rcv)
+ *   H_μμ += 4·exx_fwd·exx_rcv + 4·ezz_fwd·ezz_rcv  (normal, P grid)
+ *           + (dvxdz+dvzdx)_fwd · (dvxdz+dvzdx)_rcv  (shear, Txz→P)
+ *   H_ρρ += ∂ₜvx_fwd·∂ₜvx_rcv + ∂ₜvz_fwd·∂ₜvz_rcv  (Vx/Vz→P)
+ *
+ * Off-diagonal cross-products (all 6) also computed when arrays provided.
+ *
+ * Absolute value is taken by the caller AFTER all timesteps.
+ ***********************************************************************/
+void accumHessianP4(modPar *mod, bndPar *bnd,
+                    float *fwd_vx, float *fwd_vz,
+                    float *fwd_vx_prev, float *fwd_vz_prev,
+                    float *rcv_vx, float *rcv_vz,
+                    float *rcv_vx_prev, float *rcv_vz_prev,
+                    float dt,
+                    float *hess_lam, float *hess_muu, float *hess_rho,
+                    float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho)
+{
+	int ix, iz, n1;
+	int ibPx, iePx, ibPz, iePz;
+	int ibTx, ieTx, ibTz, ieTz;
+	int ibVx_x, ieVx_x, ibVx_z, ieVx_z;
+	int ibVz_x, ieVz_x, ibVz_z, ieVz_z;
+	float sdx, sdz, sdt;
+	float c1, c2, c3, c4;
+
+	if (mod->ischeme <= 2) return;
+	if (!fwd_vx || !fwd_vz || !rcv_vx || !rcv_vz) return;
+
+	n1  = mod->naz;
+	sdx = 1.0f / mod->dx;
+	sdz = 1.0f / mod->dz;
+	sdt = 1.0f / dt;
+
+	/* FD coefficients (same as accumGradient) */
+	c3 = c4 = 0.0f;
+	switch (mod->iorder) {
+		case 4:  c1 = 9.0f/8.0f;    c2 = -1.0f/24.0f;   break;
+		case 6:  c1 = 75.0f/64.0f;  c2 = -25.0f/384.0f;  c3 = 3.0f/640.0f; break;
+		case 8:  c1 = 1225.0f/1024.0f; c2 = -245.0f/3072.0f;
+		         c3 = 49.0f/5120.0f; c4 = -5.0f/7168.0f;  break;
+		default: c1 = 9.0f/8.0f;    c2 = -1.0f/24.0f;   break;
+	}
+
+	ibPx = mod->ioPx; iePx = mod->iePx;
+	ibPz = mod->ioPz; iePz = mod->iePz;
+	ibTx = mod->ioTx; ieTx = mod->ieTx;
+	ibTz = mod->ioTz; ieTz = mod->ieTz;
+	ibVx_x = mod->ioXx; ieVx_x = mod->ieXx;
+	ibVx_z = mod->ioXz; ieVx_z = mod->ieXz;
+	ibVz_x = mod->ioZx; ieVz_x = mod->ieZx;
+	ibVz_z = mod->ioZz; ieVz_z = mod->ieZz;
+
+	/* ================================================================
+	 * Lambda and Mu (normal) at P grid.
+	 * K_λ = div(v),  K̃_λ = div(ṽ)
+	 * K_μ_normal = [2·dvx/dx, 2·dvz/dz] (for both fwd and rcv)
+	 * ================================================================ */
+	if (hess_lam || hess_muu) {
+		for (ix = ibPx; ix < iePx; ix++) {
+			for (iz = ibPz; iz < iePz; iz++) {
+				int ig = ix*n1+iz;
+
+				/* Forward velocity derivatives */
+				float dvxdx_f = sdx*(c1*(fwd_vx[(ix+1)*n1+iz]-fwd_vx[ig])
+				                    +c2*(fwd_vx[(ix+2)*n1+iz]-fwd_vx[(ix-1)*n1+iz]));
+				float dvzdz_f = sdz*(c1*(fwd_vz[ig+1]-fwd_vz[ig])
+				                    +c2*(fwd_vz[ig+2]-fwd_vz[ig-1]));
+				if (mod->iorder >= 6) {
+					dvxdx_f += sdx*c3*(fwd_vx[(ix+3)*n1+iz]-fwd_vx[(ix-2)*n1+iz]);
+					dvzdz_f += sdz*c3*(fwd_vz[ig+3]-fwd_vz[ig-2]);
+				}
+				if (mod->iorder >= 8) {
+					dvxdx_f += sdx*c4*(fwd_vx[(ix+4)*n1+iz]-fwd_vx[(ix-3)*n1+iz]);
+					dvzdz_f += sdz*c4*(fwd_vz[ig+4]-fwd_vz[ig-3]);
+				}
+
+				/* Receiver velocity derivatives */
+				float dvxdx_r = sdx*(c1*(rcv_vx[(ix+1)*n1+iz]-rcv_vx[ig])
+				                    +c2*(rcv_vx[(ix+2)*n1+iz]-rcv_vx[(ix-1)*n1+iz]));
+				float dvzdz_r = sdz*(c1*(rcv_vz[ig+1]-rcv_vz[ig])
+				                    +c2*(rcv_vz[ig+2]-rcv_vz[ig-1]));
+				if (mod->iorder >= 6) {
+					dvxdx_r += sdx*c3*(rcv_vx[(ix+3)*n1+iz]-rcv_vx[(ix-2)*n1+iz]);
+					dvzdz_r += sdz*c3*(rcv_vz[ig+3]-rcv_vz[ig-2]);
+				}
+				if (mod->iorder >= 8) {
+					dvxdx_r += sdx*c4*(rcv_vx[(ix+4)*n1+iz]-rcv_vx[(ix-3)*n1+iz]);
+					dvzdz_r += sdz*c4*(rcv_vz[ig+4]-rcv_vz[ig-3]);
+				}
+
+				float div_f = dvxdx_f + dvzdz_f;
+				float div_r = dvxdx_r + dvzdz_r;
+
+				if (hess_lam)
+					hess_lam[ig] += 2.0f * div_f * div_r;
+				if (hess_muu)
+					hess_muu[ig] += 4.0f * (dvxdx_f*dvxdx_r + dvzdz_f*dvzdz_r);
+
+				/* Off-diagonals (non-trivial for P4 since fwd ≠ rcv) */
+				if (hess_lam_muu)
+					hess_lam_muu[ig] += div_f * (2.0f*dvxdx_r + 2.0f*dvzdz_r)
+					                  + div_r * (2.0f*dvxdx_f + 2.0f*dvzdz_f);
+				/* H_λρ and H_μρ cross stress×velocity: computed below
+				 * after we have the time derivatives */
+			}
+		}
+	}
+
+	/* ================================================================
+	 * Mu shear part at Txz grid, scattered to P grid.
+	 * exz_fwd = dvx/dz + dvz/dx (forward),  exz_rcv (receiver)
+	 * ================================================================ */
+	if (hess_muu) {
+		for (ix = ibTx; ix < ieTx; ix++) {
+			for (iz = ibTz; iz < ieTz; iz++) {
+				int ig = ix*n1+iz;
+
+				float dvxdz_f = sdz*(c1*(fwd_vx[ig]-fwd_vx[ig-1])
+				                    +c2*(fwd_vx[ig+1]-fwd_vx[ig-2]));
+				float dvzdx_f = sdx*(c1*(fwd_vz[ig]-fwd_vz[(ix-1)*n1+iz])
+				                    +c2*(fwd_vz[(ix+1)*n1+iz]-fwd_vz[(ix-2)*n1+iz]));
+				if (mod->iorder >= 6) {
+					dvxdz_f += sdz*c3*(fwd_vx[ig+2]-fwd_vx[ig-3]);
+					dvzdx_f += sdx*c3*(fwd_vz[(ix+2)*n1+iz]-fwd_vz[(ix-3)*n1+iz]);
+				}
+
+				float dvxdz_r = sdz*(c1*(rcv_vx[ig]-rcv_vx[ig-1])
+				                    +c2*(rcv_vx[ig+1]-rcv_vx[ig-2]));
+				float dvzdx_r = sdx*(c1*(rcv_vz[ig]-rcv_vz[(ix-1)*n1+iz])
+				                    +c2*(rcv_vz[(ix+1)*n1+iz]-rcv_vz[(ix-2)*n1+iz]));
+				if (mod->iorder >= 6) {
+					dvxdz_r += sdz*c3*(rcv_vx[ig+2]-rcv_vx[ig-3]);
+					dvzdx_r += sdx*c3*(rcv_vz[(ix+2)*n1+iz]-rcv_vz[(ix-3)*n1+iz]);
+				}
+
+				float exz_f = dvxdz_f + dvzdx_f;
+				float exz_r = dvxdz_r + dvzdx_r;
+				float cross = exz_f * exz_r;
+
+				hess_muu[(ix-1)*n1+iz-1] += 0.25f * cross;
+				hess_muu[ix*n1+iz-1]     += 0.25f * cross;
+				hess_muu[(ix-1)*n1+iz]   += 0.25f * cross;
+				hess_muu[ig]             += 0.25f * cross;
+			}
+		}
+	}
+
+	/* ================================================================
+	 * Density at Vx/Vz grids, scattered to P grid.
+	 * K_ρ = ∂ₜv,  K̃_ρ = ∂ₜṽ
+	 * H_ρρ += ∂ₜvx_fwd·∂ₜvx_rcv + ∂ₜvz_fwd·∂ₜvz_rcv
+	 * ================================================================ */
+	if (hess_rho && fwd_vx_prev && fwd_vz_prev && rcv_vx_prev && rcv_vz_prev) {
+		/* Vx contribution */
+		for (ix = ibVx_x; ix < ieVx_x; ix++) {
+			for (iz = ibVx_z; iz < ieVx_z; iz++) {
+				int ig = ix*n1+iz;
+				float dvx_dt_f = (fwd_vx[ig] - fwd_vx_prev[ig]) * sdt;
+				float dvx_dt_r = (rcv_vx[ig] - rcv_vx_prev[ig]) * sdt;
+				float cross = dvx_dt_f * dvx_dt_r;
+				hess_rho[(ix-1)*n1+iz] += 0.5f * cross;
+				hess_rho[ig]           += 0.5f * cross;
+			}
+		}
+		/* Vz contribution */
+		for (ix = ibVz_x; ix < ieVz_x; ix++) {
+			for (iz = ibVz_z; iz < ieVz_z; iz++) {
+				int ig = ix*n1+iz;
+				float dvz_dt_f = (fwd_vz[ig] - fwd_vz_prev[ig]) * sdt;
+				float dvz_dt_r = (rcv_vz[ig] - rcv_vz_prev[ig]) * sdt;
+				float cross = dvz_dt_f * dvz_dt_r;
+				hess_rho[ig-1] += 0.5f * cross;
+				hess_rho[ig]   += 0.5f * cross;
+			}
+		}
 	}
 }
