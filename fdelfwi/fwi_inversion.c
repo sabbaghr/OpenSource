@@ -1694,8 +1694,8 @@ int main(int argc, char **argv)
 		{
 			float *g_diag = (float *)malloc(nmodel * sizeof(float));
 			char fname_d[512];
-			const char *n1 = (param == 1) ? "lam" : "vp";
-			const char *n2 = (param == 1) ? "mu" : "vs";
+			const char *pn1 = (param == 1) ? "lam" : "vp";
+			const char *pn2 = (param == 1) ? "mu" : "vs";
 			int ibx_d = mod.ioPx, ibz_d = mod.ioPz;
 			if (bnd.lef == 4 || bnd.lef == 2) ibx_d += bnd.ntap;
 			if (bnd.top == 4 || bnd.top == 2) ibz_d += bnd.ntap;
@@ -1703,7 +1703,7 @@ int main(int argc, char **argv)
 			for (ix = 0; ix < mod.nx; ix++)
 				for (iz = 0; iz < mod.nz; iz++)
 					g_diag[ix*mod.nz+iz] = grad1[(ix+ibx_d)*n1+iz+ibz_d];
-			snprintf(fname_d, sizeof(fname_d), "%s_initial_%s.su", file_grad, n1);
+			snprintf(fname_d, sizeof(fname_d), "%s_initial_%s.su", file_grad, pn1);
 			writesufile(fname_d, g_diag, mod.nz, mod.nx,
 			            mod.z0, mod.x0, mod.dz, mod.dx);
 
@@ -1711,7 +1711,7 @@ int main(int argc, char **argv)
 				for (ix = 0; ix < mod.nx; ix++)
 					for (iz = 0; iz < mod.nz; iz++)
 						g_diag[ix*mod.nz+iz] = grad2[(ix+ibx_d)*n1+iz+ibz_d];
-				snprintf(fname_d, sizeof(fname_d), "%s_initial_%s.su", file_grad, n2);
+				snprintf(fname_d, sizeof(fname_d), "%s_initial_%s.su", file_grad, pn2);
 				writesufile(fname_d, g_diag, mod.nz, mod.nx,
 				            mod.z0, mod.x0, mod.dz, mod.dx);
 			}
@@ -1725,7 +1725,7 @@ int main(int argc, char **argv)
 
 			free(g_diag);
 			vmess("Wrote initial gradient: %s_initial_{%s,%s,rho}.su",
-			      file_grad, n1, n2);
+			      file_grad, pn1, pn2);
 		}
 
 		/* Zero gradient for frozen parameters */
