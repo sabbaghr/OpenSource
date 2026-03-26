@@ -1687,6 +1687,47 @@ int main(int argc, char **argv)
 		extractGradientVector(grad_vec, grad1, grad2, grad3,
 		                      &mod, &bnd, param);
 
+		/* Write initial raw gradient (before scaling/preconditioner)
+		 * for diagnostic comparison with test_gradient_visual.
+		 * After extractGradientVector, grad1/grad2/grad3 contain
+		 * velocity gradients if param=2 (chain rule applied in-place). */
+		{
+			float *g_diag = (float *)malloc(nmodel * sizeof(float));
+			char fname_d[512];
+			const char *n1 = (param == 1) ? "lam" : "vp";
+			const char *n2 = (param == 1) ? "mu" : "vs";
+			int ibx_d = mod.ioPx, ibz_d = mod.ioPz;
+			if (bnd.lef == 4 || bnd.lef == 2) ibx_d += bnd.ntap;
+			if (bnd.top == 4 || bnd.top == 2) ibz_d += bnd.ntap;
+
+			for (ix = 0; ix < mod.nx; ix++)
+				for (iz = 0; iz < mod.nz; iz++)
+					g_diag[ix*mod.nz+iz] = grad1[(ix+ibx_d)*n1+iz+ibz_d];
+			snprintf(fname_d, sizeof(fname_d), "%s_initial_%s.su", file_grad, n1);
+			writesufile(fname_d, g_diag, mod.nz, mod.nx,
+			            mod.z0, mod.x0, mod.dz, mod.dx);
+
+			if (grad2) {
+				for (ix = 0; ix < mod.nx; ix++)
+					for (iz = 0; iz < mod.nz; iz++)
+						g_diag[ix*mod.nz+iz] = grad2[(ix+ibx_d)*n1+iz+ibz_d];
+				snprintf(fname_d, sizeof(fname_d), "%s_initial_%s.su", file_grad, n2);
+				writesufile(fname_d, g_diag, mod.nz, mod.nx,
+				            mod.z0, mod.x0, mod.dz, mod.dx);
+			}
+
+			for (ix = 0; ix < mod.nx; ix++)
+				for (iz = 0; iz < mod.nz; iz++)
+					g_diag[ix*mod.nz+iz] = grad3[(ix+ibx_d)*n1+iz+ibz_d];
+			snprintf(fname_d, sizeof(fname_d), "%s_initial_rho.su", file_grad);
+			writesufile(fname_d, g_diag, mod.nz, mod.nx,
+			            mod.z0, mod.x0, mod.dz, mod.dx);
+
+			free(g_diag);
+			vmess("Wrote initial gradient: %s_initial_{%s,%s,rho}.su",
+			      file_grad, n1, n2);
+		}
+
 		/* Zero gradient for frozen parameters */
 		applyParamMask(grad_vec, nmodel, nparam, &pmask);
 
@@ -1713,9 +1754,19 @@ int main(int argc, char **argv)
 			    use_precond);
 			if (grad_preco_vec &&
 			    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)) {
+				/* Preconditioned algorithms: store P^{-1}g separately */
 				applyBlockPrecond(grad_preco_vec, grad_vec,
 				    P11, P12, P13, P22, P23, P33, nmodel, nparam);
 				applyParamMask(grad_preco_vec, nmodel, nparam, &pmask);
+			}
+			if (use_precond == 1 &&
+			    (algorithm == 0 || algorithm == 1 || algorithm == 4 || algorithm == 5)) {
+				/* DENISE-style: apply P^{-1} directly to grad_vec
+				 * so non-preconditioned optimizers receive the
+				 * preconditioned gradient as their input. */
+				applyBlockPrecond(grad_vec, grad_vec,
+				    P11, P12, P13, P22, P23, P33, nmodel, nparam);
+				applyParamMask(grad_vec, nmodel, nparam, &pmask);
 			}
 		}
 		vmess("Initial misfit: %.6e", fcost);
@@ -1949,6 +2000,13 @@ int main(int argc, char **argv)
 						applyBlockPrecond(grad_preco_vec, grad_vec,
 						    P11, P12, P13, P22, P23, P33, nmodel, nparam);
 						applyParamMask(grad_preco_vec, nmodel, nparam, &pmask);
+					}
+					if (use_precond == 1 &&
+					    (algorithm == 0 || algorithm == 1 || algorithm == 4 || algorithm == 5)) {
+						/* DENISE-style: apply P^{-1} directly to grad_vec */
+						applyBlockPrecond(grad_vec, grad_vec,
+						    P11, P12, P13, P22, P23, P33, nmodel, nparam);
+						applyParamMask(grad_vec, nmodel, nparam, &pmask);
 					}
 				}
 
