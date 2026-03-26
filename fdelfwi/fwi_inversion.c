@@ -1768,6 +1768,64 @@ int main(int argc, char **argv)
 				    P11, P12, P13, P22, P23, P33, nmodel, nparam);
 				applyParamMask(grad_vec, nmodel, nparam, &pmask);
 			}
+			/* Write preconditioner and preconditioned gradient to SU files */
+			{
+				const char *pn1 = (param == 1) ? "lam" : "vp";
+				const char *pn2 = (param == 1) ? "mu" : "vs";
+				char fn[512];
+
+				snprintf(fn, sizeof(fn), "%s_precond_%s.su", file_grad, pn1);
+				writesufile(fn, P11, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+				snprintf(fn, sizeof(fn), "%s_precond_%s.su", file_grad, pn2);
+				writesufile(fn, P22, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+				snprintf(fn, sizeof(fn), "%s_precond_rho.su", file_grad);
+				writesufile(fn, P33, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+				snprintf(fn, sizeof(fn), "%s_precond_%s_%s.su", file_grad, pn1, pn2);
+				writesufile(fn, P12, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+				snprintf(fn, sizeof(fn), "%s_precond_%s_rho.su", file_grad, pn1);
+				writesufile(fn, P13, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+				snprintf(fn, sizeof(fn), "%s_precond_%s_rho.su", file_grad, pn2);
+				writesufile(fn, P23, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+
+				/* Write preconditioned gradient (scaled + P^{-1} applied) */
+				float *gp = grad_preco_vec ? grad_preco_vec : grad_vec;
+				float *gp_buf = (float *)malloc(nmodel * sizeof(float));
+
+				memcpy(gp_buf, &gp[0], nmodel * sizeof(float));
+				snprintf(fn, sizeof(fn), "%s_initial_preco_%s.su", file_grad, pn1);
+				writesufile(fn, gp_buf, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+
+				if (nparam >= 2) {
+					memcpy(gp_buf, &gp[nmodel], nmodel * sizeof(float));
+					snprintf(fn, sizeof(fn), "%s_initial_preco_%s.su", file_grad, pn2);
+					writesufile(fn, gp_buf, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+				}
+
+				memcpy(gp_buf, &gp[(nparam-1)*nmodel], nmodel * sizeof(float));
+				snprintf(fn, sizeof(fn), "%s_initial_preco_rho.su", file_grad);
+				writesufile(fn, gp_buf, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+
+				free(gp_buf);
+
+				/* Write scaled gradient (before preconditioner) */
+				memcpy(gp_buf = (float *)malloc(nmodel * sizeof(float)),
+				       &grad_vec[0], nmodel * sizeof(float));
+				snprintf(fn, sizeof(fn), "%s_initial_scaled_%s.su", file_grad, pn1);
+				writesufile(fn, gp_buf, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+
+				if (nparam >= 2) {
+					memcpy(gp_buf, &grad_vec[nmodel], nmodel * sizeof(float));
+					snprintf(fn, sizeof(fn), "%s_initial_scaled_%s.su", file_grad, pn2);
+					writesufile(fn, gp_buf, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+				}
+
+				memcpy(gp_buf, &grad_vec[(nparam-1)*nmodel], nmodel * sizeof(float));
+				snprintf(fn, sizeof(fn), "%s_initial_scaled_rho.su", file_grad);
+				writesufile(fn, gp_buf, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+
+				free(gp_buf);
+				vmess("Wrote preconditioner and preconditioned gradient SU files");
+			}
 		}
 		vmess("Initial misfit: %.6e", fcost);
 
