@@ -1835,9 +1835,10 @@ int main(int argc, char **argv)
 
 		if (gnorm > 0.0f) {
 			/* Initial step length for first iteration.
-			 * L-BFGS/SD/PLBFGS/PNLCG use descent=-g at iter 0 (no Hessian
-			 * scaling), so alpha=1/||g|| gives a unit step in model space.
-			 * TRN/Enriched use CG to get Hessian-scaled descent → alpha=1. */
+			 * Algorithms 0-3: descent=-g at iter 0, alpha=1/||g|| for unit step.
+			 * Algorithms 4-7: CG produces Hessian-scaled descent, but alpha
+			 *   is adjusted below after CG completes (Métivier 2014 strategy).
+			 *   Set alpha=1.0 as placeholder; it will be overridden. */
 			if (algorithm <= 3) {
 				opt.alpha = 1.0f / gnorm;
 			} else {
@@ -1852,6 +1853,7 @@ int main(int argc, char **argv)
 	/* ============================================================ */
 	flag = OPT_INIT;
 	int opt_iter = 0;
+	int initial_alpha_adjusted = 0;  /* Métivier first-step scaling flag */
 
 	while (flag != OPT_CONV && flag != OPT_FAIL) {
 
@@ -1910,6 +1912,66 @@ int main(int argc, char **argv)
 
 		if (flag == OPT_GRAD) {
 			/* --- Model updated by optimizer, need new gradient --- */
+
+			/* ----------------------------------------------------------
+			 * Métivier (2014) first-step scaling (all algorithms).
+			 *
+			 * At the first outer iteration, after the optimizer has
+			 * computed the descent direction and taken a trial step
+			 * x = xk + alpha * descent, we rescale alpha so that the
+			 * max model perturbation in physical space is bounded by
+			 * target_dm (e.g. 200 m/s).  This prevents NaN from an
+			 * oversized first step.  Also verifies descent direction.
+			 *
+			 * For algorithms 0-3, the initial alpha=1/||g|| is usually
+			 * safe, but this provides an additional safeguard.
+			 * For algorithms 4-7, replaces the dangerous alpha=1.
+			 *
+			 * Subsequent iterations carry the previous accepted alpha.
+			 * ---------------------------------------------------------- */
+			if (mpi_rank == 0 && !initial_alpha_adjusted &&
+			    opt.cpt_iter == 0 && opt.descent != NULL) {
+				initial_alpha_adjusted = 1;
+
+				/* Issue 5: verify descent direction */
+				float q0_check = optim_dot(nvec, opt.descent, opt.grad);
+				if (q0_check >= 0.0f && verbose >= 1)
+					vmess("WARNING: descent direction is NOT a descent "
+					      "(<d,g>=%.4e >= 0)", q0_check);
+
+				/* Compute max|perturbation| in physical space */
+				float maxd_phys = 0.0f;
+				int p;
+				for (p = 0; p < nparam; p++) {
+					float scale = (scaling > 0) ? m0[p] : 1.0f;
+					for (i = 0; i < nmodel; i++) {
+						float dp = fabsf(opt.descent[p * nmodel + i]) * scale;
+						if (dp > maxd_phys) maxd_phys = dp;
+					}
+				}
+
+				/* Rescale if max perturbation exceeds target */
+				float target_dm = 200.0f;  /* Métivier: "a few hundred m/s" */
+				if (!getparfloat("target_dm", &target_dm)) target_dm = 200.0f;
+
+				float max_pert = maxd_phys * opt.alpha;
+				if (max_pert > target_dm && maxd_phys > 0.0f) {
+					float new_alpha = target_dm / maxd_phys;
+					vmess("First-step scaling (Metivier 2014): "
+					      "alpha %.4e -> %.4e (max|dm|=%.1f -> %.1f m/s)",
+					      opt.alpha, new_alpha, max_pert, target_dm);
+					opt.alpha = new_alpha;
+					/* Recompute trial point: x = xk + alpha_new * descent */
+					for (i = 0; i < nvec; i++)
+						x[i] = opt.xk[i] + opt.alpha * opt.descent[i];
+					/* Apply bounds if active */
+					if (opt.bound)
+						optim_project(nvec, &opt, x);
+				} else {
+					vmess("First-step: alpha=%.4e, max|dm|=%.1f m/s (OK)",
+					      opt.alpha, max_pert);
+				}
+			}
 
 			/* Verbose: print iteration header at start of new linesearch */
 			if (verbose >= 2 && mpi_rank == 0 && diag_new_iter) {
