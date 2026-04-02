@@ -121,83 +121,6 @@ void bandpass_filter_sufile(const char *filename, float flo, float fhi)
 }
 
 
-/*--------------------------------------------------------------------
- * bandpass_filter_wavelet -- Apply bandpass filter to source wavelet.
- *
- * Filters a float array in-place using FFT (genfft rc1fft/cr1fft)
- * with a cosine-tapered spectral window matching sufilter's shape.
- *
- * Parameters:
- *   data    - Wavelet samples [nt], filtered in-place
- *   nt      - Number of time samples
- *   dt_sec  - Sample interval in seconds
- *   flo     - Low corner frequency (Hz). 0 = no highpass
- *   fhi     - High corner frequency (Hz). 0 = no lowpass
- *--------------------------------------------------------------------*/
-void bandpass_filter_wavelet(float *data, int nt, float dt_sec,
-                             float flo, float fhi)
-{
-	int nfft, nfreq, iw;
-	float df, f1, f2, f3, f4, freq, w;
-	complex *cdata;
-	float *rdata;
-
-	if (nt <= 1) return;
-	if (flo <= 0.0f && fhi <= 0.0f) return;
-
-	computeTaperParams(flo, fhi, &f1, &f2, &f3, &f4);
-
-	nfft = optimalFFTsize(nt);
-	nfreq = nfft / 2 + 1;
-	df = 1.0f / ((float)nfft * dt_sec);
-
-	rdata = (float *)calloc(nfft, sizeof(float));
-	cdata = (complex *)calloc(nfreq, sizeof(complex));
-
-	/* Copy wavelet into padded array */
-	memcpy(rdata, data, nt * sizeof(float));
-
-	/* Forward FFT: real -> complex */
-	rc1fft(rdata, cdata, nfft, -1);
-
-	/* Apply sine-squared tapered bandpass (same shape as sufilter) */
-	for (iw = 0; iw < nfreq; iw++) {
-		freq = (float)iw * df;
-		w = 0.0f;
-
-		if (freq <= f1) {
-			w = 0.0f;
-		} else if (freq <= f2) {
-			/* Sine-squared ramp up */
-			float phase = (float)M_PI * (freq - f1) / (f2 - f1 + 1.0e-30f) * 0.5f;
-			float s = sinf(phase);
-			w = s * s;
-		} else if (freq <= f3) {
-			w = 1.0f;
-		} else if (freq <= f4) {
-			/* Sine-squared ramp down */
-			float phase = (float)M_PI * (freq - f3) / (f4 - f3 + 1.0e-30f) * 0.5f;
-			float s = cosf(phase);
-			w = s * s;
-		} else {
-			w = 0.0f;
-		}
-
-		cdata[iw].r *= w;
-		cdata[iw].i *= w;
-	}
-
-	/* Inverse FFT: complex -> real */
-	cr1fft(cdata, rdata, nfft, 1);
-
-	/* Normalize and copy back */
-	float scale = 1.0f / (float)nfft;
-	for (iw = 0; iw < nt; iw++)
-		data[iw] = rdata[iw] * scale;
-
-	free(rdata);
-	free(cdata);
-}
 
 
 /*--------------------------------------------------------------------
@@ -264,6 +187,50 @@ void bandpass_filter_obsdata(const char *file_obs, const char *comp_str,
 				snprintf(cmd, sizeof(cmd), "cp \"%s\" \"%s\"", bkname, fname);
 				system(cmd);
 			}
+			bandpass_filter_sufile(fname, flo, fhi);
+		}
+	}
+}
+
+
+/*--------------------------------------------------------------------
+ * bandpass_filter_syndata -- Filter synthetic data for one shot.
+ *
+ * Called after forward modeling + hydrophone computation. Filters
+ * each component .su file in-place using sufilter. This guarantees
+ * identical filtering to the observed data.
+ *--------------------------------------------------------------------*/
+void bandpass_filter_syndata(const char *file_rcv, const char *comp_str,
+                             int fileno, float flo, float fhi)
+{
+	char comp_buf[1024];
+	char *comp_suffixes[8];
+	char *token;
+	int ncomp = 0, ic;
+	char fname[512];
+
+	if (flo <= 0.0f && fhi <= 0.0f) return;
+
+	strncpy(comp_buf, comp_str, sizeof(comp_buf) - 1);
+	comp_buf[sizeof(comp_buf) - 1] = '\0';
+	token = strtok(comp_buf, ",");
+	while (token && ncomp < 8) {
+		comp_suffixes[ncomp++] = token;
+		token = strtok(NULL, ",");
+	}
+
+	for (ic = 0; ic < ncomp; ic++) {
+		snprintf(fname, sizeof(fname), "%s_%03d%s.su",
+		         file_rcv, fileno, comp_suffixes[ic]);
+		bandpass_filter_sufile(fname, flo, fhi);
+	}
+
+	/* Also filter hydrophone if it exists */
+	snprintf(fname, sizeof(fname), "%s_%03d_rp.su", file_rcv, fileno);
+	{
+		FILE *fp = fopen(fname, "r");
+		if (fp) {
+			fclose(fp);
 			bandpass_filter_sufile(fname, flo, fhi);
 		}
 	}
