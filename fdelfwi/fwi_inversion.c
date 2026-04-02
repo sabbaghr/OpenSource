@@ -1930,6 +1930,7 @@ int main(int argc, char **argv)
 			 * Subsequent iterations carry the previous accepted alpha.
 			 * ---------------------------------------------------------- */
 			if (mpi_rank == 0 && !initial_alpha_adjusted &&
+			    algorithm >= 4 &&
 			    opt.cpt_iter == 0 && opt.descent != NULL) {
 				initial_alpha_adjusted = 1;
 
