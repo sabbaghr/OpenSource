@@ -34,6 +34,13 @@ static int stored_nx = 0;
 static int stored_nz = 0;
 static int stored_precond_mode = 1;  /* 1=diagonal, 3=block inverse */
 
+/* Stored norm-preservation factor ν (Métivier et al. 2014, eq 42-43).
+ * Computed once from the gradient at each outer iteration via
+ * applyBlockPrecond(..., norm_preserve=1).  Retrieved by getPrecondNu()
+ * for use as a fixed scalar in PTRN/PENRICHED inner CG loops, where
+ * the preconditioner must be a fixed linear operator. */
+static float stored_precond_nu = 1.0f;
+
 
 /*--------------------------------------------------------------------
  * applyDepthTaper -- Multiply array by exponential depth weight w(z).
@@ -432,7 +439,7 @@ void applyBlockPrecond(
 	float *out, const float *in,
 	const float *P11, const float *P12, const float *P13,
 	const float *P22, const float *P23, const float *P33,
-	int nmodel, int nparam)
+	int nmodel, int nparam, int norm_preserve)
 {
 	int i, ntot;
 
@@ -471,18 +478,28 @@ void applyBlockPrecond(
 		}
 	}
 
-	/* Step 3: Norm preservation (Métivier eq 40-41):
-	 *   ν = ||g|| / ||P_θ·g||
-	 *   out = ν · P_θ · g
-	 * Ensures ||out|| = ||g||: preconditioner changes direction only. */
-	double norm_out_sq = 0.0;
-	for (i = 0; i < ntot; i++)
-		norm_out_sq += (double)out[i] * (double)out[i];
-
-	if (norm_out_sq > 0.0 && norm_in_sq > 0.0) {
-		float nu = (float)sqrt(norm_in_sq / norm_out_sq);
+	/* Step 3: Norm preservation (Métivier et al. 2014, eq 42-43).
+	 *
+	 * norm_preserve=1: Compute ν = ||in|| / ||P^θ·in||, apply it,
+	 *   and store ν for later use.  This is called when the input is
+	 *   the gradient ∇f — once per outer iteration.
+	 *
+	 * norm_preserve=0: Skip norm preservation entirely.  The raw P^θ
+	 *   output is returned.  Caller is responsible for multiplying by
+	 *   the stored ν (via getPrecondNu()) if the Métivier formulation
+	 *   P^{ν,θ} = ν · P^θ is desired.  This mode is used inside the
+	 *   PTRN/PENRICHED inner CG loop, where the preconditioner must
+	 *   be a fixed linear operator (same ν for all CG iterations). */
+	if (norm_preserve) {
+		double norm_out_sq = 0.0;
 		for (i = 0; i < ntot; i++)
-			out[i] *= nu;
+			norm_out_sq += (double)out[i] * (double)out[i];
+
+		if (norm_out_sq > 0.0 && norm_in_sq > 0.0) {
+			stored_precond_nu = (float)sqrt(norm_in_sq / norm_out_sq);
+			for (i = 0; i < ntot; i++)
+				out[i] *= stored_precond_nu;
+		}
 	}
 
 	/* Step 4: Depth taper — zero out near-surface artifacts.
@@ -493,4 +510,19 @@ void applyBlockPrecond(
 			applyDepthTaper(out + (size_t)p * nmodel,
 			                stored_nx, stored_nz, stored_blend_nz);
 	}
+}
+
+
+/*--------------------------------------------------------------------
+ * getPrecondNu -- Return the stored norm-preservation factor ν.
+ *
+ * ν = ||∇f|| / ||P^θ · ∇f||  (Métivier et al. 2014, eq 43)
+ *
+ * Computed and stored by the most recent applyBlockPrecond() call
+ * with norm_preserve=1.  Used by PTRN/PENRICHED inner CG to apply
+ * a fixed P^{ν,θ} = ν · P^θ at every CG iteration.
+ *--------------------------------------------------------------------*/
+float getPrecondNu(void)
+{
+	return stored_precond_nu;
 }

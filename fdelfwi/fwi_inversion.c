@@ -374,6 +374,7 @@ static float compute_fwi_gradient(
 	int keep_checkpoints,
 	const float *comp_weights,
 	misfitType mtype,
+	float band_flo, float band_fhi,
 	int verbose,
 	float srt_radius, int srt_filtsize,
 	float *wfld_energy,
@@ -472,6 +473,11 @@ static float compute_fwi_gradient(
 			snprintf(syn_p, sizeof(syn_p), "%s_%03d_rp.su", rec->file_rcv, fileno);
 			computeHydrophone(syn_tzz, syn_txx, syn_p, 0);
 		}
+
+		/* Filter synthetic data for this band (sufilter, same as obs) */
+		if (band_flo > 0.0f || band_fhi > 0.0f)
+			bandpass_filter_syndata(rec->file_rcv, comp_str, fileno,
+			                       band_flo, band_fhi);
 
 		/* Step 2: Compute residuals */
 		{
@@ -1475,16 +1481,6 @@ int main(int argc, char **argv)
 	float fcost = 0.0f;
 	float *comp_weights = NULL;
 
-	/* Save unfiltered wavelet backup for multiscale band switching */
-	float **src_nwav_backup = NULL;
-	if (bands.nbands > 1) {
-		src_nwav_backup = (float **)calloc(wav.nx, sizeof(float *));
-		for (i = 0; i < wav.nx; i++) {
-			src_nwav_backup[i] = (float *)malloc(wav.nt * sizeof(float));
-			memcpy(src_nwav_backup[i], src_nwav[i], wav.nt * sizeof(float));
-		}
-	}
-
 	for (iband = 0; iband < bands.nbands; iband++) {
 
 	current_flo = bands.flo[iband];
@@ -1495,23 +1491,10 @@ int main(int argc, char **argv)
 		      iband + 1, bands.nbands, current_flo, current_fhi,
 		      bands.niter_per_band[iband]);
 
-	/* Filter source wavelet and observed data for this band */
+	/* Pre-filter observed data for this band (sufilter, rank 0 only).
+	 * Synthetic data is filtered per-shot inside compute_fwi_gradient
+	 * using the same sufilter, guaranteeing identical filtering. */
 	if (current_flo > 0.0f || current_fhi > 0.0f) {
-
-		/* Restore wavelet from backup and apply bandpass filter */
-		if (src_nwav_backup) {
-			for (i = 0; i < wav.nx; i++) {
-				memcpy(src_nwav[i], src_nwav_backup[i],
-				       wav.nt * sizeof(float));
-				bandpass_filter_wavelet(src_nwav[i], wav.nt, wav.dt,
-				                       current_flo, current_fhi);
-			}
-			if (mpi_rank == 0)
-				vmess("Source wavelet filtered to [%.1f, %.1f] Hz",
-				      current_flo, current_fhi);
-		}
-
-		/* Filter observed data (sufilter, rank 0 only) */
 		if (mpi_rank == 0) {
 			vmess("Filtering observed data for band [%.1f, %.1f] Hz...",
 			      current_flo, current_fhi);
@@ -1621,7 +1604,8 @@ int main(int argc, char **argv)
 		hess_lam, hess_muu, hess_rho,
 		hess_lam_muu, hess_lam_rho, hess_muu_rho,
 		chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk,
-		comp_weights, mtype, verbose, srt_radius, srt_filtsize,
+		comp_weights, mtype, current_flo, current_fhi,
+		verbose, srt_radius, srt_filtsize,
 		wfld_energy, use_precond);
 
 	/* Taper gradient near source and receiver positions */
@@ -1756,7 +1740,7 @@ int main(int argc, char **argv)
 			    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)) {
 				/* Preconditioned algorithms: store P^{-1}g separately */
 				applyBlockPrecond(grad_preco_vec, grad_vec,
-				    P11, P12, P13, P22, P23, P33, nmodel, nparam);
+				    P11, P12, P13, P22, P23, P33, nmodel, nparam, 1);
 				applyParamMask(grad_preco_vec, nmodel, nparam, &pmask);
 			}
 			if (use_precond == 1 &&
@@ -1765,7 +1749,7 @@ int main(int argc, char **argv)
 				 * so non-preconditioned optimizers receive the
 				 * preconditioned gradient as their input. */
 				applyBlockPrecond(grad_vec, grad_vec,
-				    P11, P12, P13, P22, P23, P33, nmodel, nparam);
+				    P11, P12, P13, P22, P23, P33, nmodel, nparam, 1);
 				applyParamMask(grad_vec, nmodel, nparam, &pmask);
 			}
 			/* Write preconditioner and preconditioned gradient to SU files */
@@ -1889,7 +1873,7 @@ int main(int argc, char **argv)
 					/* Apply Yang block preconditioner to q_plb */
 					if (P11)
 						applyBlockPrecond(opt.q_plb, opt.q_plb,
-						    P11, P12, P13, P22, P23, P33, nmodel, nparam);
+						    P11, P12, P13, P22, P23, P33, nmodel, nparam, 1);
 					plbfgs_run(nvec, x, fcost, grad_vec,
 					           grad_preco_vec ? grad_preco_vec : grad_vec,
 					           &opt, &flag);
@@ -1972,8 +1956,9 @@ int main(int argc, char **argv)
 				hess_lam, hess_muu, hess_rho,
 				hess_lam_muu, hess_lam_rho, hess_muu_rho,
 				chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk,
-				comp_weights, mtype, verbose, srt_radius, srt_filtsize,
-		wfld_energy, use_precond);
+				comp_weights, mtype, current_flo, current_fhi,
+				verbose, srt_radius, srt_filtsize,
+				wfld_energy, use_precond);
 
 			/* Taper gradient near source and receiver positions */
 			{
@@ -2056,14 +2041,14 @@ int main(int argc, char **argv)
 					if (grad_preco_vec &&
 					    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)) {
 						applyBlockPrecond(grad_preco_vec, grad_vec,
-						    P11, P12, P13, P22, P23, P33, nmodel, nparam);
+						    P11, P12, P13, P22, P23, P33, nmodel, nparam, 1);
 						applyParamMask(grad_preco_vec, nmodel, nparam, &pmask);
 					}
 					if (use_precond == 1 &&
 					    (algorithm == 0 || algorithm == 1 || algorithm == 4 || algorithm == 5)) {
 						/* DENISE-style: apply P^{-1} directly to grad_vec */
 						applyBlockPrecond(grad_vec, grad_vec,
-						    P11, P12, P13, P22, P23, P33, nmodel, nparam);
+						    P11, P12, P13, P22, P23, P33, nmodel, nparam, 1);
 						applyParamMask(grad_vec, nmodel, nparam, &pmask);
 					}
 				}
@@ -2155,10 +2140,18 @@ int main(int argc, char **argv)
 #endif
 
 		} else if (flag == OPT_PREC && algorithm == 6) {
-			/* --- PTRN inner CG: apply block preconditioner to residual --- */
-			if (mpi_rank == 0 && P11)
+			/* --- PTRN inner CG: apply P^{ν,θ} = ν · P^θ (Métivier 2014 eq 42).
+			 * Apply raw P^θ (norm_preserve=0), then multiply by the fixed ν
+			 * computed from the gradient at the start of this outer iteration.
+			 * This ensures the preconditioner is a fixed linear operator
+			 * throughout the CG inner loop, as required by CG theory. */
+			if (mpi_rank == 0 && P11) {
 				applyBlockPrecond(opt.residual_preco, opt.residual,
-				    P11, P12, P13, P22, P23, P33, nmodel, nparam);
+				    P11, P12, P13, P22, P23, P33, nmodel, nparam, 0);
+				float nu = getPrecondNu();
+				for (i = 0; i < nvec; i++)
+					opt.residual_preco[i] *= nu;
+			}
 			if (mpi_rank == 0) {
 				ptrn_run(nvec, x, fcost, grad_vec,
 				         grad_preco_vec ? grad_preco_vec : grad_vec,
@@ -2170,10 +2163,22 @@ int main(int argc, char **argv)
 			continue;
 
 		} else if (flag == OPT_PREC && algorithm == 7) {
-			/* --- PEnriched: apply block preconditioner to q_plb --- */
-			if (mpi_rank == 0 && P11)
+			/* --- PEnriched: apply P^{ν,θ} = ν · P^θ to q_plb.
+			 * In HFN mode (enr_method=1): use fixed ν from gradient
+			 *   (same reasoning as PTRN — CG inner loop needs fixed P).
+			 * In PLB mode (enr_method=0): recompute ν per call
+			 *   (matches PLBFGS behavior — two-loop handles scaling). */
+			if (mpi_rank == 0 && P11) {
+				int is_hfn = (opt.enr_method == 1);
 				applyBlockPrecond(opt.q_plb, opt.q_plb,
-				    P11, P12, P13, P22, P23, P33, nmodel, nparam);
+				    P11, P12, P13, P22, P23, P33, nmodel, nparam,
+				    is_hfn ? 0 : 1);
+				if (is_hfn) {
+					float nu = getPrecondNu();
+					for (i = 0; i < nvec; i++)
+						opt.q_plb[i] *= nu;
+				}
+			}
 			if (mpi_rank == 0) {
 				penriched_run(nvec, x, fcost, grad_vec,
 				              grad_preco_vec ? grad_preco_vec : grad_vec,
@@ -2350,11 +2355,6 @@ int main(int argc, char **argv)
 	if (P23) free(P23);
 	if (P33) free(P33);
 
-	if (src_nwav_backup) {
-		for (i = 0; i < wav.nx; i++)
-			free(src_nwav_backup[i]);
-		free(src_nwav_backup);
-	}
 	for (i = 0; i < wav.nx; i++)
 		free(src_nwav[i]);
 	free(src_nwav);

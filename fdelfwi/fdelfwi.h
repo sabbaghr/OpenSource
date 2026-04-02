@@ -328,8 +328,8 @@ typedef struct _bandPar {
     int    niter_per_band[MAX_BANDS]; /* Max optimizer iterations per band */
 } bandPar;
 void bandpass_filter_sufile(const char *filename, float flo, float fhi);
-void bandpass_filter_wavelet(float *data, int nt, float dt_sec,
-                             float flo, float fhi);
+void bandpass_filter_syndata(const char *file_rcv, const char *comp_str,
+                             int fileno, float flo, float fhi);
 void bandpass_filter_obsdata(const char *file_obs, const char *comp_str,
                              int nshots, float flo, float fhi,
                              int iband, int mpi_rank);
@@ -402,7 +402,8 @@ void applyBlockPrecond(
     float *out, const float *in,
     const float *P11, const float *P12, const float *P13,
     const float *P22, const float *P23, const float *P33,
-    int nmodel, int nparam);
+    int nmodel, int nparam, int norm_preserve);
+float getPrecondNu(void);
 
 /* --- fwi_gradient.c: Gradient kernels --- */
 void accumGradient(modPar *mod, bndPar *bnd,

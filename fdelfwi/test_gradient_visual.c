@@ -400,6 +400,11 @@ int main(int argc, char **argv)
 	int srt_filtsize = 1;
 	if (!getparint("srt_filtsize", &srt_filtsize)) srt_filtsize = 1;
 
+	/* Frequency band filtering (optional, for multiscale gradient testing) */
+	float band_flo = 0.0f, band_fhi = 0.0f;
+	getparfloat("freq_lo", &band_flo);
+	getparfloat("freq_hi", &band_fhi);
+
 	/* Standard setup */
 	getParameters(&mod, &rec, &sna, &wav, &src, &shot, &bnd, verbose);
 	n1 = mod.naz;
@@ -500,6 +505,13 @@ int main(int argc, char **argv)
 
 	total_misfit = 0.0f;
 
+	/* Pre-filter observed data if frequency band specified */
+	if (band_flo > 0.0f || band_fhi > 0.0f) {
+		vmess("Filtering observed data to [%.1f, %.1f] Hz...", band_flo, band_fhi);
+		bandpass_filter_obsdata(file_obs, comp_str, shot.n,
+		                       band_flo, band_fhi, 0, 0);
+	}
+
 	/* ============================================================ */
 	/* Multi-shot loop: forward + residual + adjoint                 */
 	/* ============================================================ */
@@ -526,6 +538,11 @@ int main(int argc, char **argv)
 			snprintf(syn_p,   sizeof(syn_p),   "%s_%03d_rp.su",   rec.file_rcv, fileno);
 			computeHydrophone(syn_tzz, syn_txx, syn_p, verbose);
 		}
+
+		/* Filter synthetic data for this band (same sufilter as observed) */
+		if (band_flo > 0.0f || band_fhi > 0.0f)
+			bandpass_filter_syndata(rec.file_rcv, comp_str, fileno,
+			                       band_flo, band_fhi);
 
 		/* ----- Compute residual (multi-component aware) ----- */
 		{
@@ -845,7 +862,7 @@ int main(int argc, char **argv)
 
 		applyBlockPrecond(grad_preco_vec, grad_scaled_vec,
 			P11, P12, P13, P22, P23, P33,
-			nmodel, nparam);
+			nmodel, nparam, 1);
 
 		free(grad_scaled_vec);
 	}
@@ -1141,6 +1158,10 @@ int main(int argc, char **argv)
 	if (bnd.tapxz) free(bnd.tapxz);
 
 	freeStoreSourceOnSurface();
+
+	/* Clean up observed data backups from bandpass filtering */
+	if (band_flo > 0.0f || band_fhi > 0.0f)
+		bandpass_cleanup_obsbackups(file_obs, comp_str, shot.n);
 
 	return 0;
 }
