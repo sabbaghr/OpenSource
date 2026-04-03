@@ -2203,17 +2203,18 @@ int main(int argc, char **argv)
 #endif
 
 		} else if (flag == OPT_PREC && algorithm == 6) {
-			/* --- PTRN inner CG: apply P^{ν,θ} = ν · P^θ (Métivier 2014 eq 42).
-			 * Apply raw P^θ (norm_preserve=0), then multiply by the fixed ν
-			 * computed from the gradient at the start of this outer iteration.
-			 * This ensures the preconditioner is a fixed linear operator
-			 * throughout the CG inner loop, as required by CG theory. */
+			/* --- PTRN inner CG: apply raw P^θ without norm preservation.
+			 * Yang et al. (2018) use the block pseudo-Hessian preconditioner
+			 * directly in the CG inner loop without the ν scaling factor.
+			 * The ν factor (Métivier 2014 eq 42-43) is only needed for
+			 * gradient-based methods (L-BFGS, NLCG) where the preconditioned
+			 * gradient is used as the descent direction.  In preconditioned CG,
+			 * ν is a global scalar that cancels in β but scales α_cg, which
+			 * can cause overflow when the CG residual differs greatly from
+			 * the gradient. */
 			if (mpi_rank == 0 && P11) {
 				applyBlockPrecond(opt.residual_preco, opt.residual,
 				    P11, P12, P13, P22, P23, P33, nmodel, nparam, 0);
-				float nu = getPrecondNu();
-				for (i = 0; i < nvec; i++)
-					opt.residual_preco[i] *= nu;
 			}
 			if (mpi_rank == 0) {
 				ptrn_run(nvec, x, fcost, grad_vec,
