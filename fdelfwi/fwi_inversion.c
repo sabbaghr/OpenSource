@@ -2259,9 +2259,15 @@ int main(int argc, char **argv)
 #ifdef USE_MPI
 			MPI_Bcast(&flag, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
-			continue;
+			/* After preconditioner, penriched may return OPT_PREC again
+			 * (nested two-loop), OPT_HESS, OPT_GRAD, or OPT_NSTE.
+			 * Only continue (skip model write) if NOT OPT_NSTE. */
+			if (flag != OPT_NSTE)
+				continue;
 
-		} else if (flag == OPT_NSTE) {
+		}
+
+		if (flag == OPT_NSTE) {
 			/* --- New step accepted: write intermediate model --- */
 			opt_iter++;
 			if (mpi_rank == 0) {

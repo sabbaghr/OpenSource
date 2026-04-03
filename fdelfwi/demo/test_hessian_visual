@@ -1,0 +1,189 @@
+#!/bin/bash
+#
+# test_hessian_visual.sh - Hessian visual verification (Yang 2018, Fig 3).
+#
+# Computes one column of the Hessian matrix two ways:
+#   1. FD:      H*r ≈ [g(m+ε*r) - g(m)] / ε
+#   2. Adjoint: H*r via Born forward + adjoint (hess_shot)
+#
+# r = Dirac delta at a single grid point. Both should match visually.
+#
+
+set -e
+
+ROOT=/rcp3/software/codes/OpenSource_SL10
+BIN=${ROOT}/bin
+FDELFWI=${ROOT}/fdelfwi
+CWP=/rcp3/software/codes/cwp/bin
+
+export PATH=${BIN}:${CWP}:${PATH}
+
+WORKDIR=hessian_visual_test
+rm -rf ${WORKDIR}
+mkdir -p ${WORKDIR}
+cd ${WORKDIR}
+
+export OMP_NUM_THREADS=4
+
+# Spike location and parameters
+SPIKE_IX=100    # x = 500m (center of 1000m model)
+SPIKE_IZ=80     # z = 400m
+SPIKE_PARAM=vp  # vp, vs, or rho
+EPSILON=1.0     # FD perturbation amplitude (m/s)
+
+echo "========================================================="
+echo " Hessian Visual Verification (Yang 2018, Fig 3)"
+echo "   Spike: ${SPIKE_PARAM} at ix=${SPIKE_IX}, iz=${SPIKE_IZ}"
+echo "   FD epsilon = ${EPSILON}"
+echo "========================================================="
+
+# =========================================================
+# Create model (homogeneous elastic)
+# =========================================================
+echo "--- Creating model ---"
+
+makemod sizex=1000 sizez=1000 dx=5 dz=5 \
+    cp0=2000 cs0=1150 ro0=2000 \
+    orig=0,0 file_base=model.su verbose=0
+
+# Perturbed model: add spike
+cp model_cp.su model_pert_cp.su
+cp model_cs.su model_pert_cs.su
+cp model_ro.su model_pert_ro.su
+
+NZ=201
+
+python3 -c "
+import struct
+param = '${SPIKE_PARAM}'
+eps = ${EPSILON}
+ix, iz, nz = ${SPIKE_IX}, ${SPIKE_IZ}, ${NZ}
+fmap = {'vp': 'model_pert_cp.su', 'vs': 'model_pert_cs.su', 'rho': 'model_pert_ro.su'}
+fname = fmap[param]
+f = open(fname, 'rb'); data = bytearray(f.read()); f.close()
+ns = struct.unpack('<H', data[114:116])[0]
+off = ix * (240 + ns*4) + 240 + iz * 4
+val = struct.unpack('<f', data[off:off+4])[0]
+data[off:off+4] = struct.pack('<f', val + eps)
+f = open(fname, 'wb'); f.write(data); f.close()
+print(f'Spike: {param}[{ix},{iz}] = {val:.1f} -> {val+eps:.1f}')
+"
+
+# =========================================================
+# Create wavelet and observed data
+# =========================================================
+echo "--- Creating wavelet and observed data ---"
+
+makewave fp=15 dt=0.001 nt=1024 fmax=25 file_out=wave.su t0=0.10 verbose=0
+
+NSHOTS=5
+XSRC_START=100
+XSRC_END=900
+XSRC_STEP=$(( (XSRC_END - XSRC_START) / (NSHOTS - 1) ))
+
+for ((ishot=0; ishot<NSHOTS; ishot++)); do
+    XSRC=$((XSRC_START + ishot * XSRC_STEP))
+    fdelmodc \
+        file_cp=model_cp.su file_cs=model_cs.su file_den=model_ro.su \
+        file_src=wave.su file_rcv=obs_${ishot} \
+        ischeme=3 iorder=4 src_type=1 \
+        rec_type_vx=1 rec_type_vz=1 rec_type_txx=1 rec_type_tzz=1 \
+        dtrcv=0.004 tmod=1.0 verbose=0 \
+        xrcv1=100 xrcv2=900 zrcv1=10 zrcv2=10 dxrcv=10 \
+        xsrc=${XSRC} zsrc=10 ntaper=30 \
+        left=4 right=4 top=4 bottom=4
+
+    SHOTID=$(printf "%03d" ${ishot})
+    mv obs_${ishot}_rvx.su obs_${SHOTID}_rvx.su
+    mv obs_${ishot}_rvz.su obs_${SHOTID}_rvz.su
+    suop2 obs_${ishot}_rtzz.su obs_${ishot}_rtxx.su op=sum | sugain scale=0.5 > obs_${SHOTID}_rp.su
+    rm -f obs_${ishot}_rtzz.su obs_${ishot}_rtxx.su
+done
+echo "  ${NSHOTS} shots generated"
+
+# =========================================================
+# FD Hessian: g(m) and g(m+ε*r)
+# =========================================================
+echo "--- Computing g(m) ---"
+
+${FDELFWI}/test_gradient_visual \
+    file_cp=model_cp.su file_cs=model_cs.su file_den=model_ro.su \
+    file_src=wave.su file_rcv=syn \
+    ischeme=3 iorder=4 src_type=1 \
+    rec_type_vx=1 rec_type_vz=1 rec_type_txx=1 rec_type_tzz=1 \
+    dtrcv=0.004 tmod=1.0 \
+    xrcv1=100 xrcv2=900 zrcv1=10 zrcv2=10 dxrcv=10 \
+    xsrc=${XSRC_START} zsrc=10 nshot=${NSHOTS} dxshot=${XSRC_STEP} \
+    ntaper=30 \
+    left=4 right=4 top=4 bottom=4 \
+    chk_skipdt=100 chk_base=chk_g \
+    param=2 scaling=0 \
+    comp=_rp \
+    file_obs=obs out_base=grad_m \
+    verbose=1
+
+echo "--- Computing g(m+eps*r) ---"
+
+${FDELFWI}/test_gradient_visual \
+    file_cp=model_pert_cp.su file_cs=model_pert_cs.su file_den=model_pert_ro.su \
+    file_src=wave.su file_rcv=syn \
+    ischeme=3 iorder=4 src_type=1 \
+    rec_type_vx=1 rec_type_vz=1 rec_type_txx=1 rec_type_tzz=1 \
+    dtrcv=0.004 tmod=1.0 \
+    xrcv1=100 xrcv2=900 zrcv1=10 zrcv2=10 dxrcv=10 \
+    xsrc=${XSRC_START} zsrc=10 nshot=${NSHOTS} dxshot=${XSRC_STEP} \
+    ntaper=30 \
+    left=4 right=4 top=4 bottom=4 \
+    chk_skipdt=100 chk_base=chk_g \
+    param=2 scaling=0 \
+    comp=_rp \
+    file_obs=obs out_base=grad_mpert \
+    verbose=1
+
+echo "--- Computing FD Hessian: [g(m+eps) - g(m)] / eps ---"
+
+INV_EPS=$(python3 -c "print(1.0/${EPSILON})")
+for par in vp vs rho; do
+    suop2 grad_mpert_${par}_raw.su grad_m_${par}_raw.su op=diff | \
+        sugain scale=${INV_EPS} > hessian_fd_${par}.su
+done
+
+# =========================================================
+# Adjoint Hessian: H*r via hess_shot (spike mode)
+# =========================================================
+echo "--- Computing adjoint Hessian H*r ---"
+
+${FDELFWI}/test_hessian_dp \
+    file_cp=model_cp.su file_cs=model_cs.su file_den=model_ro.su \
+    file_src=wave.su file_rcv=born \
+    ischeme=3 iorder=4 src_type=1 \
+    rec_type_vx=1 rec_type_vz=1 rec_type_txx=1 rec_type_tzz=1 \
+    dtrcv=0.004 tmod=1.0 \
+    xrcv1=100 xrcv2=900 zrcv1=10 zrcv2=10 dxrcv=10 \
+    xsrc=${XSRC_START} zsrc=10 nshot=${NSHOTS} dxshot=${XSRC_STEP} \
+    ntaper=30 \
+    left=4 right=4 top=4 bottom=4 \
+    chk_skipdt=100 chk_base=chk_hess \
+    param=2 \
+    comp=_rp \
+    spike_ix=${SPIKE_IX} spike_iz=${SPIKE_IZ} spike_param=${SPIKE_PARAM} \
+    file_hess=hessian_adj \
+    pert_pct=0.01 seed=12345 \
+    verbose=1
+
+# =========================================================
+# Cleanup
+# =========================================================
+rm -rf chk_*.bin syn_*.su born*.su
+
+echo ""
+echo "========================================================="
+echo " Done. Compare FD vs Adjoint Hessian:"
+echo ""
+echo "   FD:      hessian_fd_vp.su, hessian_fd_vs.su, hessian_fd_rho.su"
+echo "   Adjoint: hessian_adj_vp.su, hessian_adj_vs.su, hessian_adj_rho.su"
+echo ""
+echo " Quick visual check:"
+echo "   supsimage < hessian_fd_vp.su perc=99 title='FD' &"
+echo "   supsimage < hessian_adj_vp.su perc=99 title='Adjoint' &"
+echo "========================================================="

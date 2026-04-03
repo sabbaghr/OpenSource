@@ -629,6 +629,110 @@ int main(int argc, char **argv)
 	printf("=================================================\n");
 
 	/* ============================================================ */
+	/* Optional: Spike mode — write H*spike as SU files             */
+	/* (Yang et al. 2018, Fig 3 style visual verification)          */
+	/* ============================================================ */
+	{
+		int spike_ix = -1, spike_iz = -1;
+		char *spike_param_str = "vp";
+		char *file_hess = "hessian_adj";
+		getparint("spike_ix", &spike_ix);
+		getparint("spike_iz", &spike_iz);
+		getparstring("spike_param", &spike_param_str);
+		getparstring("file_hess", &file_hess);
+
+		if (spike_ix >= 0 && spike_iz >= 0) {
+			vmess("");
+			vmess("=== Spike Hessian mode (Yang Fig 3) ===");
+			vmess("  Spike at ix=%d iz=%d, param=%s", spike_ix, spike_iz, spike_param_str);
+
+			/* Determine which parameter block to spike */
+			int spike_block = 0;  /* 0=lam/vp, 1=mu/vs, 2=rho */
+			if (strcmp(spike_param_str, "vs") == 0 || strcmp(spike_param_str, "mu") == 0)
+				spike_block = 1;
+			else if (strcmp(spike_param_str, "rho") == 0)
+				spike_block = 2;
+
+			/* Create spike perturbation */
+			float *dm_spike = (float *)calloc(nvec, sizeof(float));
+			if (spike_ix < mod.nx && spike_iz < mod.nz)
+				dm_spike[spike_block * nmodel + spike_ix * mod.nz + spike_iz] = 1.0f;
+			else
+				verr("spike_ix=%d or spike_iz=%d out of range (nx=%d, nz=%d)",
+				     spike_ix, spike_iz, mod.nx, mod.nz);
+
+			vmess("  ||dm_spike|| = 1.0 (single grid point)");
+			vmess("  Accumulating over %d shots", shot.n);
+
+			/* Convert spike to FD coefficients (same for all shots) */
+			memset(delta_block, 0, (size_t)ndelta * sizem * sizeof(float));
+			perturbFDcoefficients(&mod, &bnd, dm_spike, param,
+			                      delta_rox, delta_roz, delta_l2m, delta_lam, delta_mul);
+
+			/* Accumulate H*spike over all shots */
+			memset(hd1_block, 0, (size_t)nhd * sizem * sizeof(float));
+			for (int is = 0; is < shot.n; is++) {
+				int is_zsrc = shot.z[is];
+				int is_xsrc = shot.x[is];
+				int is_fileno = is;
+				checkpointPar chk_spike;
+
+				vmess("  Shot %d/%d: src=(%d,%d)", is+1, shot.n, is_xsrc, is_zsrc);
+
+				/* Forward with checkpointing for this shot */
+				{
+					snaPar sna_off = sna;
+					sna_off.nsnap = 0;
+					initCheckpoints(&chk_spike, &mod, chk_skipdt, 0, chk_base);
+					fdfwimodc(&mod, &src, &wav, &bnd, &rec, &sna_off,
+					          is_xsrc, is_zsrc, src_nwav, is, shot.n,
+					          is_fileno, &chk_spike, verbose);
+				}
+
+				/* H*spike for this shot (accumulates into hd1 arrays) */
+				char born_base[64];
+				snprintf(born_base, sizeof(born_base), "born_spike_%03d", is);
+				hess_shot(&mod, &src, &wav, &bnd, &rec,
+				          is_xsrc, is_zsrc, src_nwav, &chk_spike,
+				          delta_rox, delta_roz, delta_l2m, delta_lam, delta_mul,
+				          born_base, comp_str,
+				          0, shot.n, is_fileno,
+				          0, hd1_g1, hd1_g2, hd1_g3,
+				          1, NULL, verbose);
+
+				cleanCheckpoints(&chk_spike);
+			}
+
+			/* Extract to flat vector in the requested parameterization */
+			float *Hd_spike = (float *)calloc(nvec, sizeof(float));
+			extractGradientVector(Hd_spike, hd1_g1, hd1_g2, hd1_g3, &mod, &bnd, param);
+
+			/* Write each parameter as SU file */
+			const char *pnames[3];
+			if (param == 1) { pnames[0] = "lam"; pnames[1] = "mu"; pnames[2] = "rho"; }
+			else            { pnames[0] = "vp";  pnames[1] = "vs"; pnames[2] = "rho"; }
+
+			for (int p = 0; p < nparam; p++) {
+				char fname[512];
+				snprintf(fname, sizeof(fname), "%s_%s.su", file_hess, pnames[p]);
+				writesufile(fname, Hd_spike + p * nmodel,
+				            mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+				vmess("  Wrote %s", fname);
+			}
+
+			double norm_Hd = 0.0;
+			for (i = 0; i < nvec; i++)
+				norm_Hd += (double)Hd_spike[i] * Hd_spike[i];
+			vmess("  ||H*spike|| = %.6e", sqrt(norm_Hd));
+
+			free(dm_spike);
+			free(Hd_spike);
+
+			vmess("=== Spike Hessian mode complete ===");
+		}
+	}
+
+	/* ============================================================ */
 	/* Cleanup                                                       */
 	/* ============================================================ */
 	cleanCheckpoints(&chk);
