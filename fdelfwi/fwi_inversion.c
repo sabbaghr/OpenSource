@@ -121,7 +121,8 @@ char *sdoc[] = {
 "   niter=20           max optimization iterations",
 "   conv=1e-6          convergence tolerance (fcost/f0)",
 "   algorithm=1        0=SD, 1=LBFGS, 2=PLBFGS, 3=PNLCG, 4=TRN, 5=ENRICHED, 6=PTRN, 7=PENRICHED",
-"   niter_cg=5         max inner CG iterations per TRN/Enriched step (algorithm=4,5,7)",
+"   niter_cg=5         max inner CG iterations per TRN/Enriched step (algorithm=4,5,6,7)",
+"   eta=0.9            initial Eisenstat-Walker forcing term (0<eta<1, lower=tighter CG)",
 "   enr_l=20           L-BFGS cycle length for Enriched method (algorithm=5,7)",
 "   lbfgs_mem=20       L-BFGS history pairs",
 "   nls_max=20         max linesearch iterations",
@@ -1524,8 +1525,13 @@ int main(int argc, char **argv)
 	opt.print_append = (iband > 0) ? 1 : 0;
 	opt.debug = (verbose > 1) ? 1 : 0;
 
-	/* TRN/Enriched-specific: max inner CG iterations */
+	/* TRN/Enriched-specific: max inner CG iterations and forcing term */
 	opt.niter_max_CG = niter_cg;
+	{
+		float eta_init = 0.0f;
+		if (getparfloat("eta", &eta_init) && eta_init > 0.0f && eta_init < 1.0f)
+			opt.eta = eta_init;  /* User-specified initial η (default 0.9 in optimizer) */
+	}
 
 	/* Enriched-specific: L-BFGS cycle length and max CG */
 	if (algorithm == 5 || algorithm == 7) {
@@ -2203,18 +2209,20 @@ int main(int argc, char **argv)
 #endif
 
 		} else if (flag == OPT_PREC && algorithm == 6) {
-			/* --- PTRN inner CG: apply raw P^θ without norm preservation.
-			 * Yang et al. (2018) use the block pseudo-Hessian preconditioner
-			 * directly in the CG inner loop without the ν scaling factor.
-			 * The ν factor (Métivier 2014 eq 42-43) is only needed for
-			 * gradient-based methods (L-BFGS, NLCG) where the preconditioned
-			 * gradient is used as the descent direction.  In preconditioned CG,
-			 * ν is a global scalar that cancels in β but scales α_cg, which
-			 * can cause overflow when the CG residual differs greatly from
-			 * the gradient. */
+			/* --- PTRN inner CG: apply P^{ν,θ} = ν · P^θ with FIXED ν.
+			 * Apply raw P^θ (norm_preserve=0), then multiply by the fixed ν
+			 * computed from the gradient at the start of this outer iteration
+			 * (Métivier 2014 eq 42-43).  The ν factor is essential to keep
+			 * the preconditioned residual z = ν·P^θ·r in a numerically sane
+			 * range.  Using a FIXED ν (not recomputed per CG step) ensures
+			 * the preconditioner is a fixed linear operator throughout the
+			 * CG inner loop, as required by CG convergence theory. */
 			if (mpi_rank == 0 && P11) {
 				applyBlockPrecond(opt.residual_preco, opt.residual,
 				    P11, P12, P13, P22, P23, P33, nmodel, nparam, 0);
+				float nu = getPrecondNu();
+				for (i = 0; i < nvec; i++)
+					opt.residual_preco[i] *= nu;
 			}
 			if (mpi_rank == 0) {
 				ptrn_run(nvec, x, fcost, grad_vec,

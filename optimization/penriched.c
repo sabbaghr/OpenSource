@@ -170,7 +170,7 @@ static void init_penriched(int n, float *x, float fcost, float *grad,
 	opt->f0 = fcost;
 	opt->nfwd_pb = 0;
 	opt->nhess = 0;
-	opt->eta = 0.9f;
+	if (opt->eta <= 0.0f || opt->eta > 1.0f) opt->eta = 0.9f;
 
 	/* Linesearch parameters */
 	opt->m1 = 1e-4f;
