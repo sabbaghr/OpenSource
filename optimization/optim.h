@@ -149,6 +149,8 @@ typedef struct {
 	trnComm enr_comm;       /* internal comm state (DESC=CG or NSTE=linesearch) */
 	float  *enr_precond_z;  /* preconditioner workspace [n] */
 	int     enr_recovering; /* 1=recovering from HFN linesearch failure */
+	int     enr_cg_borne;   /* frozen L-BFGS borne at CG start (Métivier 2017:
+	                         * preconditioner must be fixed during inner CG) */
 
 	/* Bound constraints */
 	int     bound;          /* 0=off, 1=on */

@@ -63,13 +63,22 @@ static void save_lbfgs_pair(int n, optim_type *opt,
  *
  * Computes q_plb from input via backward pass through history.
  * Allocates alpha_plb, rho_plb (freed by lbfgs_forward_loop).
- * Returns borne (number of history pairs, 0 = no history).
+ * Returns borne (number of history pairs actually used, 0 = no history).
+ *
+ * max_borne: if >= 0, cap the number of pairs used.  This is needed
+ *            during the HFN inner CG loop to freeze the preconditioner
+ *            (Métivier 2017): new (d,Hd) pairs saved during CG must not
+ *            change the two-loop recursion mid-CG.  Pass -1 to use all
+ *            available pairs (normal L-BFGS behavior).
  *--------------------------------------------------------------------*/
-static int lbfgs_backward_loop(int n, optim_type *opt, const float *input)
+static int lbfgs_backward_loop(int n, optim_type *opt, const float *input,
+                               int max_borne)
 {
 	int i, idx, borne;
 
 	borne = opt->cpt_lbfgs - 1;
+	if (max_borne >= 0 && borne > max_borne)
+		borne = max_borne;
 
 	/* q_plb = input */
 	memcpy(opt->q_plb, input, n * sizeof(float));
@@ -511,10 +520,23 @@ void penriched_run(int n, float *x, float fcost, float *grad,
 			opt->conv_CG = 0;
 			opt->cpt_iter_CG = 0;
 
+			/* Freeze L-BFGS history size for fixed preconditioner
+			 * (Métivier 2017, Morales & Nocedal 2002):
+			 * CG requires M to be a fixed linear operator.
+			 * New (d,Hd) pairs saved during CG seed future L-BFGS
+			 * but must NOT change the preconditioner mid-CG. */
+			opt->enr_cg_borne = opt->cpt_lbfgs - 1;
+
+			if (opt->debug)
+				fprintf(stderr, "  PENR CG: init borne=%d (frozen for CG)\n",
+				        opt->enr_cg_borne);
+
 			penr_cg_log(opt, 1, 0.0f);  /* CG header */
 
-			/* Backward loop on residual → q_plb → OPT_PREC */
-			borne = lbfgs_backward_loop(n, opt, opt->residual);
+			/* Backward loop on residual → q_plb → OPT_PREC
+			 * Use frozen borne to ensure fixed preconditioner. */
+			borne = lbfgs_backward_loop(n, opt, opt->residual,
+			                            opt->enr_cg_borne);
 			opt->niter_max_CG = borne;  /* save borne for forward */
 			opt->enr_comm = ENR_PREC;
 			opt->CG_phase = CG_INIT;  /* keep CG_INIT to identify this is init */
@@ -595,8 +617,10 @@ void penriched_run(int n, float *x, float fcost, float *grad,
 				return;
 			}
 
-			/* Need preconditioned z_new: backward loop → OPT_PREC */
-			borne = lbfgs_backward_loop(n, opt, opt->residual);
+			/* Need preconditioned z_new: backward loop → OPT_PREC
+			 * Use frozen borne to keep preconditioner fixed during CG. */
+			borne = lbfgs_backward_loop(n, opt, opt->residual,
+			                            opt->enr_cg_borne);
 			opt->niter_max_CG = borne;  /* save borne */
 			opt->enr_comm = ENR_PREC;
 			opt->CG_phase = CG_IRUN;
@@ -717,7 +741,7 @@ void penriched_run(int n, float *x, float fcost, float *grad,
 		if (opt->enr_method == 0) {
 			/*--- Switching to / continuing L-BFGS phase ---*/
 			/* Split two-loop: backward → OPT_PREC → forward → descent */
-			borne = lbfgs_backward_loop(n, opt, grad);
+			borne = lbfgs_backward_loop(n, opt, grad, -1);
 			opt->niter_max_CG = borne;  /* save borne */
 			opt->enr_comm = ENR_PREC;
 			opt->enr_recovering = 0;
@@ -747,7 +771,7 @@ void penriched_run(int n, float *x, float fcost, float *grad,
 			memcpy(x, opt->xk, n * sizeof(float));
 
 			/* Split two-loop on saved gradient → OPT_PREC */
-			borne = lbfgs_backward_loop(n, opt, opt->grad);
+			borne = lbfgs_backward_loop(n, opt, opt->grad, -1);
 			opt->niter_max_CG = borne;
 			opt->enr_comm = ENR_PREC;
 			opt->enr_recovering = 1;
