@@ -2206,6 +2206,17 @@ int main(int argc, char **argv)
 				scaling_scale_hessian_vec(opt.Hd, nmodel, nparam, m0);
 			}
 
+			if (verbose >= 2 && mpi_rank == 0) {
+				double nd = 0.0, nHd = 0.0, dHd_val = 0.0;
+				for (i = 0; i < nvec; i++) {
+					nd += (double)opt.d[i] * opt.d[i];
+					nHd += (double)opt.Hd[i] * opt.Hd[i];
+					dHd_val += (double)opt.d[i] * opt.Hd[i];
+				}
+				vmess("  Hessian-vector product: ||d||=%.4e ||Hd||=%.4e <d,Hd>=%.4e",
+				      sqrt(nd), sqrt(nHd), dHd_val);
+			}
+
 #ifdef USE_MPI
 			/* Broadcast Hd back to all ranks (rank 0 has the result) */
 			MPI_Bcast(opt.Hd, nvec, MPI_FLOAT, 0, MPI_COMM_WORLD);
