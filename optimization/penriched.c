@@ -452,6 +452,9 @@ void penriched_run(int n, float *x, float fcost, float *grad,
 			/*--- CG iteration: process Hd ---*/
 			float dHd = optim_dot(n, opt->d, opt->Hd);
 
+			if (opt->debug)
+				printf("  PENR CG: dHd = %+.6e  (iter_CG=%d)\n", dHd, opt->cpt_iter_CG);
+
 			if (dHd <= 0.0f) {
 				/* Negative curvature: stop CG */
 				opt->conv_CG = 1;
