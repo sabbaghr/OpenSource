@@ -123,12 +123,20 @@ static void descent_ptrn1(int n, float *grad, optim_type *opt,
 
 	dHd = optim_dot(n, opt->d, opt->Hd);
 
-	if (opt->debug)
-		printf("  PTRN CG: dHd = %+.6e  (iter_CG=%d)\n", dHd, opt->cpt_iter_CG);
+	if (opt->debug) {
+		float nd = optim_norm_l2(n, opt->d);
+		float nHd = optim_norm_l2(n, opt->Hd);
+		fprintf(stderr, "  PTRN CG[%d]: dHd=%+.6e ||d||=%.4e ||Hd||=%.4e\n",
+		        opt->cpt_iter_CG, dHd, nd, nHd);
+	}
 
 	if (dHd < 0.0f) {
 		/* Negative curvature detected */
 		opt->conv_CG = 1;
+
+		if (opt->debug)
+			fprintf(stderr, "  PTRN CG: NEGATIVE CURVATURE at iter_CG=%d, dHd=%+.6e -> steepest descent\n",
+			        opt->cpt_iter_CG, dHd);
 
 		if (opt->cpt_iter_CG == 0) {
 			/* First iteration: use preconditioned steepest descent */
@@ -213,6 +221,11 @@ static void descent_ptrn2(int n, float *grad, optim_type *opt,
 	opt->norm_residual = optim_norm_l2(n, opt->residual);
 	opt->conv_CG = (opt->norm_residual <= opt->eta * opt->norm_grad) ||
 	               (opt->cpt_iter_CG >= opt->niter_max_CG);
+
+	if (opt->debug && opt->conv_CG)
+		fprintf(stderr, "  PTRN CG: converged at iter_CG=%d, ||r||=%.4e, eta*||g||=%.4e, maxcg=%d\n",
+		        opt->cpt_iter_CG, opt->norm_residual,
+		        opt->eta * opt->norm_grad, opt->niter_max_CG);
 
 	print_info_ptrn(n, opt, 0.0f, *flag);
 }

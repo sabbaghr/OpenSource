@@ -1919,6 +1919,7 @@ int main(int argc, char **argv)
 		MPI_Bcast(&flag, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
 
+		handle_grad:
 		if (flag == OPT_GRAD) {
 			/* --- Model updated by optimizer, need new gradient --- */
 
@@ -2174,6 +2175,7 @@ int main(int argc, char **argv)
 			}
 
 		} else if (flag == OPT_HESS) {
+		handle_hess:
 			/* --- TRN inner CG needs Hessian-vector product --- */
 
 			/* Denormalize d to physical units: d_phys = m0 * d_tilde */
@@ -2275,9 +2277,14 @@ int main(int argc, char **argv)
 #endif
 			/* After preconditioner, penriched may return OPT_PREC again
 			 * (nested two-loop), OPT_HESS, OPT_GRAD, or OPT_NSTE.
-			 * Only continue (skip model write) if NOT OPT_NSTE. */
-			if (flag != OPT_NSTE)
+			 * OPT_HESS and OPT_GRAD need their handlers below.
+			 * OPT_PREC needs to go back to the optimizer switch at top. */
+			if (flag == OPT_PREC)
 				continue;
+			if (flag == OPT_HESS)
+				goto handle_hess;
+			if (flag == OPT_GRAD)
+				goto handle_grad;
 
 		}
 
@@ -2287,6 +2294,17 @@ int main(int argc, char **argv)
 			if (mpi_rank == 0) {
 				vmess("Iteration %d: misfit = %.6e (%.2f%% of initial)",
 				      opt_iter, fcost, 100.0f * fcost / opt.f0);
+
+				/* CG summary for TRN/PTRN/Enriched/PEnriched */
+				if (algorithm >= 4 && verbose >= 1) {
+					const char *method = "";
+					if (algorithm == 7)
+						method = opt.enr_method ? " [HFN]" : " [PLB]";
+					else if (algorithm == 5)
+						method = opt.enr_method ? " [HFN]" : " [LB]";
+					vmess("  Inner CG: %d iterations, nhess=%d%s",
+					      opt.cpt_iter_CG, opt.nhess, method);
+				}
 				if (write_iter > 0 && (opt_iter % write_iter == 0)) {
 					if (scaling > 0)
 						scaling_denormalize(x, nmodel, nparam, m0, m_shift);

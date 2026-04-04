@@ -24,8 +24,9 @@
 #include "optim.h"
 
 
-/* File handle for convergence history */
+/* File handles for convergence history */
 static FILE *_penr_fp = NULL;
+static FILE *_penr_cg_fp = NULL;  /* iterate_PENR_CG.dat */
 
 
 /*--------------------------------------------------------------------
@@ -300,7 +301,7 @@ static void print_info_penriched(int n, optim_type *opt, float fcost,
 	if (!opt->print_flag) return;
 
 	if (flag == OPT_INIT) {
-		_penr_fp = fopen("iterate_PENR.dat", "w");
+		_penr_fp = fopen("iterate_PENR.dat", opt->print_append ? "a" : "w");
 		if (!_penr_fp) return;
 
 		fprintf(_penr_fp,
@@ -331,43 +332,113 @@ static void print_info_penriched(int n, optim_type *opt, float fcost,
 			opt->eta, opt->nfwd_pb, opt->nhess);
 		fflush(_penr_fp);
 
+		_penr_cg_fp = fopen("iterate_PENR_CG.dat", opt->print_append ? "a" : "w");
+		if (_penr_cg_fp) {
+			fprintf(_penr_cg_fp,
+				"**********************************************************************\n");
+			fprintf(_penr_cg_fp,
+				"        PRECONDITIONED ENRICHED: INNER CG HISTORY\n");
+			fprintf(_penr_cg_fp,
+				"**********************************************************************\n");
+			fprintf(_penr_cg_fp, "     Initial cost is        : %10.2e\n", opt->f0);
+			fprintf(_penr_cg_fp, "     Initial norm_grad is   : %10.2e\n", opt->norm_grad);
+			fprintf(_penr_cg_fp, "     Maximum CG iter        : %7d\n", opt->enr_maxcg);
+			fprintf(_penr_cg_fp,
+				"**********************************************************************\n");
+			fflush(_penr_cg_fp);
+		}
+
 	} else if (flag == OPT_CONV) {
-		if (!_penr_fp) return;
-		fprintf(_penr_fp,
-			"**********************************************************************\n");
-		if (opt->cpt_iter >= opt->niter_max)
+		if (_penr_fp) {
 			fprintf(_penr_fp,
-				"  STOP: MAXIMUM NUMBER OF ITERATION REACHED\n");
-		else
+				"**********************************************************************\n");
+			if (opt->cpt_iter >= opt->niter_max)
+				fprintf(_penr_fp,
+					"  STOP: MAXIMUM NUMBER OF ITERATION REACHED\n");
+			else
+				fprintf(_penr_fp,
+					"  STOP: CONVERGENCE CRITERION SATISFIED\n");
 			fprintf(_penr_fp,
-				"  STOP: CONVERGENCE CRITERION SATISFIED\n");
-		fprintf(_penr_fp,
-			"**********************************************************************\n");
-		fclose(_penr_fp);
-		_penr_fp = NULL;
+				"**********************************************************************\n");
+			fclose(_penr_fp);
+			_penr_fp = NULL;
+		}
+		if (_penr_cg_fp) {
+			fclose(_penr_cg_fp);
+			_penr_cg_fp = NULL;
+		}
 
 	} else if (flag == OPT_FAIL) {
-		if (!_penr_fp) return;
-		fprintf(_penr_fp,
-			"**********************************************************************\n");
-		fprintf(_penr_fp, "  STOP: LINESEARCH FAILURE\n");
-		fprintf(_penr_fp,
-			"**********************************************************************\n");
-		fclose(_penr_fp);
-		_penr_fp = NULL;
+		if (_penr_fp) {
+			fprintf(_penr_fp,
+				"**********************************************************************\n");
+			fprintf(_penr_fp, "  STOP: LINESEARCH FAILURE\n");
+			fprintf(_penr_fp,
+				"**********************************************************************\n");
+			fclose(_penr_fp);
+			_penr_fp = NULL;
+		}
+		if (_penr_cg_fp) {
+			fclose(_penr_cg_fp);
+			_penr_cg_fp = NULL;
+		}
 
 	} else {
-		if (!_penr_fp) return;
-		fprintf(_penr_fp,
-			"%6d%12.2e%12.2e%12.2e%12.2e    %s%8d%8d%12.2e%8d%8d\n",
-			opt->cpt_iter, fcost, opt->norm_grad,
-			(opt->f0 > 0.0f) ? fcost / opt->f0 : 0.0f,
-			opt->alpha,
-			opt->enr_method ? "HFN" : "PLB",
-			opt->cpt_ls, opt->cpt_iter_CG,
-			opt->eta, opt->nfwd_pb, opt->nhess);
-		fflush(_penr_fp);
+		if (_penr_fp) {
+			fprintf(_penr_fp,
+				"%6d%12.2e%12.2e%12.2e%12.2e    %s%8d%8d%12.2e%8d%8d\n",
+				opt->cpt_iter, fcost, opt->norm_grad,
+				(opt->f0 > 0.0f) ? fcost / opt->f0 : 0.0f,
+				opt->alpha,
+				opt->enr_method ? "HFN" : "PLB",
+				opt->cpt_ls, opt->cpt_iter_CG,
+				opt->eta, opt->nfwd_pb, opt->nhess);
+			fflush(_penr_fp);
+		}
 	}
+}
+
+
+/*--------------------------------------------------------------------
+ * penr_cg_log -- Write one line to the PENR inner CG history file.
+ *--------------------------------------------------------------------*/
+static void penr_cg_log(optim_type *opt, int is_header, float dHd_val)
+{
+	if (!opt->print_flag || !_penr_cg_fp) return;
+
+	if (is_header) {
+		fprintf(_penr_cg_fp,
+			"-------------------------------------------------------------------------------------------------\n");
+		fprintf(_penr_cg_fp,
+			" NONLINEAR ITERATION %4d  METHOD: %s  ETA: %12.2e  MAXCG: %d\n",
+			opt->cpt_iter, opt->enr_method ? "HFN" : "PLB",
+			opt->eta, opt->enr_maxcg);
+		fprintf(_penr_cg_fp,
+			"-------------------------------------------------------------------------------------------------\n");
+		fprintf(_penr_cg_fp,
+			"  Iter_CG     norm_res   norm_res/||gk||         dHd        stop_reason\n");
+		fprintf(_penr_cg_fp,
+			"%8d%12.2e%12.2e%14.4e    (init)\n",
+			opt->cpt_iter_CG, opt->norm_residual,
+			(opt->norm_grad > 0.0f) ? opt->norm_residual / opt->norm_grad : 0.0f,
+			0.0f);
+	} else {
+		const char *reason = "";
+		if (opt->conv_CG) {
+			if (dHd_val <= 0.0f)
+				reason = "NEG_CURV";
+			else if (opt->norm_residual <= opt->eta * opt->norm_grad)
+				reason = "ETA_CONV";
+			else if (opt->cpt_iter_CG >= opt->enr_maxcg)
+				reason = "MAX_CG";
+		}
+		fprintf(_penr_cg_fp,
+			"%8d%12.2e%12.2e%14.4e    %s\n",
+			opt->cpt_iter_CG, opt->norm_residual,
+			(opt->norm_grad > 0.0f) ? opt->norm_residual / opt->norm_grad : 0.0f,
+			dHd_val, reason);
+	}
+	fflush(_penr_cg_fp);
 }
 
 
@@ -440,6 +511,8 @@ void penriched_run(int n, float *x, float fcost, float *grad,
 			opt->conv_CG = 0;
 			opt->cpt_iter_CG = 0;
 
+			penr_cg_log(opt, 1, 0.0f);  /* CG header */
+
 			/* Backward loop on residual → q_plb → OPT_PREC */
 			borne = lbfgs_backward_loop(n, opt, opt->residual);
 			opt->niter_max_CG = borne;  /* save borne for forward */
@@ -452,14 +525,24 @@ void penriched_run(int n, float *x, float fcost, float *grad,
 			/*--- CG iteration: process Hd ---*/
 			float dHd = optim_dot(n, opt->d, opt->Hd);
 
-			if (opt->debug)
-				printf("  PENR CG: dHd = %+.6e  (iter_CG=%d)\n", dHd, opt->cpt_iter_CG);
+			if (opt->debug) {
+				float nd = optim_norm_l2(n, opt->d);
+				float nHd = optim_norm_l2(n, opt->Hd);
+				fprintf(stderr, "  PENR CG[%d]: dHd=%+.6e ||d||=%.4e ||Hd||=%.4e\n",
+				        opt->cpt_iter_CG, dHd, nd, nHd);
+			}
 
 			if (dHd <= 0.0f) {
 				/* Negative curvature: stop CG */
 				opt->conv_CG = 1;
 				if (opt->cpt_iter_CG == 0)
 					memcpy(opt->descent, opt->d, n * sizeof(float));
+
+				penr_cg_log(opt, 0, dHd);  /* Log negative curvature */
+				if (opt->debug)
+					fprintf(stderr, "  PENR CG: NEGATIVE CURVATURE at iter_CG=%d, dHd=%+.6e -> steepest descent\n",
+					        opt->cpt_iter_CG, dHd);
+
 				/* Go to linesearch */
 				opt->enr_comm = TRN_NSTE;
 				opt->CG_phase = CG_INIT;
@@ -491,10 +574,18 @@ void penriched_run(int n, float *x, float fcost, float *grad,
 			/* Save rho_old for beta computation after preconditioner */
 			opt->res_scal_respreco = rho_old;
 
+			penr_cg_log(opt, 0, dHd);  /* Log CG iteration */
+
 			/* Check stopping criterion */
 			if (opt->norm_residual <= opt->eta * opt->norm_grad ||
 			    opt->cpt_iter_CG >= opt->enr_maxcg) {
 				opt->conv_CG = 1;
+
+				if (opt->debug)
+					fprintf(stderr, "  PENR CG: converged at iter_CG=%d, ||r||=%.4e, eta*||g||=%.4e, maxcg=%d\n",
+					        opt->cpt_iter_CG, opt->norm_residual,
+					        opt->eta * opt->norm_grad, opt->enr_maxcg);
+
 				/* Go to linesearch */
 				opt->enr_comm = TRN_NSTE;
 				opt->CG_phase = CG_INIT;
