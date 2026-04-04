@@ -124,6 +124,7 @@ char *sdoc[] = {
 "   niter_cg=5         max inner CG iterations per TRN/Enriched step (algorithm=4,5,6,7)",
 "   eta=0.9            initial Eisenstat-Walker forcing term (0<eta<1, lower=tighter CG)",
 "   enr_l=20           L-BFGS cycle length for Enriched method (algorithm=5,7)",
+"   enr_t=2            initial HFN cycle length (algorithm=5,7, more=better curvature seeding)",
 "   lbfgs_mem=20       L-BFGS history pairs",
 "   nls_max=20         max linesearch iterations",
 "   vp_min=,vp_max=    Vp bounds (m/s, optional)",
@@ -1533,11 +1534,13 @@ int main(int argc, char **argv)
 			opt.eta = eta_init;  /* User-specified initial η (default 0.9 in optimizer) */
 	}
 
-	/* Enriched-specific: L-BFGS cycle length and max CG */
+	/* Enriched-specific: L-BFGS cycle length, HFN cycle length, max CG */
 	if (algorithm == 5 || algorithm == 7) {
-		int enr_l_val;
+		int enr_l_val, enr_t_val;
 		if (!getparint("enr_l", &enr_l_val)) enr_l_val = 20;
+		if (!getparint("enr_t", &enr_t_val)) enr_t_val = 2;
 		opt.enr_l = enr_l_val;
+		opt.enr_t = enr_t_val;
 		opt.enr_maxcg = niter_cg;
 	}
 

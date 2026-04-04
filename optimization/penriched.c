@@ -210,7 +210,7 @@ static void init_penriched(int n, float *x, float fcost, float *grad,
 	opt->enr_method = 1;
 	opt->enr_first = 1;
 	if (opt->enr_l <= 0) opt->enr_l = 20;
-	opt->enr_t = 2;
+	if (opt->enr_t <= 0) opt->enr_t = 2;
 	opt->enr_k = 0;
 	opt->enr_profit = 0;
 	opt->enr_force2 = 0;

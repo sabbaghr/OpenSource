@@ -115,7 +115,7 @@ static void init_enriched(int n, float *x, float fcost, float *grad,
 	opt->enr_method = 1;          /* 1 = HFN */
 	opt->enr_first = 1;           /* startup: first TRN phase */
 	if (opt->enr_l <= 0) opt->enr_l = 20;  /* default L-BFGS cycle */
-	opt->enr_t = 2;               /* initial TRN cycle length */
+	if (opt->enr_t <= 0) opt->enr_t = 2;  /* initial TRN cycle length */
 	opt->enr_k = 0;               /* step counter */
 	opt->enr_profit = 0;
 	opt->enr_force2 = 0;
