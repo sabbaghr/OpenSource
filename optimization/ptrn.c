@@ -123,6 +123,9 @@ static void descent_ptrn1(int n, float *grad, optim_type *opt,
 
 	dHd = optim_dot(n, opt->d, opt->Hd);
 
+	if (opt->debug)
+		printf("  PTRN CG: dHd = %+.6e  (iter_CG=%d)\n", dHd, opt->cpt_iter_CG);
+
 	if (dHd < 0.0f) {
 		/* Negative curvature detected */
 		opt->conv_CG = 1;
