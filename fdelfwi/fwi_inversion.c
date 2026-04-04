@@ -2282,6 +2282,31 @@ int main(int argc, char **argv)
 					write_iteration_model(opt_iter, x, &mod, &bnd, param);
 					if (scaling > 0)
 						scaling_normalize(x, nmodel, nparam, m0, m_shift);
+
+					/* Write descent direction (H^{-1}g for TRN, -Hk*g for L-BFGS)
+					 * as SU files for visualization of Hessian effect on gradient. */
+					if (opt.descent) {
+						float *d_phys = (float *)malloc(nvec * sizeof(float));
+						memcpy(d_phys, opt.descent, nvec * sizeof(float));
+						if (scaling > 0)
+							scaling_denormalize(d_phys, nmodel, nparam, m0, m_shift);
+						char dfn[512];
+						int elastic_d = (mod.ischeme > 2);
+						const char *pn1 = (param == 1) ? "lam" : "vp";
+						const char *pn2 = (param == 1) ? "mu" : "vs";
+						snprintf(dfn, sizeof(dfn), "descent_iter%03d_%s.su", opt_iter, pn1);
+						writesufile(dfn, d_phys, mod.nz, mod.nx,
+						            mod.z0, mod.x0, mod.dz, mod.dx);
+						if (elastic_d) {
+							snprintf(dfn, sizeof(dfn), "descent_iter%03d_%s.su", opt_iter, pn2);
+							writesufile(dfn, &d_phys[nmodel], mod.nz, mod.nx,
+							            mod.z0, mod.x0, mod.dz, mod.dx);
+						}
+						snprintf(dfn, sizeof(dfn), "descent_iter%03d_rho.su", opt_iter);
+						writesufile(dfn, &d_phys[(elastic_d ? 2 : 1) * nmodel],
+						            mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+						free(d_phys);
+					}
 				}
 
 				/* Verbose end-of-iteration diagnostics */
