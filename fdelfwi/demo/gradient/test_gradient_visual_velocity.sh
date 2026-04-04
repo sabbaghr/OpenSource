@@ -71,8 +71,8 @@ SMOOTH_HESS=10            # Hessian smoothing half-width (grid pts, 0=off)
 # Preconditioner boost (Yang et al. 2018, eq 48)
 # Tunable per-parameter scaling: boost weak parameters (density)
 BOOST_1=1                 # param 1 (lambda/Vp) boost
-BOOST_2=2                 # param 2 (mu/Vs) boost
-BOOST_3=10                # param 3 (rho) boost — compensate weak density sensitivity
+BOOST_2=1                # param 2 (mu/Vs) boost
+BOOST_3=1                # param 3 (rho) boost — compensate weak density sensitivity
 
 # Scaling bounds (for range normalization) 
 VP_MIN=1500;  VP_MAX=4500

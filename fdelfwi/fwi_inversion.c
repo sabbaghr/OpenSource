@@ -2248,6 +2248,18 @@ int main(int argc, char **argv)
 #ifdef USE_MPI
 			MPI_Bcast(&flag, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
+			/* After preconditioning, ptrn may return OPT_HESS (need
+			 * Hd for next CG step), OPT_GRAD (CG converged, need
+			 * gradient for linesearch), or OPT_PREC (shouldn't happen
+			 * in PTRN but safe).  Route to the correct handler.
+			 *
+			 * BUG FIX: previously used unconditional `continue` which
+			 * skipped handle_hess, causing descent_ptrn1 to use stale
+			 * Hd from the previous CG iteration. */
+			if (flag == OPT_HESS)
+				goto handle_hess;
+			if (flag == OPT_GRAD)
+				goto handle_grad;
 			continue;
 
 		} else if (flag == OPT_PREC && algorithm == 7) {

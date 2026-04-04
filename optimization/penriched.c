@@ -40,11 +40,20 @@ static void save_lbfgs_pair(int n, optim_type *opt,
 	int j;
 
 	if (opt->cpt_lbfgs <= opt->l) {
+		/* Buffer not full: append at next slot */
 		j = opt->cpt_lbfgs - 1;
 		memcpy(&opt->sk[j * n], s_vec, n * sizeof(float));
 		memcpy(&opt->yk[j * n], y_vec, n * sizeof(float));
 		opt->cpt_lbfgs++;
+	} else if (opt->enr_cg_borne > 0 && opt->enr_method == 1) {
+		/* Buffer full AND inside HFN inner CG: do NOT shift.
+		 * Shifting would corrupt the frozen pairs [0..enr_cg_borne-1]
+		 * that the CG preconditioner depends on.  The curvature info
+		 * from this (d,Hd) pair is not lost — it will be recaptured
+		 * by the outer (s,y) pair stored after the linesearch. */
+		return;
 	} else {
+		/* Buffer full, not in CG: shift left and append */
 		for (j = 0; j < opt->l - 1; j++) {
 			memcpy(&opt->sk[j * n], &opt->sk[(j + 1) * n],
 			       n * sizeof(float));

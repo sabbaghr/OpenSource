@@ -28,6 +28,10 @@
 /* External logging */
 void vmess(char *fmt, ...);
 
+/* SU file writer (writesufile.c) */
+int writesufile(char *filename, float *data, size_t n1, size_t n2,
+                float f1, float f2, float d1, float d2);
+
 /* File-scope state shared between build and apply */
 static int stored_blend_nz = 0;
 static int stored_nx = 0;
@@ -151,6 +155,14 @@ void buildBlockPrecond(
 		}
 		vmess("Precond: raw Lame H: |H_ll|=%.4e |H_mm|=%.4e |H_rr|=%.4e",
 		      max_h11, max_h22, max_h33);
+
+		/* Write raw Lamé Hessian diagonals (smoothed but pre-chain-rule) */
+		writesufile("hess_raw_lam.su", h11, nz, nx,
+		            mod->z0, mod->x0, mod->dz, mod->dx);
+		writesufile("hess_raw_mu.su", h22, nz, nx,
+		            mod->z0, mod->x0, mod->dz, mod->dx);
+		writesufile("hess_raw_rho.su", h33, nz, nx,
+		            mod->z0, mod->x0, mod->dz, mod->dx);
 	}
 
 	/* If param=2: chain rule Lamé → velocity.
@@ -307,16 +319,70 @@ void buildBlockPrecond(
 			      xmin, xmax);
 	}
 
-	/* Global damping (Métivier eq 38-39):
-	 *   C = max_j(P_jj)  over all params and grid points
-	 *   P_ii = P_ii + θ·C                                   */
-	double C_k = 0.0;
-	for (i = 0; i < nmodel; i++) {
-		if ((double)h11[i] > C_k) C_k = (double)h11[i];
-		if ((double)h22[i] > C_k) C_k = (double)h22[i];
-		if ((double)h33[i] > C_k) C_k = (double)h33[i];
+	/* Per-parameter diagnostics (after chain rule + m0² + taper) */
+	if (mpi_rank == 0) {
+		const char *vel_n[] = {"Vp", "Vs", "rho"};
+		const char *lam_n[] = {"lam", "mu", "rho"};
+		const char **pn = (param == 2) ? vel_n : lam_n;
+		double min1=1e30, max1=0, min2=1e30, max2=0, min3=1e30, max3=0;
+		double sum1=0, sum2=0, sum3=0;
+		int nz1=0, nz2=0, nz3=0;
+		for (i = 0; i < nmodel; i++) {
+			if (h11[i] > 0) { if (h11[i]<min1) min1=h11[i]; if (h11[i]>max1) max1=h11[i]; sum1+=h11[i]; nz1++; }
+			if (h22[i] > 0) { if (h22[i]<min2) min2=h22[i]; if (h22[i]>max2) max2=h22[i]; sum2+=h22[i]; nz2++; }
+			if (h33[i] > 0) { if (h33[i]<min3) min3=h33[i]; if (h33[i]>max3) max3=h33[i]; sum3+=h33[i]; nz3++; }
+		}
+		vmess("Precond: H̃ after chain rule + s²:");
+		vmess("  H̃_%s: min=%.4e max=%.4e mean=%.4e ratio=%.1f",
+		      pn[0], min1, max1, nz1>0?sum1/nz1:0, max1/(min1>0?min1:1));
+		vmess("  H̃_%s: min=%.4e max=%.4e mean=%.4e ratio=%.1f",
+		      pn[1], min2, max2, nz2>0?sum2/nz2:0, max2/(min2>0?min2:1));
+		vmess("  H̃_%s: min=%.4e max=%.4e mean=%.4e ratio=%.1f",
+		      pn[2], min3, max3, nz3>0?sum3/nz3:0, max3/(min3>0?min3:1));
+		vmess("  Inter-param ratio: max(H̃_%s)/max(H̃_%s)=%.1f  max(H̃_%s)/max(H̃_%s)=%.1f",
+		      pn[0], pn[1], max1/(max2>0?max2:1),
+		      pn[0], pn[2], max1/(max3>0?max3:1));
 	}
-	double beta = (double)precond_eps * C_k;
+
+	/* Write pre-β Hessian diagonals (after chain rule + m₀² + taper).
+	 * These are the values that β is computed from — lets you see
+	 * the scale differences between parameters before regularization. */
+	if (mpi_rank == 0) {
+		const char *pn1 = (param == 2) ? "vp" : "lam";
+		const char *pn2 = (param == 2) ? "vs" : "mu";
+		char fn[512];
+		snprintf(fn, sizeof(fn), "hess_prebeta_%s.su", pn1);
+		writesufile(fn, h11, nz, nx, mod->z0, mod->x0, mod->dz, mod->dx);
+		snprintf(fn, sizeof(fn), "hess_prebeta_%s.su", pn2);
+		writesufile(fn, h22, nz, nx, mod->z0, mod->x0, mod->dz, mod->dx);
+		writesufile("hess_prebeta_rho.su", h33, nz, nx,
+		            mod->z0, mod->x0, mod->dz, mod->dx);
+		vmess("Precond: wrote hess_prebeta_{%s,%s,rho}.su", pn1, pn2);
+	}
+
+	/* Per-parameter damping (corrected Métivier eq 38-39 for multi-parameter):
+	 *   C_k = max_x(H̃_kk(x))  per parameter class k=1,2,3
+	 *   β_k = θ · C_k
+	 *   P_kk = H̃_kk + β_k
+	 *
+	 * Métivier (2014) defined C = max_j(H̃_jj) for single-parameter
+	 * acoustic FWI.  For multi-parameter elastic, a global max causes
+	 * the dominant parameter (Vp) to swamp the damping of weaker
+	 * parameters (Vs, ρ), destroying their spatial illumination
+	 * structure.  Per-parameter β_k preserves O(1/θ) dynamic range
+	 * within each parameter's preconditioner.
+	 *
+	 * For the block preconditioner, A = H̃_block + diag(β_1,β_2,β_3)
+	 * remains SPD since H̃_block is PSD and diag(β) is PD. */
+	double C1 = 0.0, C2 = 0.0, C3 = 0.0;
+	for (i = 0; i < nmodel; i++) {
+		if ((double)h11[i] > C1) C1 = (double)h11[i];
+		if ((double)h22[i] > C2) C2 = (double)h22[i];
+		if ((double)h33[i] > C3) C3 = (double)h33[i];
+	}
+	double beta1 = (double)precond_eps * C1;
+	double beta2 = (double)precond_eps * C2;
+	double beta3 = (double)precond_eps * C3;
 
 	if (precond_mode == 3 || precond_mode == 5) {
 		/* ============================================================
@@ -340,9 +406,9 @@ void buildBlockPrecond(
 
 		/* Per grid point: Cramer's rule on (H̃_b + βI) in double */
 		for (i = 0; i < nmodel; i++) {
-			double a11 = (double)h11[i] + beta;
-			double a22 = (double)h22[i] + beta;
-			double a33 = (double)h33[i] + beta;
+			double a11 = (double)h11[i] + beta1;
+			double a22 = (double)h22[i] + beta2;
+			double a33 = (double)h33[i] + beta3;
 			double a12 = h12_vel ? (double)h12_vel[i] : 0.0;
 			double a13 = h13_vel ? (double)h13_vel[i] : 0.0;
 			double a23 = h23_vel ? (double)h23_vel[i] : 0.0;
@@ -373,18 +439,19 @@ void buildBlockPrecond(
 		}
 
 		if (mpi_rank == 0)
-			vmess("Precond: Block-diagonal (Wang et al. 2016), beta=%.4e", beta);
+			vmess("Precond: Block-diagonal (Wang et al. 2016), beta1=%.4e beta2=%.4e beta3=%.4e",
+			      beta1, beta2, beta3);
 
 		if (h12_vel) free(h12_vel);
 		if (h13_vel) free(h13_vel);
 		if (h23_vel) free(h23_vel);
 		h12_vel = h13_vel = h23_vel = NULL;
 	} else {
-		/* Diagonal preconditioner: store H̃_ii + β */
+		/* Diagonal preconditioner: store H̃_ii + β_k */
 		for (i = 0; i < nmodel; i++) {
-			P11[i] = (float)((double)h11[i] + beta);
-			P22[i] = (float)((double)h22[i] + beta);
-			P33[i] = (float)((double)h33[i] + beta);
+			P11[i] = (float)((double)h11[i] + beta1);
+			P22[i] = (float)((double)h22[i] + beta2);
+			P33[i] = (float)((double)h33[i] + beta3);
 		}
 		memset(P12, 0, nmodel * sizeof(float));
 		memset(P13, 0, nmodel * sizeof(float));
@@ -396,8 +463,8 @@ void buildBlockPrecond(
 		const char *lame_n[] = {"lam", "mu", "rho"};
 		const char *vel_n[]  = {"Vp", "Vs", "rho"};
 		const char **n = (param == 2) ? vel_n : lame_n;
-		vmess("Precond (Shin/Metivier): C_k=%.4e  theta=%.4e  beta=%.4e",
-		      C_k, precond_eps, beta);
+		vmess("Precond (Shin/Metivier): theta=%.4e  beta1=%.4e beta2=%.4e beta3=%.4e",
+		      precond_eps, beta1, beta2, beta3);
 
 		float min_all = P11[0], max_all = P11[0];
 		for (i = 0; i < nmodel; i++) {
