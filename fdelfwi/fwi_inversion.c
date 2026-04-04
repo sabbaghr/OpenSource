@@ -1881,10 +1881,20 @@ int main(int argc, char **argv)
 				           grad_preco_vec ? grad_preco_vec : grad_vec,
 				           &opt, &flag);
 				while (flag == OPT_PREC) {
-					/* Apply Yang block preconditioner to q_plb */
-					if (P11)
+					/* Apply P^{ν,θ} = ν · P^θ to q_plb with FIXED ν.
+					 * ν was computed from the gradient at the start of
+					 * this iteration (norm_preserve=1 in the grad_preco
+					 * call above).  Using norm_preserve=0 here avoids
+					 * recomputing ν from q_plb (an intermediate L-BFGS
+					 * vector, not the gradient), which would overwrite
+					 * the stored ν with a wrong value. */
+					if (P11) {
 						applyBlockPrecond(opt.q_plb, opt.q_plb,
-						    P11, P12, P13, P22, P23, P33, nmodel, nparam, 1);
+						    P11, P12, P13, P22, P23, P33, nmodel, nparam, 0);
+						float nu = getPrecondNu();
+						for (i = 0; i < nvec; i++)
+							opt.q_plb[i] *= nu;
+					}
 					plbfgs_run(nvec, x, fcost, grad_vec,
 					           grad_preco_vec ? grad_preco_vec : grad_vec,
 					           &opt, &flag);
