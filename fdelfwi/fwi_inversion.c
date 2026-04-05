@@ -2110,8 +2110,13 @@ int main(int argc, char **argv)
 				if (scaling > 0)
 					scaling_scale_gradient(grad_vec, nmodel, nparam, m0);
 
-				/* Build Yang block preconditioner and apply to gradient */
-				if (use_precond && hess_lam) {
+				/* Build Yang block preconditioner and apply to gradient.
+				 * During linesearch, do NOT rebuild the preconditioner —
+				 * the trial model produces different Hessian values that
+				 * corrupt P and make the Wolfe conditions inconsistent.
+				 * Only rebuild at the start of each outer iteration
+				 * (diag_new_iter is set when OPT_NSTE triggers). */
+				if (use_precond && hess_lam && diag_new_iter) {
 					buildBlockPrecond(hess_lam, hess_muu, hess_rho,
 					    hess_lam_muu, hess_lam_rho, hess_muu_rho,
 					    &mod, &bnd, param, elastic,
@@ -2121,6 +2126,8 @@ int main(int argc, char **argv)
 					    (use_precond == 1) ? wfld_energy : NULL,
 					    mod.x0, mod.x0 + (mod.nx-1)*mod.dx,
 					    use_precond);
+				}
+				if (use_precond && hess_lam) {
 					if (grad_preco_vec &&
 					    (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)) {
 						applyBlockPrecond(grad_preco_vec, grad_vec,
