@@ -1359,6 +1359,38 @@ int main(int argc, char **argv)
 	/* Extract initial model into optimizer vector */
 	extractModelVector(x, &mod, &bnd, param);
 
+	/* ============================================================ */
+	/* Save initial model in PHYSICAL units (before normalization).  */
+	/* Used by restoreFrozenParams and restoreWaterLayer, which run  */
+	/* after scaling_denormalize in the linesearch.                  */
+	/* ============================================================ */
+	float *x_frozen = (float *)malloc(nvec * sizeof(float));
+	memcpy(x_frozen, x, nvec * sizeof(float));
+
+	/* ============================================================ */
+	/* Build water mask BEFORE normalization (uses physical Vs).    */
+	/* ============================================================ */
+	int *water_mask = NULL;
+	{
+		int nwater = 0;
+		int i;
+		/* Vs is the 2nd parameter block in the model vector */
+		if (elastic) {
+			for (i = 0; i < nmodel; i++) {
+				if (x[nmodel + i] == 0.0f) nwater++;
+			}
+		}
+		if (nwater > 0) {
+			water_mask = (int *)calloc(nmodel, sizeof(int));
+			for (i = 0; i < nmodel; i++) {
+				if (x[nmodel + i] == 0.0f) water_mask[i] = 1;
+			}
+			if (mpi_rank == 0)
+				vmess("Water mask: %d cells frozen (Vs==0 in initial model, %.1f%% of grid)",
+				      nwater, 100.0 * nwater / nmodel);
+		}
+	}
+
 	/* Parameter scaling (Métivier, pers. comm.):
 	 *   0 = none (raw physical units)
 	 *   1 = Range normalization: m* = m / Δm,  Δm = m_max - m_min
@@ -1421,7 +1453,6 @@ int main(int argc, char **argv)
 	/* Parse active_params for selectable parameter updates          */
 	/* ============================================================ */
 	paramMask pmask = {1, 1, 1};  /* Default: all parameters active */
-	float *x_frozen = NULL;
 	{
 		char *active_str;
 		if (getparstring("active_params", &active_str)) {
@@ -1458,40 +1489,8 @@ int main(int argc, char **argv)
 			}
 		}
 
-		/* Save initial model for restoring frozen parameters */
-		if (!pmask.update_p1 || !pmask.update_p2 || !pmask.update_p3) {
-			x_frozen = (float *)malloc(nvec * sizeof(float));
-			memcpy(x_frozen, x, nvec * sizeof(float));
-		}
-	}
-
-	/* ============================================================ */
-	/* Build water mask: freeze cells where Vs==0 in initial model   */
-	/* ============================================================ */
-	int *water_mask = NULL;
-	{
-		int nwater = 0;
-		int i;
-		/* Vs is the 2nd parameter block in the model vector */
-		if (elastic) {
-			for (i = 0; i < nmodel; i++) {
-				if (x[nmodel + i] == 0.0f) nwater++;
-			}
-		}
-		if (nwater > 0) {
-			water_mask = (int *)calloc(nmodel, sizeof(int));
-			for (i = 0; i < nmodel; i++) {
-				if (x[nmodel + i] == 0.0f) water_mask[i] = 1;
-			}
-			/* Ensure x_frozen is available for restoring water cells */
-			if (!x_frozen) {
-				x_frozen = (float *)malloc(nvec * sizeof(float));
-				memcpy(x_frozen, x, nvec * sizeof(float));
-			}
-			if (mpi_rank == 0)
-				vmess("Water mask: %d cells frozen (Vs==0 in initial model, %.1f%% of grid)",
-				      nwater, 100.0 * nwater / nmodel);
-		}
+		/* x_frozen is already allocated above (in physical units,
+		 * before normalization) and is used by restoreFrozenParams. */
 	}
 
 	/* ============================================================ */
