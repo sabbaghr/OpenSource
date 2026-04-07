@@ -355,6 +355,47 @@ void restoreFrozenParams(float *x, const float *x_frozen,
 
 
 /*--------------------------------------------------------------------
+ * applyWaterMask -- Zero gradient/descent at water-layer cells.
+ *
+ * water_mask[i] == 1 means cell i is water (Vs==0 in initial model).
+ * Zeros all parameter blocks at those cells.
+ * Vector layout: [p1: nmodel | p2: nmodel | p3: nmodel].
+ *--------------------------------------------------------------------*/
+static void applyWaterMask(float *g, int nmodel, int nparam,
+                           const int *water_mask)
+{
+	if (!water_mask) return;
+	int ip, i;
+	for (ip = 0; ip < nparam; ip++) {
+		float *gp = g + ip * nmodel;
+		for (i = 0; i < nmodel; i++) {
+			if (water_mask[i]) gp[i] = 0.0f;
+		}
+	}
+}
+
+
+/*--------------------------------------------------------------------
+ * restoreWaterLayer -- Restore model values at water-layer cells
+ *                      from the saved initial model vector.
+ *--------------------------------------------------------------------*/
+static void restoreWaterLayer(float *x, const float *x_frozen,
+                              int nmodel, int nparam,
+                              const int *water_mask)
+{
+	if (!water_mask || !x_frozen) return;
+	int ip, i;
+	for (ip = 0; ip < nparam; ip++) {
+		float *xp = x + ip * nmodel;
+		const float *xf = x_frozen + ip * nmodel;
+		for (i = 0; i < nmodel; i++) {
+			if (water_mask[i]) xp[i] = xf[i];
+		}
+	}
+}
+
+
+/*--------------------------------------------------------------------
  * compute_fwi_gradient -- Compute total misfit and gradient.
  *
  * Distributes shots across MPI ranks, runs forward + residual +
@@ -1425,6 +1466,35 @@ int main(int argc, char **argv)
 	}
 
 	/* ============================================================ */
+	/* Build water mask: freeze cells where Vs==0 in initial model   */
+	/* ============================================================ */
+	int *water_mask = NULL;
+	{
+		int nwater = 0;
+		int i;
+		/* Vs is the 2nd parameter block in the model vector */
+		if (elastic) {
+			for (i = 0; i < nmodel; i++) {
+				if (x[nmodel + i] == 0.0f) nwater++;
+			}
+		}
+		if (nwater > 0) {
+			water_mask = (int *)calloc(nmodel, sizeof(int));
+			for (i = 0; i < nmodel; i++) {
+				if (x[nmodel + i] == 0.0f) water_mask[i] = 1;
+			}
+			/* Ensure x_frozen is available for restoring water cells */
+			if (!x_frozen) {
+				x_frozen = (float *)malloc(nvec * sizeof(float));
+				memcpy(x_frozen, x, nvec * sizeof(float));
+			}
+			if (mpi_rank == 0)
+				vmess("Water mask: %d cells frozen (Vs==0 in initial model, %.1f%% of grid)",
+				      nwater, 100.0 * nwater / nmodel);
+		}
+	}
+
+	/* ============================================================ */
 	/* Parse frequency band schedule (multiscale FWI)                */
 	/* ============================================================ */
 	bandPar bands;
@@ -1721,8 +1791,9 @@ int main(int argc, char **argv)
 			      file_grad, pn1, pn2);
 		}
 
-		/* Zero gradient for frozen parameters */
+		/* Zero gradient for frozen parameters and water layer */
 		applyParamMask(grad_vec, nmodel, nparam, &pmask);
+		applyWaterMask(grad_vec, nmodel, nparam, water_mask);
 
 		/* Capture raw gradient norm before scaling */
 		if (verbose >= 2) {
@@ -1751,6 +1822,7 @@ int main(int argc, char **argv)
 				applyBlockPrecond(grad_preco_vec, grad_vec,
 				    P11, P12, P13, P22, P23, P33, nmodel, nparam, 1);
 				applyParamMask(grad_preco_vec, nmodel, nparam, &pmask);
+				applyWaterMask(grad_preco_vec, nmodel, nparam, water_mask);
 			}
 			if (use_precond == 1 &&
 			    (algorithm == 0 || algorithm == 1 || algorithm == 4 || algorithm == 5)) {
@@ -1760,6 +1832,7 @@ int main(int argc, char **argv)
 				applyBlockPrecond(grad_vec, grad_vec,
 				    P11, P12, P13, P22, P23, P33, nmodel, nparam, 1);
 				applyParamMask(grad_vec, nmodel, nparam, &pmask);
+				applyWaterMask(grad_vec, nmodel, nparam, water_mask);
 			}
 			/* Write preconditioner and preconditioned gradient to SU files */
 			{
@@ -2016,8 +2089,9 @@ int main(int argc, char **argv)
 			if (scaling > 0)
 				scaling_denormalize(x, nmodel, nparam, m0, m_shift);
 
-			/* Restore frozen parameters to initial values */
+			/* Restore frozen parameters and water layer to initial values */
 			restoreFrozenParams(x, x_frozen, nmodel, nparam, &pmask);
+			restoreWaterLayer(x, x_frozen, nmodel, nparam, water_mask);
 
 			/* Broadcast new model vector from rank 0 */
 #ifdef USE_MPI
@@ -2097,8 +2171,9 @@ int main(int argc, char **argv)
 				extractGradientVector(grad_vec, grad1, grad2, grad3,
 				                      &mod, &bnd, param);
 
-				/* Zero gradient for frozen parameters */
+				/* Zero gradient for frozen parameters and water layer */
 				applyParamMask(grad_vec, nmodel, nparam, &pmask);
+				applyWaterMask(grad_vec, nmodel, nparam, water_mask);
 
 				/* Capture raw gradient norm before scaling */
 				if (verbose >= 2) {
@@ -2133,6 +2208,7 @@ int main(int argc, char **argv)
 						applyBlockPrecond(grad_preco_vec, grad_vec,
 						    P11, P12, P13, P22, P23, P33, nmodel, nparam, 1);
 						applyParamMask(grad_preco_vec, nmodel, nparam, &pmask);
+						applyWaterMask(grad_preco_vec, nmodel, nparam, water_mask);
 					}
 					if (use_precond == 1 &&
 					    (algorithm == 0 || algorithm == 1 || algorithm == 4 || algorithm == 5)) {
@@ -2140,6 +2216,7 @@ int main(int argc, char **argv)
 						applyBlockPrecond(grad_vec, grad_vec,
 						    P11, P12, P13, P22, P23, P33, nmodel, nparam, 1);
 						applyParamMask(grad_vec, nmodel, nparam, &pmask);
+						applyWaterMask(grad_vec, nmodel, nparam, water_mask);
 					}
 				}
 
@@ -2199,8 +2276,9 @@ int main(int argc, char **argv)
 			if (scaling > 0)
 				scaling_denormalize(opt.d, nmodel, nparam, m0, m_shift);
 
-			/* Zero perturbation for frozen parameters */
+			/* Zero perturbation for frozen parameters and water layer */
 			applyParamMask(opt.d, nmodel, nparam, &pmask);
+			applyWaterMask(opt.d, nmodel, nparam, water_mask);
 
 			/* Broadcast CG direction from rank 0 to all ranks */
 #ifdef USE_MPI
@@ -2216,8 +2294,9 @@ int main(int argc, char **argv)
 				grad_taper,
 				comp_weights, verbose);
 
-			/* Zero Hessian output for frozen parameters */
+			/* Zero Hessian output for frozen parameters and water layer */
 			applyParamMask(opt.Hd, nmodel, nparam, &pmask);
+			applyWaterMask(opt.Hd, nmodel, nparam, water_mask);
 
 			/* Re-normalize d and scale Hd to tilde-space */
 			if (scaling > 0) {
@@ -2501,6 +2580,7 @@ int main(int argc, char **argv)
 	/* ============================================================ */
 	free(x);
 	if (x_frozen) free(x_frozen);
+	if (water_mask) free(water_mask);
 	free(grad_vec);
 	if (grad_preco_vec) free(grad_preco_vec);
 	free(grad1); free(grad3);
