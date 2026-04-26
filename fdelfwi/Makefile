@@ -175,7 +175,7 @@ fwi_gpu_inversion:	$(OBJC) $(OPTIM_LIB) fdelfwi.h fdelfwi_gpu.h domain_decomp.h
 	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
 	$(CC) $(OPTIM_INC) $(CFLAGS) $(OPTC) -c updateModel.c
 	$(CC) $(OPTIM_INC) $(CFLAGS) $(OPTC) -DUSE_CUDA -c -o fwi_inversion_gpu.o fwi_inversion.c
-	$(NVCC) $(CUDA_FLAGS) -DUSE_CUDA -c -o domain_decomp.o domain_decomp.c
+	$(NVCC) $(CUDA_FLAGS) -DUSE_CUDA -x cu -c -o domain_decomp.o domain_decomp.c
 	$(NVCC) $(CUDA_FLAGS) -DUSE_CUDA -c -o fdelmodc_cuda.o fdelmodc_cuda.cu
 	$(NVCC) $(CUDA_FLAGS) -DUSE_CUDA -c -o fdelfwi_cuda.o fdelfwi_cuda.cu
 	$(NVCC) $(CUDA_FLAGS) -DUSE_CUDA -c -o fdelfwi_gpu.o fdelfwi_gpu.cu
