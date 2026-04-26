@@ -61,7 +61,7 @@ typedef struct _domainPar {
     int left_neighbor;      /* MPI rank of left neighbor (-1 if none) */
     int right_neighbor;     /* MPI rank of right neighbor (-1 if none) */
 
-    /* --- Staggered grid offsets (local, mirrors modPar io*/ie* fields) --- */
+    /* --- Staggered grid offsets (local, mirrors modPar ioXx/ieXx etc.) --- */
     int ioXx, ioXz, ieXx, ieXz;   /* Vx grid bounds */
     int ioZx, ioZz, ieZx, ieZz;   /* Vz grid bounds */
     int ioPx, ioPz, iePx, iePz;   /* P/Txx/Tzz grid bounds */
@@ -109,7 +109,7 @@ void domain_decomp_free(domainPar *dom);
  *====================================================================*/
 
 /*
- * domain_compute_stagger_offsets — Compute local io*/ie* bounds
+ * domain_compute_stagger_offsets — Compute local ioXx/ieXx bounds
  *
  * Maps global stagger offsets to local subdomain coordinates.
  * PML offsets only apply on ranks with physical boundaries.
