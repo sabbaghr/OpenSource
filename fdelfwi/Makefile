@@ -14,6 +14,14 @@ OPTIM_DIR = ../optimization
 OPTIM_LIB = $(OPTIM_DIR)/liboptim.a
 OPTIM_INC = -I$(OPTIM_DIR)
 
+# CUDA settings (enable with USE_CUDA=1 on command line)
+NVCC ?= nvcc
+# MIO: P100 (sm_60), Wendian: V100 (sm_70) / A100 (sm_80)
+# Override on command line: make ... CUDA_ARCH="-arch=sm_70"
+CUDA_ARCH ?= -arch=sm_60
+CUDA_FLAGS = -O3 --use_fast_math -lineinfo $(CUDA_ARCH) -Xcompiler "$(OPTC)"
+CUDA_LIBS = -lcudart -lstdc++
+
 all: fwi_inversion
 
 # FWI driver targets
@@ -160,6 +168,42 @@ $(PRG9):	$(OBJC) $(OPTIM_LIB) fdelfwi.h
 	$(MPICC) $(LDFLAGS) $(OPTIM_INC) $(CFLAGS) $(OPTC) -o $(PRG9) fwi_inversion_mpi.o updateModel.o \
 		$(OBJC) fileOpen.o writeRec.o $(OPTIM_LIB) $(LIBS)
 
+# GPU FWI inversion (single GPU, no MPI)
+gpu_inversion: fwi_gpu_inversion
+fwi_gpu_inversion:	$(OBJC) $(OPTIM_LIB) fdelfwi.h fdelfwi_gpu.h domain_decomp.h
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(OPTIM_INC) $(CFLAGS) $(OPTC) -c updateModel.c
+	$(CC) $(OPTIM_INC) $(CFLAGS) $(OPTC) -DUSE_CUDA -c -o fwi_inversion_gpu.o fwi_inversion.c
+	$(CC) $(CFLAGS) $(OPTC) -DUSE_CUDA -c -o domain_decomp.o domain_decomp.c
+	$(NVCC) $(CUDA_FLAGS) -DUSE_CUDA -c -o fdelmodc_cuda.o fdelmodc_cuda.cu
+	$(NVCC) $(CUDA_FLAGS) -DUSE_CUDA -c -o fdelfwi_cuda.o fdelfwi_cuda.cu
+	$(NVCC) $(CUDA_FLAGS) -DUSE_CUDA -c -o fdelfwi_gpu.o fdelfwi_gpu.cu
+	$(CC) $(LDFLAGS) $(OPTIM_INC) $(CFLAGS) $(OPTC) -o fwi_gpu_inversion \
+		fwi_inversion_gpu.o fdelfwi_gpu.o fdelmodc_cuda.o fdelfwi_cuda.o \
+		domain_decomp.o updateModel.o \
+		$(OBJC) fileOpen.o writeRec.o $(OPTIM_LIB) $(LIBS) $(CUDA_LIBS)
+
+# GPU+MPI FWI inversion (shot-parallel MPI + optional domain decomposition)
+# Usage: mpirun -np N fwi_mpi_gpu_inversion ... ndom=K
+#   N = K * nshot_groups (total ranks = GPUs/shot × concurrent shot groups)
+#   ndom=1: single GPU per shot, N = nshot_groups (backward compatible)
+#   ndom=K>1: K GPUs per shot with 1D X-axis domain decomposition + halo exchange
+mpi_gpu_inversion: fwi_mpi_gpu_inversion
+fwi_mpi_gpu_inversion:	$(OBJC) $(OPTIM_LIB) fdelfwi.h fdelfwi_gpu.h domain_decomp.h
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(OPTIM_INC) $(CFLAGS) $(OPTC) -c updateModel.c
+	$(MPICC) -c $(OPTIM_INC) $(CFLAGS) $(OPTC) -DUSE_CUDA -DUSE_MPI -o fwi_inversion_mpi_gpu.o fwi_inversion.c
+	$(MPICC) -c $(CFLAGS) $(OPTC) -DUSE_CUDA -DUSE_MPI -o domain_decomp.o domain_decomp.c
+	$(NVCC) $(CUDA_FLAGS) -DUSE_CUDA -DUSE_MPI -c -o fdelmodc_cuda.o fdelmodc_cuda.cu
+	$(NVCC) $(CUDA_FLAGS) -DUSE_CUDA -DUSE_MPI -c -o fdelfwi_cuda.o fdelfwi_cuda.cu
+	$(NVCC) $(CUDA_FLAGS) -DUSE_CUDA -DUSE_MPI -c -o fdelfwi_gpu.o fdelfwi_gpu.cu
+	$(MPICC) $(LDFLAGS) $(OPTIM_INC) $(CFLAGS) $(OPTC) -o fwi_mpi_gpu_inversion \
+		fwi_inversion_mpi_gpu.o fdelfwi_gpu.o fdelmodc_cuda.o fdelfwi_cuda.o \
+		domain_decomp.o updateModel.o \
+		$(OBJC) fileOpen.o writeRec.o $(OPTIM_LIB) $(LIBS) $(CUDA_LIBS)
+
 # Hessian symmetry dot product test
 $(PRG10):	$(OBJC) fdelfwi.h
 	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
@@ -186,9 +230,12 @@ clean:
 		rm -f core $(OBJC) *_mpi.o fileOpen.o writeRec.o updateModel.o \
 			fwi_driver.o fwi_driver_mpi.o \
 			fwi_inversion.o fwi_inversion_mpi.o \
+			fwi_inversion_gpu.o fwi_inversion_mpi_gpu.o \
+			fdelmodc_cuda.o fdelfwi_cuda.o fdelfwi_gpu.o domain_decomp.o \
 			test_wave_op_dp.o test_dotproduct.o test_taylor.o test_hessian_dp.o \
 			test_gradient_visual.o \
-			$(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7) $(PRG8) $(PRG9) $(PRG10) $(PRG12)
+			$(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7) $(PRG8) $(PRG9) $(PRG10) $(PRG12) \
+			fwi_gpu_inversion fwi_mpi_gpu_inversion
 
 realclean:
 		rm -f core $(OBJC) fileOpen.o writeRec.o updateModel.o \

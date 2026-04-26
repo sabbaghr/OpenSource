@@ -44,6 +44,13 @@
 #include "fdelfwi.h"
 #include "optim.h"
 
+#ifdef USE_CUDA
+#include "fdelfwi_gpu.h"
+/* File-scoped domain decomp state for compute_fwi_gradient access */
+static int s_ndom_fwi = 1;
+static domainPar *s_dom_fwi = NULL;
+#endif
+
 #define MAX(x,y) ((x) > (y) ? (x) : (y))
 #define MIN(x,y) ((x) < (y) ? (x) : (y))
 #define NINT(x) ((int)((x)>0.0?(x)+0.5:(x)-0.5))
@@ -504,9 +511,20 @@ static float compute_fwi_gradient(
 		snaPar sna_off = *sna;
 		sna_off.nsnap = 0;  /* No snapshots during inversion */
 
+#ifdef USE_CUDA
+		if (s_ndom_fwi > 1 && s_dom_fwi)
+			fdfwimodc_gpu_domain(mod, src, wav, bnd, rec, &sna_off,
+			              ixsrc, izsrc, src_nwav, ishot, shot->n, fileno,
+			              &chk, s_dom_fwi, 0);
+		else
+			fdfwimodc_gpu(mod, src, wav, bnd, rec, &sna_off,
+			              ixsrc, izsrc, src_nwav, ishot, shot->n, fileno,
+			              &chk, 0);
+#else
 		fdfwimodc(mod, src, wav, bnd, rec, &sna_off,
 		          ixsrc, izsrc, src_nwav, ishot, shot->n, fileno,
 		          &chk, 0);
+#endif
 
 		/* Compute synthetic hydrophone for elastic */
 		if (mod->ischeme > 2) {
@@ -565,6 +583,21 @@ static float compute_fwi_gradient(
 			 * The chain rule conversion to velocity (if param=2) is done
 			 * once at the end by extractGradientVector, avoiding double
 			 * conversion. See NOTE in adj_shot.c lines 213-215. */
+#ifdef USE_CUDA
+			if (s_ndom_fwi > 1 && s_dom_fwi)
+				adj_shot_gpu_domain(mod, src, wav, bnd, rec, &adj,
+				         ixsrc, izsrc, src_nwav, &chk, NULL,
+				         shot_grad1, shot_grad2, shot_grad3,
+				         s_dom_fwi,
+				         1, 0,
+				         shot_wfld_energy);
+			else
+				adj_shot_gpu(mod, src, wav, bnd, rec, &adj,
+				         ixsrc, izsrc, src_nwav, &chk, NULL,
+				         shot_grad1, shot_grad2, shot_grad3,
+				         1, 0,
+				         shot_wfld_energy);
+#else
 			adj_shot(mod, src, wav, bnd, rec, &adj,
 			         ixsrc, izsrc, src_nwav, &chk, NULL,
 			         shot_grad1, shot_grad2, shot_grad3,
@@ -576,6 +609,7 @@ static float compute_fwi_gradient(
 			         shot_hess_mr ? shot_hess_mr : hess_muu_rho,
 			         1, 0,
 			         shot_wfld_energy);
+#endif
 
 			freeResidual(&adj);
 		}
@@ -1094,6 +1128,12 @@ int main(int argc, char **argv)
 	int mpi_rank = 0, mpi_size = 1;
 	double t_start;
 
+#ifdef USE_CUDA
+	int ndom = 1;  /* GPUs per shot (domain decomposition factor, 1=single GPU) */
+	domainPar dom;
+	memset(&dom, 0, sizeof(domainPar));
+#endif
+
 	/* Model and simulation parameters */
 	modPar  mod;
 	recPar  rec;
@@ -1168,6 +1208,11 @@ int main(int argc, char **argv)
 	int srt_filtsize = 1;
 	if (!getparint("srt_filtsize", &srt_filtsize)) srt_filtsize = 1;
 	if (!getparint("scaling", &scaling)) scaling = 0;
+
+#ifdef USE_CUDA
+	if (!getparint("ndom", &ndom)) ndom = 1;
+	if (ndom < 1) verr("ndom must be >= 1");
+#endif
 
 	/* Misfit function: 0=L2 (default), 1=normalized cross-correlation */
 	int misfit_type_int;
@@ -1263,12 +1308,48 @@ int main(int argc, char **argv)
 		bnd.surface[ix] = bnd.surface[mod.iePx - 1];
 
 	/* ============================================================ */
+	/* GPU initialization (after model is loaded)                   */
+	/* ============================================================ */
+#ifdef USE_CUDA
+	{
+		int gpu_nsnap = (mod.nt + NINT(-mod.t0 / mod.dt)) / chk_skipdt + 1;
+
+		if (ndom > 1) {
+			/* Domain-decomposed multi-GPU mode.
+			 * domain_decomp_init creates two-level MPI communicators:
+			 *   domain_comm: ranks sharing one shot (halo exchange)
+			 *   shot_comm:   gradient reduction across shot groups
+			 * It also binds each rank to a GPU. */
+			domain_decomp_init(&dom, &mod, &bnd, ndom);
+
+			/* Override mpi_rank/size for shot distribution:
+			 * use shot_group_id instead of world_rank */
+			mpi_rank = dom.shot_group_id;
+			mpi_size = dom.nshot_groups;
+
+			/* Set file-scoped state for compute_fwi_gradient */
+			s_ndom_fwi = ndom;
+			s_dom_fwi = &dom;
+
+			fdelfwi_gpu_init_domain(&mod, &bnd, &rec, &dom, gpu_nsnap, verbose);
+		} else {
+			/* Single-GPU mode (no domain decomposition) */
+			fdelfwi_gpu_init(&mod, &bnd, &rec, gpu_nsnap, verbose);
+		}
+	}
+#endif
+
+	/* ============================================================ */
 	/* Print inversion summary                                      */
 	/* ============================================================ */
 	if (mpi_rank == 0) {
 		const char *alg_names[] = {"Steepest Descent", "L-BFGS", "PLBFGS", "PNLCG", "TRN", "Enriched", "PTRN", "PEnriched"};
 		vmess("*******************************************");
-#ifdef USE_MPI
+#if defined(USE_CUDA) && defined(USE_MPI)
+		vmess("***** GPU+MPI FWI INVERSION            *****");
+#elif defined(USE_CUDA)
+		vmess("***** GPU FWI INVERSION                *****");
+#elif defined(USE_MPI)
 		vmess("***** MPI FWI INVERSION               *****");
 #else
 		vmess("***** FWI INVERSION (Serial)           *****");
@@ -1276,7 +1357,16 @@ int main(int argc, char **argv)
 		vmess("*******************************************");
 		vmess("Total shots: %d", shot.n);
 #ifdef USE_MPI
+#ifdef USE_CUDA
+		if (ndom > 1) {
+			vmess("MPI ranks: %d (world), ndom=%d GPUs/shot, %d shot groups",
+			      dom.world_size, ndom, dom.nshot_groups);
+		} else {
+			vmess("MPI ranks: %d", mpi_size);
+		}
+#else
 		vmess("MPI ranks: %d", mpi_size);
+#endif
 #endif
 		vmess("Parameterization: %s", param == 1 ? "Lame" : "Velocity");
 		vmess("Algorithm: %s", alg_names[algorithm]);
@@ -2100,6 +2190,14 @@ int main(int argc, char **argv)
 			/* All ranks: inject model into FD arrays */
 			injectModelVector(x, &mod, &bnd, param);
 
+#ifdef USE_CUDA
+			/* Upload updated model to GPU */
+			if (s_ndom_fwi > 1 && s_dom_fwi)
+				fdelfwi_gpu_upload_model_domain(&mod, s_dom_fwi);
+			else
+				fdelfwi_gpu_upload_model(&mod);
+#endif
+
 			/* Re-normalize x back to tilde-space */
 			if (scaling > 0)
 				scaling_normalize(x, nmodel, nparam, m0, m_shift);
@@ -2602,6 +2700,11 @@ int main(int argc, char **argv)
 		free(src_nwav[i]);
 	free(src_nwav);
 	freeStoreSourceOnSurface();
+
+#ifdef USE_CUDA
+	fdelfwi_gpu_cleanup();
+	if (ndom > 1) domain_decomp_free(&dom);
+#endif
 
 #ifdef USE_MPI
 	MPI_Finalize();
