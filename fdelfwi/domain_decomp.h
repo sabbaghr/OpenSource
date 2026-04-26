@@ -119,48 +119,25 @@ void domain_compute_stagger_offsets(domainPar *dom, const modPar *mod,
 
 /*====================================================================
  * 4. HALO EXCHANGE
+ *
+ * These functions use cudaStream_t and are only visible from .cu files
+ * or files that include <cuda_runtime.h>. Plain C files (fwi_inversion.c)
+ * that include this header only need the structs and non-CUDA functions.
  *====================================================================*/
 
-/*
- * halo_buf_create — Allocate device-side halo send/recv buffers.
- *
- * Parameters:
- *   hbuf      [out]  — halo buffer struct
- *   nfields   [in]   — max fields per exchange (2 for vel, 3 for stress)
- *   halo      [in]   — stencil radius (= iorder/2)
- *   naz       [in]   — depth dimension
- */
 void halo_buf_create(haloBuf *hbuf, int nfields, int halo, int naz);
-
-/*
- * halo_buf_destroy — Free device halo buffers.
- */
 void halo_buf_destroy(haloBuf *hbuf);
 
-/*
- * halo_exchange_velocity — Exchange vx, vz halos between domain neighbors.
- *
- * Called AFTER velocity update kernel on interior, BEFORE border kernel.
- * Uses GPU-aware MPI if available, otherwise stages through pinned host.
- *
- * Parameters:
- *   d_vx, d_vz  [in/out] — device wavefield pointers (local subdomain)
- *   hbuf        [in]     — pre-allocated halo buffers
- *   dom         [in]     — domain decomposition info
- *   stream      [in]     — CUDA stream for pack/unpack kernels
- */
+#ifdef __CUDACC__
+/* Only visible when compiled with nvcc (cudaStream_t is defined) */
 void halo_exchange_velocity(float *d_vx, float *d_vz,
                              haloBuf *hbuf, const domainPar *dom,
                              cudaStream_t stream);
 
-/*
- * halo_exchange_stress — Exchange txx, tzz, txz halos.
- *
- * Called AFTER stress update kernel on interior, BEFORE border kernel.
- */
 void halo_exchange_stress(float *d_txx, float *d_tzz, float *d_txz,
                            haloBuf *hbuf, const domainPar *dom,
                            cudaStream_t stream);
+#endif
 
 /*====================================================================
  * 5. SOURCE / RECEIVER MAPPING

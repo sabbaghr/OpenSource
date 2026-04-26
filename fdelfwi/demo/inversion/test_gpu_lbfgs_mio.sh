@@ -35,7 +35,9 @@ module load libs/cuda/12.5
 module load libs/mkl/2024.2
 # Note: single GPU test, no MPI needed
 
-ROOT=/rcp3/software/codes/OpenSource_SL10
+# Auto-detect ROOT from script location
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 BIN=${ROOT}/bin
 FDELFWI=${ROOT}/fdelfwi
 CWP=/rcp3/software/codes/cwp/bin
@@ -62,7 +64,11 @@ cd ${FDELFWI}
 if [ ! -f fwi_gpu_inversion ] || [ fwi_inversion.c -nt fwi_gpu_inversion ] || \
    [ fdelfwi_gpu.cu -nt fwi_gpu_inversion ]; then
     echo "  Building fwi_gpu_inversion (sm_60 for P100)..."
-    make gpu_inversion CUDA_ARCH="-arch=sm_60" 2>&1 | tail -5
+    make gpu_inversion CUDA_ARCH="-arch=sm_60" 2>&1 | tee /tmp/gpu_build_$$.log | tail -20
+    if [ ! -f fwi_gpu_inversion ]; then
+        echo "  BUILD FAILED. See /tmp/gpu_build_$$.log"
+        exit 1
+    fi
     echo "  Build complete."
 else
     echo "  fwi_gpu_inversion is up to date."
@@ -152,7 +158,7 @@ FWI_PARAMS="file_cp=model_bg_cp.su file_cs=model_bg_cs.su file_den=model_bg_ro.s
     ntaper=100 grad_taper=20 res_taper=100 \
     left=4 right=4 top=4 bottom=4 \
     chk_skipdt=100 \
-    param=1 scaling=1 \
+    param=1 scaling=0 \
     comp=_rvz \
     file_obs=obs file_grad=gradient \
     algorithm=1 lbfgs_mem=5 \
