@@ -35,9 +35,8 @@ module load libs/cuda/12.5
 module load libs/mkl/2024.2
 # Note: single GPU test, no MPI needed
 
-# Auto-detect ROOT from script location
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+# Set ROOT — edit this path for your system
+ROOT=/rcp3/software/codes/OpenSource_MIO
 BIN=${ROOT}/bin
 FDELFWI=${ROOT}/fdelfwi
 CWP=/rcp3/software/codes/cwp/bin
