@@ -892,18 +892,18 @@ void cuda_launch_velocity_update(
               cuda_div_ceil(nz_max, BLOCK_Z));
 
     DISPATCH_ORDER(iorder,
-        update_velocity_kernel<4><<<grid, block, 0, stream>>>(
+        (update_velocity_kernel<4><<<grid, block, 0, stream>>>(
             wfl->vx, wfl->vz, wfl->txx, wfl->tzz, wfl->txz,
             dmod->rox, dmod->roz, n1,
-            ioXx, ioXz, ieXx, ieXz, ioZx, ioZz, ieZx, ieZz),
-        update_velocity_kernel<6><<<grid, block, 0, stream>>>(
+            ioXx, ioXz, ieXx, ieXz, ioZx, ioZz, ieZx, ieZz)),
+        (update_velocity_kernel<6><<<grid, block, 0, stream>>>(
             wfl->vx, wfl->vz, wfl->txx, wfl->tzz, wfl->txz,
             dmod->rox, dmod->roz, n1,
-            ioXx, ioXz, ieXx, ieXz, ioZx, ioZz, ieZx, ieZz),
-        update_velocity_kernel<8><<<grid, block, 0, stream>>>(
+            ioXx, ioXz, ieXx, ieXz, ioZx, ioZz, ieZx, ieZz)),
+        (update_velocity_kernel<8><<<grid, block, 0, stream>>>(
             wfl->vx, wfl->vz, wfl->txx, wfl->tzz, wfl->txz,
             dmod->rox, dmod->roz, n1,
-            ioXx, ioXz, ieXx, ieXz, ioZx, ioZz, ieZx, ieZz)
+            ioXx, ioXz, ieXx, ieXz, ioZx, ioZz, ieZx, ieZz))
     );
 }
 
@@ -924,18 +924,18 @@ void cuda_launch_stress_update(
               cuda_div_ceil(nz_max, BLOCK_Z));
 
     DISPATCH_ORDER(iorder,
-        update_stress_kernel<4><<<grid, block, 0, stream>>>(
+        (update_stress_kernel<4><<<grid, block, 0, stream>>>(
             wfl->vx, wfl->vz, wfl->txx, wfl->tzz, wfl->txz,
             dmod->l2m, dmod->lam, dmod->muu, n1,
-            ioPx, ioPz, iePx, iePz, ioTx, ioTz, ieTx, ieTz),
-        update_stress_kernel<6><<<grid, block, 0, stream>>>(
+            ioPx, ioPz, iePx, iePz, ioTx, ioTz, ieTx, ieTz)),
+        (update_stress_kernel<6><<<grid, block, 0, stream>>>(
             wfl->vx, wfl->vz, wfl->txx, wfl->tzz, wfl->txz,
             dmod->l2m, dmod->lam, dmod->muu, n1,
-            ioPx, ioPz, iePx, iePz, ioTx, ioTz, ieTx, ieTz),
-        update_stress_kernel<8><<<grid, block, 0, stream>>>(
+            ioPx, ioPz, iePx, iePz, ioTx, ioTz, ieTx, ieTz)),
+        (update_stress_kernel<8><<<grid, block, 0, stream>>>(
             wfl->vx, wfl->vz, wfl->txx, wfl->tzz, wfl->txz,
             dmod->l2m, dmod->lam, dmod->muu, n1,
-            ioPx, ioPz, iePx, iePz, ioTx, ioTz, ieTx, ieTz)
+            ioPx, ioPz, iePx, iePz, ioTx, ioTz, ieTx, ieTz))
     );
 }
 
