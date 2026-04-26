@@ -1,3 +1,6 @@
+#ifndef FDELFWI_H
+#define FDELFWI_H
+
 #include<stdlib.h>
 #include<stdio.h>
 #include<math.h>
@@ -430,4 +433,6 @@ void accumGradient_rho_Dsig(modPar *mod, bndPar *bnd,
 #else
 #define restrict
 #endif
+
+#endif /* FDELFWI_H */
 
