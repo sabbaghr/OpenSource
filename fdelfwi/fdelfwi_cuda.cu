@@ -26,7 +26,7 @@
 #include "cuda_utils.h"
 
 /* FD coefficients in constant memory (defined in fdelmodc_cuda.cu) */
-extern __constant__ float d_fd_coeff[4];
+__constant__ float d_fd_coeff[4];
 
 /* Forward declarations of device structs from fdelmodc_cuda.cu */
 struct _deviceWfl;

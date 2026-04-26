@@ -46,8 +46,10 @@
  * Supports up to 8th order (4 coefficients).
  *====================================================================*/
 
-/* Declared in fdelmodc_cuda.cu; extern here for other .cu files */
-extern __constant__ float d_fd_coeff[4];   /* c1, c2, c3, c4 */
+/* Each .cu file that uses FD coefficients must define its own:
+ *   __constant__ float d_fd_coeff[4];
+ * CUDA __constant__ variables are per-translation-unit.
+ * Use cuda_set_fd_coefficients() from fdelmodc_cuda.cu to upload values. */
 
 /*====================================================================
  * 3. STREAM MANAGEMENT
