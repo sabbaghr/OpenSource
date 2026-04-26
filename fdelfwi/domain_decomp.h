@@ -23,6 +23,10 @@
 #endif
 #include "fdelfwi.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*====================================================================
  * 1. DOMAIN DECOMPOSITION STRUCTURES
  *====================================================================*/
@@ -216,6 +220,10 @@ void domain_broadcast_model(float *model, int size, const domainPar *dom);
  * Returns: 5 × nax_local × naz × sizeof(float) for elastic.
  */
 size_t domain_checkpoint_size(const domainPar *dom, int ischeme);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* USE_CUDA */
 #endif /* DOMAIN_DECOMP_H */
