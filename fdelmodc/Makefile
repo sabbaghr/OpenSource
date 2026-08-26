@@ -8,7 +8,7 @@ ALLINC  = -I.
 #LIBS    += -L$L -lgenfft $(LIBSM)
 #OPTC = -g -Wall -fsignaling-nans -O0 -fopenmp
 #OPTC += -fopenmp -Waddress
-#OPTC +=  -qopt-report=5 -g
+#OPTC +=  -qopt-report -save-temps
 #OPTC +=  -O1 -g
 #OPTC +=  -O1 -g -fsanitize=address -fsanitize=bounds-strict -fsanitize=object-size
 #OPTC =  -fp-trap=invalid,overflow -traceback -g -O1 -qopenmp
@@ -36,6 +36,7 @@ SRCC	= $(PRG).c \
 		acoustic4_qr.c \
 		acoustic6.c \
 		acoustic16.c \
+		acousticALE4.c \
 		viscoacoustic4.c \
 		elastic4.c \
 		elastic4dc.c \
@@ -100,7 +101,6 @@ fdelmodc_mpi: $(OBJC) fdelmodc.h
 	$(MPICC) -DMPI $(CFLAGS) $(OPTC) -c writeRec.c 
 	$(MPICC) -DMPI $(CFLAGS) $(OPTC) -c fdelmodc.c 
 	$(MPICC) -DMPI $(CFLAGS) $(OPTC) $(LDFLAGS) -o fdelmodc_mpi $(OBJC) fileOpen.o writeRec.o $(LIBS)
-	cp -rp fdelmodc_mpi $B
 endif
 
 ifdef MPICC

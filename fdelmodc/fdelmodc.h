@@ -112,8 +112,10 @@ typedef struct _modelPar { /* Model Parameters */
 	/* attenuation / dissipative medium */
 	float Qp;
 	float Qs;
-	float fw;
+	float *fw;
 	float qr;
+	int   nfw;
+	float *weight;
 } modPar;
 
 typedef struct _waveletPar { /* Wavelet Parameters */
@@ -178,11 +180,13 @@ typedef struct _boundPar { /* Boundary Parameters */
 	float *tapx;
 	float *tapxz;
 	int cfree;
-	int ntap;
 	int *surface;
     int npml;
     float R; /* reflection at side of model */
     float m; /* scaling order */
+    float speed; /* speed of moving free surface */
+    int spskip;
+    int topadd;
     float *pml_Vx;
     float *pml_nzVx;
     float *pml_nxVz;

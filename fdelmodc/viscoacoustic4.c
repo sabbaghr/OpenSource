@@ -15,6 +15,37 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 
 int boundariesV(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float *l2m, float *lam, float *mul, int itime, int verbose);
 
+void gsls_update_memory(float *q, int imech, modPar mod, int idx, float div_v, float Tlm, float tss) {
+    int sizem;
+    float nom;
+
+    sizem = mod.nax*mod.naz;
+
+    nom = 1.0 / (1.0 + 0.5 * tss * mod.dt);
+
+    /* Update memory variable using the same equation as the single-mechanism model:
+     * q_n^{n+1} = nom * (q_n^n - 0.5*tss*dt*q_n^n + 0.5*Tlm*div_v*dt)
+     */
+    q[imech*sizem+idx] = nom * (q[imech*sizem+idx] - 0.5 * tss * mod.dt * q[imech*sizem+idx] +
+                                  0.5 * Tlm * div_v * mod.dt);
+}
+
+/*
+ * Accumulate total memory correction from all mechanisms
+ */
+float gsls_get_total_correction(float *q, modPar mod, int idx) {
+    int i, sizem;
+    float total = 0.0f;
+
+    sizem = mod.nax*mod.naz;
+
+    for (i = 0; i < mod.nfw; i++) {
+        total += mod.weight[i] * q[i*sizem+idx];
+    }
+
+    return total;
+}
+
 int viscoacoustic4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz, float *p, float *rox, float *roz, float *l2m, float *tss, float *tep, float *q, int verbose)
 {
 /*********************************************************************
@@ -64,15 +95,17 @@ int viscoacoustic4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, in
 ***********************************************************************/
 
 	float c1, c2;
-	int   ix, iz;
-	int   n1;
-	float ddt, Tpp, Tlm, *dxvx, *dzvz, nom;
+	int   ix, iz, idx, imech, nfw;
+	int   n1, sizem;
+	float ddt, Tpp, Tlm, *dxvx, *dzvz, nom, div_v, Tpp_total, q_total, tss_i, tep_i;
 
 
-	c1 = 9.0/8.0; 
-	c2 = -1.0/24.0;
-	n1  = mod.naz;
-	ddt = 1.0/mod.dt;
+	c1    = 9.0/8.0; 
+	c2    = -1.0/24.0;
+	n1    = mod.naz;
+	ddt   = 1.0/mod.dt;
+    sizem = mod.nax*mod.naz;
+    nfw = mod.nfw;
 
 	dxvx = (float *)malloc(n1*sizeof(float));
 	dzvz = (float *)malloc(n1*sizeof(float));
@@ -108,7 +141,7 @@ int viscoacoustic4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, in
 	boundariesP(mod, bnd, vx, vz, p, NULL, NULL, rox, roz, l2m, NULL, NULL, itime, verbose);
 
 	/* calculate p/tzz for all grid points except on the virtual boundary */
-#pragma omp	for private (iz,ix, Tpp, Tlm, nom) nowait schedule(guided,1)
+#pragma omp	for private (iz,ix, Tpp, Tlm, nom, q_total, div_v, idx, Tpp_total, tss_i, tep_i, imech) nowait schedule(guided,1)
 	for (ix=mod.ioPx; ix<mod.iePx; ix++) {
 #pragma simd
 		for (iz=mod.ioPz; iz<mod.iePz; iz++) {
@@ -125,15 +158,32 @@ int viscoacoustic4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, in
          * before the time step is applied to 1 and after the time-step of q 
          * see equation (13) of Robertson (1994). 
          */
-#pragma simd
+#pragma ivdep
 		for (iz=mod.ioPz; iz<mod.iePz; iz++) {
-			Tpp     = tep[ix*n1+iz]*tss[ix*n1+iz];
-			p[ix*n1+iz] -= l2m[ix*n1+iz]*Tpp*(dzvz[iz]+dxvx[iz]) + q[ix*n1+iz];
-			Tlm = (1.0-Tpp)*tss[ix*n1+iz]*l2m[ix*n1+iz];
-            nom = 1.0/(1.0+0.5*tss[ix*n1+iz]*mod.dt);
+            idx   = ix*n1*nfw + iz*nfw;
+            div_v = dxvx[iz] + dzvz[iz];
+#pragma unroll
+//#pragma loop_count min(1), max(8), avg(1)
+            for (imech = 0; imech < mod.nfw; imech++) {
+                tss_i=tss[imech+idx];
+                Tpp = tss_i * tep[imech+idx];
+                /* Elastic pressure contribution using weighted Tpp */
+                /* Add correction from previous GSLS memory variables */
+                p[ix*n1+iz] -= l2m[ix*n1+iz] * Tpp * div_v + mod.weight[imech] * q[imech+idx];
 
-            q[ix*n1+iz] = nom*( q[ix*n1+iz] - 0.5*tss[ix*n1+iz]*mod.dt*q[ix*n1+iz] + 0.5*Tlm*(dxvx[iz]+dzvz[iz])*mod.dt );
-            p[ix*n1+iz] -= q[ix*n1+iz];
+		        /* Update each mechanism using its local tss and tep */
+                Tlm = (1.0f - Tpp) * tss_i * l2m[ix*n1+iz];
+                nom = 1.0 / (1.0 + 0.5 * tss_i * mod.dt);
+
+                /* Update memory variable using the same equation as the single-mechanism model:
+                * q_n^{n+1} = nom * (q_n^n - 0.5*tss*dt*q_n^n + 0.5*Tlm*div_v*dt)
+                */
+                q[imech+idx] = nom * (q[imech+idx] * (1.0 - 0.5 * tss_i * mod.dt ) +
+                                  0.5 * Tlm * div_v * mod.dt);
+          
+                /* Apply correction from updated GSLS memory variables */ 
+                p[ix*n1+iz] -=  mod.weight[imech] * q[imech+idx];
+            }
 
 		}
 	}

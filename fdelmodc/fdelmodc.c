@@ -45,6 +45,8 @@ int acoustic2(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixs
 int acoustic4Block(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx,
 float *vz, float *p, float *rox, float *roz, float *l2m, int verbose);
 
+int acousticALE4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz, float *p, float *rox, float *roz, float *l2m, int verbose);
+
 int viscoacoustic4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz, float *p, float *rox, float *roz, float *l2m, float *tss, float *tep, float *q, int verbose);
 
 int elastic4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float *l2m, float *lam, float *mul, int verbose);
@@ -72,7 +74,7 @@ int writeRec(recPar rec, modPar mod, bndPar bnd, wavPar wav, int ixsrc, int izsr
 			 float *rec_vx, float *rec_vz, float *rec_txx, float *rec_tzz, float *rec_txz, 
 			 float *rec_p, float *rec_pp, float *rec_ss, float *rec_q, float *rec_udp, float *rec_udvz, float *rec_dxvx, float *rec_dzvz, int verbose);
 
-int writeSnapTimes(modPar mod, snaPar sna, bndPar bnd, wavPar wav,int ixsrc, int izsrc, int itime, 
+int writeSnapTimes(modPar mod, snaPar sna, bndPar bnd, srcPar src, wavPar wav,int ixsrc, int izsrc, int itime, 
 				   float *vx, float *vz, float *tzz, float *txx, float *txz, int verbose);
 
 int getBeamTimes(modPar mod, snaPar sna, float *vx, float *vz, float *tzz, float *txx, float *txz, 
@@ -108,11 +110,11 @@ char *sdoc[] = {
 "   dt= ............... read from file_src: if dt is set it will interpolate file_src to dt sampling",
 "" ,
 " OPTIONAL PARAMETERS:",
-"   ischeme=3 ......... 1=acoustic, 2=visco-acoustic 3=elastic, 4=visco-elastic, 5=double-couple",
+"   ischeme=3 ......... 1=acoustic, 2=visco-acoustic 3=elastic, 4=visco-elastic, 5=double-couple, -2=ALE-moving-free-surface",
 "   tmod=(nt-1)*dt .... total modeling time (nt from file_src)",
-"   ntaper=0 .......... length of taper in points at edges of model",
-"   npml=35 ........... length of PML layer in points at edges of model",
-"   R=1e-4 ............ the theoretical reflection coefficient at PML boundary",
+"   ntaper=0 .......... length of taper in points at edges of model (old: use npml)",
+"   npml=20 ........... length of PML layer in points at edges of model",
+"   R=1e-5 ............ the theoretical reflection coefficient at PML boundary",
 "   m=2.0 ............. scaling order of the PML sigma function ",
 "   tapfact=0.30 ...... taper strength: larger value gets stronger taper",
 "   For the 4 boundaries the options are:  1=free 2=pml 3=rigid 4=taper",
@@ -139,7 +141,7 @@ char *sdoc[] = {
 "   verbose=0 ......... silent mode; =1: display info",
 " ",
 " SHOT AND GENERAL SOURCE DEFINITION:",
-"   src_type=1 ........ 1=P 2=Txz 3=Tzz 4=Txx 5=S-pot 6=Fx 7=Fz 8=P-pot 9=double-couple 10=Fz by P 11=moment tensor 12=Fa",
+"   src_type=1 ........ 1=P 2=Txz 3=Tzz 4=Txx 5=S-pot 6=Fx 7=Fz 8=P-pot 9=double-couple 10=Fz by P 11=moment tensor 12=Fa 13=S-Zibi",
 "   src_orient=1 ...... orientation of the source",
 "                     - 1=monopole",
 "                     - 2=dipole +/- vertical oriented",
@@ -211,6 +213,29 @@ char *sdoc[] = {
 "   sna_type_txz=0 .... Txz registration _stxz",
 "   sna_type_pp=0 ..... P (divergence) registration _sP",
 "   sna_type_ss=0 ..... S (curl) registration _sS",
+"   sna_type_dzvz=0 ... dzVz registration _sdzvz",
+"   sna_type_dxvx=0 ... dxVx registration _sdxvx",
+"   rec_type_pp=0 ..... P (divergence) registration _rP",
+"   rec_type_ss=0 ..... S (curl) registration _rS",
+"   rec_type_q=0 ...... memory-variable of visco-acoustic modeling",
+"   rec_type_ud=0 ..... 1:pressure normalized decomposition in up and downgoing waves _ru, _rd",
+"   ................... 2:particle velocity normalized decomposition in up and downgoing waves _ru, _rd",
+"   ................... 3:flux normalized decomposition in up and downgoing waves _flup, _flip",
+"   kangle= ........... maximum wavenumber angle for decomposition",
+"   rec_int_vx=0  ..... interpolation of Vx receivers",
+"                     - 0=Vx->Vx (no interpolation)",
+"                     - 1=Vx->Vz",
+"                     - 2=Vx->Txx/Tzz(P)",
+"                     - 3=Vx->receiver position",
+"   rec_int_vz=0 ...... interpolation of Vz receivers",
+"                     - 0=Vz->Vz (no interpolation)",
+"                     - 1=Vz->Vx",
+"                     - 2=Vz->Txx/Tzz(P)",
+"                     - 3=Vz->receiver position",
+"   rec_int_p=0  ...... interpolation of P/Tzz receivers",
+"                     - 0=P->P (no interpolation)",
+"                     - 1=P->Vz",
+"                     - 2=P->Vx",
 "   sna_vxvztime=0 .... registration of vx/vx times",
 "                       The fd scheme is also staggered in time.",
 "                       Time at which vx/vz snapshots are written:",
@@ -338,9 +363,9 @@ int main(int argc, char **argv)
 	roz = (float *)calloc(sizem,sizeof(float));
 	l2m = (float *)calloc(sizem,sizeof(float));
 	if (mod.ischeme==2) {
-		tss = (float *)calloc(sizem,sizeof(float));
-		tep = (float *)calloc(sizem,sizeof(float));
-		q = (float *)calloc(sizem,sizeof(float));
+        tss=(float *)calloc(mod.nfw * sizem, sizeof(float));
+        tep=(float *)calloc(mod.nfw * sizem, sizeof(float));
+        q  =(float *)calloc(mod.nfw * sizem, sizeof(float));
 	}
 	if (mod.ischeme>2) {
 		lam = (float *)calloc(sizem,sizeof(float));
@@ -451,8 +476,8 @@ int main(int argc, char **argv)
 
     ioPx=mod.ioPx;
     ioPz=mod.ioPz;
-    if (bnd.lef==4 || bnd.lef==2) ioPx += bnd.ntap;
-    if (bnd.top==4 || bnd.top==2) ioPz += bnd.ntap;
+    //if (bnd.lef==4 || bnd.lef==2) ioPx += bnd.npml;
+    //if (bnd.top==4 || bnd.top==2) ioPz += bnd.npml;
 	if (rec.sinkvel) sinkvel=l2m[(rec.x[0]+ioPx)*n1+rec.z[0]+ioPz];
 	else sinkvel = 0.0;
 
@@ -650,6 +675,13 @@ shared (shot, bnd, mod, src, wav, rec, ixsrc, izsrc, it, src_nwav, verbose)
                      elastic4dc(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav, 
                             vx, vz, tzz, txx, txz, rox, roz, l2m, lam, mul, verbose);
 					break;
+				case -2 : /* ALE coordinate-transform acoustic with moving free surface */
+                    if (it==it0) {
+					acousticALE4(mod, src, wav, bnd, 0, ixsrc, izsrc, src_nwav,
+						vx, vz, tzz, rox, roz, l2m, verbose);
+                    it=it1;
+                    }
+					break;
 			}
 
 			/* write samples to file if rec.nt samples are calculated */
@@ -687,7 +719,7 @@ shared (shot, bnd, mod, src, wav, rec, ixsrc, izsrc, it, src_nwav, verbose)
 
 			/* write snapshots to output file(s) */
 			if (sna.nsnap) {
-				writeSnapTimes(mod, sna, bnd, wav, ixsrc, izsrc, it, vx, vz, tzz, txx, txz, verbose);
+				writeSnapTimes(mod, sna, bnd, src, wav, ixsrc, izsrc, it, vx, vz, tzz, txx, txz, verbose);
 			}
 
 			/* calculate beams */
@@ -846,7 +878,7 @@ gpu_post_shot:
 		free(p);
 		free(q);
 	}
-	if (bnd.ntap) {
+	if (bnd.npml) {
 		free(bnd.tapx);
 		free(bnd.tapz);
 		free(bnd.tapxz);

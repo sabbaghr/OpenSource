@@ -23,33 +23,38 @@ void vmess(char *fmt, ...);
 
 int applySource(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float *l2m, float **src_nwav, int verbose)
 {
-	int is0, ibndz, ibndx;
+	static int ibndz, ibndx;
 	int isrc, ix, iz, n1;
-	int id1, id2;
+	int id1, id2, is0;
 	float src_ampl, time, scl, dt, sdx;
 	float Mxx, Mzz, Mxz;
 	static int first=1;
 
-	if (src.type==6) {
-    	ibndz = mod.ioXz;
-    	ibndx = mod.ioXx;
-	}
-	else if (src.type==7) {
-    	ibndz = mod.ioZz;
-    	ibndx = mod.ioZx;
-	}
-	else if (src.type==2) {
-    	ibndz = mod.ioTz;
-    	ibndx = mod.ioTx;
-    	if (bnd.lef==4 || bnd.lef==2) ibndx += bnd.ntap;
-    	if (bnd.top==4 || bnd.top==2) ibndz += bnd.ntap;
-	}
-	else {	
-    	ibndz = mod.ioPz;
-    	ibndx = mod.ioPx;
-    	if (bnd.lef==4 || bnd.lef==2) ibndx += bnd.ntap;
-    	if (bnd.top==4 || bnd.top==2) ibndz += bnd.ntap;
-	}
+    if (first) {
+	    if (src.type==6) {
+    	    ibndz = mod.ioXz;
+    	    ibndx = mod.ioXx;
+	    }
+	    else if (src.type==7) {
+    	    ibndz = mod.ioZz;
+    	    ibndx = mod.ioZx;
+	    }
+	    else if (src.type==2) {
+    	    ibndz = mod.ioTz;
+    	    ibndx = mod.ioTx;
+    	    //if (bnd.lef==4 || bnd.lef==2) ibndx += bnd.npml;
+    	    //if (bnd.top==4 || bnd.top==2) ibndz += bnd.npml;
+    	    //if (bnd.top==5) ibndz += bnd.topadd;
+	    }
+	    else {	
+    	    ibndz = mod.ioPz;
+    	    ibndx = mod.ioPx;
+    	    //if (bnd.lef==4 || bnd.lef==2) ibndx += bnd.npml;
+    	    //if (bnd.top==4 || bnd.top==2) ibndz += bnd.npml;
+            //if (bnd.top==5) ibndz += bnd.topadd;
+        }
+        first = 0;
+   }
 
 	n1   = mod.naz;
 	dt   = mod.dt;
@@ -105,7 +110,7 @@ int applySource(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int i
 		/* delay not reached or no samples left in source wavelet? */
 		if ( (time < 0.0) || ((itime*dt+mod.t0) >= src.tend[isrc]) || id2 > wav.nt ) continue;
 		//if (isrc==0) fprintf(stderr,"isrc=%d id1=%d time=%f wav.nt=%d tbeg=%f tend=%f\n", isrc, id1, time, wav.nt, src.tbeg[isrc], src.tend[isrc]);
-//		fprintf(stderr,"isrc=%d ix=%d iz=%d src.x=%d src.z=%d\n", isrc, ix, iz, src.x[isrc], src.z[isrc]);
+		//fprintf(stderr,"isrc=%d ix=%d iz=%d src.x=%d src.z=%d\n", isrc, ix, iz, src.x[isrc], src.z[isrc]);
 
 		if (!src.multiwav) { /* only one wavelet for all sources */
 			src_ampl = src_nwav[0][id1]*(id2-time/dt) + src_nwav[0][id2]*(time/dt-id1);
@@ -348,6 +353,23 @@ int applySource(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int i
 				txx[ix*n1+iz] -= src.Mxx*src_ampl;
 				tzz[ix*n1+iz] -= src.Mzz*src_ampl;
 				txz[ix*n1+iz] -= src.Mxz*src_ampl;
+			} 
+/***********************************************************************
+* pure potential shear S source (experimental) with point at P position
+* Curl S-pot = CURL(F) = dF_x/dz - dF_z/dx
+***********************************************************************/
+			else if(src.type == 13) {
+				src_ampl = src_ampl*rox[ix*n1+iz]/(l2m[ix*n1+iz]);
+                /* second order derivatives */
+				vx[ix*n1+iz]     += c1*src_ampl*sdx;
+                vx[ix*n1+iz-1]   -= c1*src_ampl*sdx;
+				vx[ix*n1+iz+1]   += c2*src_ampl*sdx;
+                vx[ix*n1+iz-2]   -= c2*src_ampl*sdx;
+
+                vz[ix*n1+iz]     -= c1*src_ampl*sdx;
+				vz[(ix-1)*n1+iz] += c1*src_ampl*sdx;
+				vz[(ix+1)*n1+iz] -= c2*src_ampl*sdx;
+				vz[(ix-2)*n1+iz] += c2*src_ampl*sdx;
 			} /* src.type */
 		} /* ischeme */
 }
