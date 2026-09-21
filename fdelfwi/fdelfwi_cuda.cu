@@ -25,8 +25,37 @@
 #include <string.h>
 #include "cuda_utils.h"
 
-/* FD coefficients in constant memory (defined in fdelmodc_cuda.cu) */
+/* FD coefficients in constant memory (separate TU from fdelmodc_cuda.cu,
+ * must be initialized via cuda_set_fd_coefficients_adj() below) */
 __constant__ float d_fd_coeff[4];
+
+/*--------------------------------------------------------------------
+ * cuda_set_fd_coefficients_adj -- Upload FD coefficients to THIS TU.
+ *
+ * Because __constant__ variables are per-translation-unit,
+ * fdelmodc_cuda.cu's cuda_set_fd_coefficients() only writes to its
+ * own d_fd_coeff.  This function writes to fdelfwi_cuda.cu's copy.
+ *--------------------------------------------------------------------*/
+extern "C"
+void cuda_set_fd_coefficients_adj(int iorder)
+{
+    float h_coeff[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    if (iorder <= 4) {
+        h_coeff[0] = 9.0f / 8.0f;
+        h_coeff[1] = -1.0f / 24.0f;
+    } else if (iorder == 6) {
+        h_coeff[0] = 75.0f / 64.0f;
+        h_coeff[1] = -25.0f / 384.0f;
+        h_coeff[2] = 3.0f / 640.0f;
+    } else { /* iorder >= 8 */
+        h_coeff[0] = 1225.0f / 1024.0f;
+        h_coeff[1] = -245.0f / 3072.0f;
+        h_coeff[2] = 49.0f / 5120.0f;
+        h_coeff[3] = -5.0f / 7168.0f;
+    }
+    CUDA_CHECK(cudaMemcpyToSymbol(d_fd_coeff, h_coeff, 4 * sizeof(float)));
+}
 
 /* Forward declarations of device structs from fdelmodc_cuda.cu */
 struct _deviceWfl;

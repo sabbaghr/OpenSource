@@ -172,22 +172,31 @@ void bandpass_filter_obsdata(const char *file_obs, const char *comp_str,
 		}
 	}
 
-	/* Also filter hydrophone (rp) observed data if it exists */
-	for (ishot = 0; ishot < nshots; ishot++) {
-		snprintf(fname, sizeof(fname), "%s_%03d_rp.su", file_obs, ishot);
-		FILE *fp = fopen(fname, "r");
-		if (fp) {
-			fclose(fp);
-			if (iband == 0) {
-				snprintf(bkname, sizeof(bkname), "%s.unfilt", fname);
-				snprintf(cmd, sizeof(cmd), "cp \"%s\" \"%s\"", fname, bkname);
-				system(cmd);
-			} else {
-				snprintf(bkname, sizeof(bkname), "%s.unfilt", fname);
-				snprintf(cmd, sizeof(cmd), "cp \"%s\" \"%s\"", bkname, fname);
-				system(cmd);
+	/* Also filter hydrophone (rp) observed data if it exists
+	 * and _rp is NOT already in the component list (avoid double-filtering) */
+	{
+		int rp_in_comp = 0;
+		for (ic = 0; ic < ncomp; ic++) {
+			if (strcmp(comp_suffixes[ic], "_rp") == 0) { rp_in_comp = 1; break; }
+		}
+		if (!rp_in_comp) {
+			for (ishot = 0; ishot < nshots; ishot++) {
+				snprintf(fname, sizeof(fname), "%s_%03d_rp.su", file_obs, ishot);
+				FILE *fp = fopen(fname, "r");
+				if (fp) {
+					fclose(fp);
+					if (iband == 0) {
+						snprintf(bkname, sizeof(bkname), "%s.unfilt", fname);
+						snprintf(cmd, sizeof(cmd), "cp \"%s\" \"%s\"", fname, bkname);
+						system(cmd);
+					} else {
+						snprintf(bkname, sizeof(bkname), "%s.unfilt", fname);
+						snprintf(cmd, sizeof(cmd), "cp \"%s\" \"%s\"", bkname, fname);
+						system(cmd);
+					}
+					bandpass_filter_sufile(fname, flo, fhi);
+				}
 			}
-			bandpass_filter_sufile(fname, flo, fhi);
 		}
 	}
 }
@@ -225,13 +234,19 @@ void bandpass_filter_syndata(const char *file_rcv, const char *comp_str,
 		bandpass_filter_sufile(fname, flo, fhi);
 	}
 
-	/* Also filter hydrophone if it exists */
-	snprintf(fname, sizeof(fname), "%s_%03d_rp.su", file_rcv, fileno);
+	/* Also filter hydrophone if it exists and _rp not already in comp list */
 	{
-		FILE *fp = fopen(fname, "r");
-		if (fp) {
-			fclose(fp);
-			bandpass_filter_sufile(fname, flo, fhi);
+		int rp_in_comp = 0;
+		for (ic = 0; ic < ncomp; ic++) {
+			if (strcmp(comp_suffixes[ic], "_rp") == 0) { rp_in_comp = 1; break; }
+		}
+		if (!rp_in_comp) {
+			snprintf(fname, sizeof(fname), "%s_%03d_rp.su", file_rcv, fileno);
+			FILE *fp = fopen(fname, "r");
+			if (fp) {
+				fclose(fp);
+				bandpass_filter_sufile(fname, flo, fhi);
+			}
 		}
 	}
 }
@@ -263,8 +278,17 @@ void bandpass_cleanup_obsbackups(const char *file_obs, const char *comp_str,
 			         file_obs, ishot, comp_suffixes[ic]);
 			remove(bkname);
 		}
-		snprintf(bkname, sizeof(bkname), "%s_%03d_rp.su.unfilt",
-		         file_obs, ishot);
-		remove(bkname);
+		/* Clean hydrophone backup only if _rp not already in comp list */
+		{
+			int rp_in_comp = 0;
+			for (ic = 0; ic < ncomp; ic++) {
+				if (strcmp(comp_suffixes[ic], "_rp") == 0) { rp_in_comp = 1; break; }
+			}
+			if (!rp_in_comp) {
+				snprintf(bkname, sizeof(bkname), "%s_%03d_rp.su.unfilt",
+				         file_obs, ishot);
+				remove(bkname);
+			}
+		}
 	}
 }

@@ -19,108 +19,143 @@ makewave w=g2 fmax=35 t0=0.10 dt=$dt nt=4096 db=-40 file_out=G2.su verbose=1
 
 file_rcv=test_shot_obc_Psour.su
 
-fdelmodc \
-    ischeme=3 \
-    file_cp=reference_cp.su \
-    file_cs=reference_cs.su \
-    file_den=reference_ro.su \
-    file_rcv=$file_rcv \
-    file_src=G2.su \
-    dtrcv=0.004 \
-    src_type=1 \
-    src_orient=1 \
-    src_injectionrate=1 \
-    rec_type_vx=1 \
-    rec_type_vz=1 \
-    rec_type_tzz=1 \
-    rec_type_txz=1 \
-    rec_type_pp=1 \
-    rec_type_ss=1 \
-    xsrc=2500 \
-    zsrc=5 \
-    verbose=4 \
-    tmod=3.004 \
-    zrcva=400 \
-    xrcva=1500 \
-    rec_int_vx=2 \
-    rec_int_vz=2 \
-    rec_int_tzz=1 \
-    rec_int_txz=1 \
-    ntaper=$ntap \
-    left=4 right=4 top=1 bottom=4
+# fdelmodc \
+#     ischeme=3 \
+#     file_cp=reference_cp.su \
+#     file_cs=reference_cs.su \
+#     file_den=reference_ro.su \
+#     file_rcv=$file_rcv \
+#     file_src=G2.su \
+#     dtrcv=0.004 \
+#     src_type=1 \
+#     src_orient=1 \
+#     src_injectionrate=1 \
+#     rec_type_vx=1 \
+#     rec_type_vz=1 \
+#     rec_type_txx=1 \
+#     rec_type_tzz=1 \
+#     rec_type_txz=1 \
+#     rec_type_pp=1 \
+#     rec_type_ss=1 \
+#     xsrc=2500 \
+#     zsrc=5 \
+#     verbose=4 \
+#     tmod=3.004 \
+#     zrcva=400 \
+#     xrcva=1500 \
+#     rec_int_vx=2 \
+#     rec_int_vz=2 \
+#     rec_int_tzz=1 \
+#     rec_int_txz=1 \
+#     npml=30 R=1e-5 m=2.0 \
+#     left=2 right=2 top=1 bottom=2
 
 
-# Fz source
+# # Fz source
 
-file_rcv=test_shot_obc_Vzsour_rec.su
+# file_rcv=test_shot_obc_Vzsour_rec.su
         
-fdelmodc \
-    ischeme=3 \
-    file_cp=reference_cp.su \
-    file_cs=reference_cs.su \
-    file_den=reference_ro.su \
-    file_rcv=$file_rcv \
-    file_src=G2.su \
-    dtrcv=0.004 \
-    src_type=7 \
-    src_injectionrate=1 \
-    src_orient=1 \
-    rec_type_vx=1 \
-    rec_type_vz=1 \
-    rec_type_tzz=1 \
-    rec_type_txz=1 \
-    rec_type_pp=1 \
-    rec_type_ss=1 \
-    xsrc=1500 \
-    zsrc=400 \
-    verbose=4 \
-    tmod=3.004 \
-    zrcva=5 \
-    xrcva=2500 \
-    rec_int_vx=2 \
-    rec_int_vz=2 \
-    rec_int_tzz=0 \
-    rec_int_txz=0 \
-    left=4 right=4 top=1 bottom=4
+# fdelmodc \
+#     ischeme=3 \
+#     file_cp=reference_cp.su \
+#     file_cs=reference_cs.su \
+#     file_den=reference_ro.su \
+#     file_rcv=$file_rcv \
+#     file_src=G2.su \
+#     dtrcv=0.004 \
+#     src_type=7 \
+#     src_injectionrate=1 \
+#     src_orient=1 \
+#     rec_type_vx=1 \
+#     rec_type_vz=1 \
+#     rec_type_tzz=1 \
+#     rec_type_txz=1 \
+#     rec_type_pp=1 \
+#     rec_type_ss=1 \
+#     xsrc=1500 \
+#     zsrc=400 \
+#     verbose=4 \
+#     tmod=3.004 \
+#     zrcva=5 \
+#     xrcva=2500 \
+#     rec_int_vx=2 \
+#     rec_int_vz=2 \
+#     rec_int_tzz=0 \
+#     rec_int_txz=0 \
+#     npml=30 R=1e-5 m=2.0 \
+#     left=2 right=2 top=1 bottom=2
 
 
-file_rcv=test_shot_obc_Vxsour_rec.su
+# file_rcv=test_shot_obc_Vxsour_rec.su
  
-fdelmodc \
-    ischeme=3 \
-    file_cp=reference_cp.su \
-    file_cs=reference_cs.su \
-    file_den=reference_ro.su \
-    file_rcv=$file_rcv \
-    file_src=G2.su \
-    dtrcv=0.004 \
-    src_type=6 \
-    src_injectionrate=1 \
-    src_orient=1 \
-    rec_type_vx=1 \
-    rec_type_vz=1 \
-    rec_type_tzz=1 \
-    rec_type_txz=1 \
-    rec_type_pp=1 \
-    rec_type_ss=1 \
-    xsrc=1500 \
-    zsrc=400 \
-    verbose=4 \
-    tmod=3.004 \
-    zrcva=5 \
-    xrcva=2500 \
-    rec_int_vx=2 \
-    rec_int_vz=2 \
-    rec_int_tzz=0 \
-    rec_int_txz=0 \
-    ntaper=$ntap \
-    left=4 right=4 top=1 bottom=4
+# fdelmodc \
+#     ischeme=3 \
+#     file_cp=reference_cp.su \
+#     file_cs=reference_cs.su \
+#     file_den=reference_ro.su \
+#     file_rcv=$file_rcv \
+#     file_src=G2.su \
+#     dtrcv=0.004 \
+#     src_type=6 \
+#     src_injectionrate=1 \
+#     src_orient=1 \
+#     rec_type_vx=1 \
+#     rec_type_vz=1 \
+#     rec_type_tzz=1 \
+#     rec_type_txz=1 \
+#     rec_type_pp=1 \
+#     rec_type_ss=1 \
+#     xsrc=1500 \
+#     zsrc=400 \
+#     verbose=1 \
+#     tmod=3.004 \
+#     zrcva=5 \
+#     xrcva=2500 \
+#     rec_int_vx=2 \
+#     rec_int_vz=2 \
+#     rec_int_tzz=0 \
+#     rec_int_txz=0 \
+#     npml=30 R=1e-5 m=2.0 \
+#     left=2 right=2 top=1 bottom=2
 
-sugain scale=-1 < test_shot_obc_Vzsour_rec_rtzz.su > test_shot_obc_Vzsour_rec_rtzz_scale.su
-(suwind key=gx min=1500000 max=1500000 < test_shot_obc_Psour_rvz.su ; suwind key=gx min=2500000 max=2500000 < test_shot_obc_Vzsour_rec_rtzz_scale.su  ) | suxgraph &
+# sugain scale=-1 < test_shot_obc_Vzsour_rec_rtzz.su > test_shot_obc_Vzsour_rec_rtzz_scale.su
+# (suwind key=gx min=1500000 max=1500000 < test_shot_obc_Psour_rvz.su ; suwind key=gx min=2500000 max=2500000 < test_shot_obc_Vzsour_rec_rtzz_scale.su  ) | suxgraph &
 
-sugain scale=-1 < test_shot_obc_Vxsour_rec_rtzz.su > test_shot_obc_Vxsour_rec_rtzz_scale.su
-(suwind key=gx min=1500000 max=1500000 < test_shot_obc_Psour_rvx.su ; suwind key=gx min=2500000 max=2500000 < test_shot_obc_Vxsour_rec_rtzz_scale.su  ) | suxgraph
+# sugain scale=-1 < test_shot_obc_Vxsour_rec_rtzz.su > test_shot_obc_Vxsour_rec_rtzz_scale.su
+# (suwind key=gx min=1500000 max=1500000 < test_shot_obc_Psour_rvx.su ; suwind key=gx min=2500000 max=2500000 < test_shot_obc_Vxsour_rec_rtzz_scale.su  ) | suxgraph &
+
+# # P source at OBC => hydrophone at surface (reciprocal of shot 1)
+# file_rcv=test_shot_obc_Psour_OBC.su
+
+# fdelmodc \
+#     ischeme=3 \
+#     file_cp=reference_cp.su \
+#     file_cs=reference_cs.su \
+#     file_den=reference_ro.su \
+#     file_rcv=$file_rcv \
+#     file_src=G2.su \
+#     dtrcv=0.004 \
+#     src_type=1 \
+#     src_orient=1 \
+#     src_injectionrate=1 \
+#     rec_type_txx=1 \
+#     rec_type_tzz=1 \
+#     xsrc=1500 \
+#     zsrc=400 \
+#     verbose=1 \
+#     tmod=3.004 \
+#     zrcva=5 \
+#     xrcva=2500 \
+#     npml=30 R=1e-5 m=2.0 \
+#     left=2 right=2 top=1 bottom=2
+
+# Hydrophone P = 0.5*(Txx+Tzz): shot1 at OBC vs shot4 at surface
+suop2 test_shot_obc_Psour_rtxx.su test_shot_obc_Psour_rtzz.su op=sum | sugain scale=0.5 > test_shot_obc_Psour_rp.su
+suop2 test_shot_obc_Psour_OBC_rtxx.su test_shot_obc_Psour_OBC_rtzz.su op=sum | sugain scale=0.5 > test_shot_obc_Psour_OBC_rp.su
+
+# P-P reciprocity: hydrophone at OBC (P src at surface) vs hydrophone at surface (P src at OBC)
+(suwind key=gx min=1500000 max=1500000 < test_shot_obc_Psour_rp.su ; suwind key=gx min=2500000 max=2500000 < test_shot_obc_Psour_OBC_rp.su) | suxgraph title="P-P reciprocity: hydrophone" & 
+
 
 
 

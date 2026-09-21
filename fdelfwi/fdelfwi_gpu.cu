@@ -253,6 +253,56 @@ static int s_gpu_initialized = 0;
 
 
 /*====================================================================
+ * NaN DIAGNOSTIC — check one GPU float array for NaN/Inf
+ *====================================================================*/
+
+static int gpu_check_nan(const float *d_ptr, size_t n, const char *label,
+                         int it, cudaStream_t stream)
+{
+    /* Download a small strided sample to avoid full D2H copy */
+    const int NSAMP = 1024;
+    float buf[1024];
+    size_t stride = (n > (size_t)NSAMP) ? n / NSAMP : 1;
+    size_t ncheck = (n + stride - 1) / stride;
+    if (ncheck > (size_t)NSAMP) ncheck = NSAMP;
+
+    /* Sync stream so wavefield is up to date */
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    for (size_t i = 0; i < ncheck; i++) {
+        size_t idx = i * stride;
+        if (idx >= n) break;
+        CUDA_CHECK(cudaMemcpy(&buf[i], d_ptr + idx, sizeof(float),
+                              cudaMemcpyDeviceToHost));
+    }
+    for (size_t i = 0; i < ncheck; i++) {
+        if (isnan(buf[i]) || isinf(buf[i])) {
+            size_t idx = i * stride;
+            fprintf(stderr, "*** NaN/Inf detected: %s[%zu] = %e  at it=%d\n",
+                    label, idx, buf[i], it);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void gpu_nan_check_all(deviceWfl *wfl, size_t n, int it,
+                              cudaStream_t stream)
+{
+    int bad = 0;
+    bad |= gpu_check_nan(wfl->vx,  n, "vx",  it, stream);
+    bad |= gpu_check_nan(wfl->vz,  n, "vz",  it, stream);
+    bad |= gpu_check_nan(wfl->txx, n, "txx", it, stream);
+    bad |= gpu_check_nan(wfl->tzz, n, "tzz", it, stream);
+    bad |= gpu_check_nan(wfl->txz, n, "txz", it, stream);
+    if (bad) {
+        fprintf(stderr, "*** GPU NaN detected at time step %d — aborting\n", it);
+        exit(1);
+    }
+}
+
+
+/*====================================================================
  * GPU FORWARD TIME-STEP (one step, shared by forward and re-prop)
  *====================================================================*/
 
@@ -438,8 +488,9 @@ void fdelfwi_gpu_init(modPar *mod, bndPar *bnd, recPar *rec,
     /* Create CUDA streams */
     cuda_streams_create(&s_streams);
 
-    /* Upload FD coefficients */
+    /* Upload FD coefficients to both forward and adjoint TUs */
     cuda_set_fd_coefficients(mod->iorder);
+    cuda_set_fd_coefficients_adj(mod->iorder);
 
     /* Allocate and upload model */
     cuda_alloc_mod(&s_dmod, s_nax, s_naz);
@@ -451,7 +502,7 @@ void fdelfwi_gpu_init(modPar *mod, bndPar *bnd, recPar *rec,
 
     /* Upload boundary taper arrays */
     cuda_alloc_bnd(&s_dbnd, bnd->ntap, s_nax,
-                    bnd->tapz, bnd->tapx, bnd->tapxz, bnd->surface);
+                    bnd->tapx, bnd->tapz, bnd->tapxz, bnd->surface);
 
     /* Allocate gradient arrays on device */
     size_t bytes = s_field_size * sizeof(float);
@@ -472,6 +523,16 @@ void fdelfwi_gpu_init(modPar *mod, bndPar *bnd, recPar *rec,
     if (verbose)
         vmess("fdelfwi GPU initialized: nax=%d naz=%d iorder=%d",
               s_nax, s_naz, mod->iorder);
+
+    /* Verify model upload: check for NaN/Inf in device model arrays */
+    if (verbose > 1) {
+        gpu_check_nan(s_dmod.l2m, s_field_size, "l2m", -1, s_streams.compute);
+        gpu_check_nan(s_dmod.lam, s_field_size, "lam", -1, s_streams.compute);
+        gpu_check_nan(s_dmod.muu, s_field_size, "muu", -1, s_streams.compute);
+        gpu_check_nan(s_dmod.rox, s_field_size, "rox", -1, s_streams.compute);
+        gpu_check_nan(s_dmod.roz, s_field_size, "roz", -1, s_streams.compute);
+        vmess("GPU model upload verified (sampled NaN check)");
+    }
 }
 
 
@@ -573,6 +634,11 @@ int fdfwimodc_gpu(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
         /* One forward time step (velocity + source + boundary + stress) */
         gpu_forward_one_step(mod, src, wav, bnd, it, ixsrc, izsrc,
                              src_nwav, &s_wfl_fwd, s_streams.compute);
+
+        /* NaN diagnostic: check first 20 steps and every 100th step */
+        if (verbose > 1 && ishot == 0 && (it < 20 || it % 100 == 0)) {
+            gpu_nan_check_all(&s_wfl_fwd, s_field_size, it, s_streams.compute);
+        }
 
         /* --- Receiver extraction --- */
         if (rec->n > 0 && (((it - rec->delay) % rec->skipdt) == 0) &&
@@ -1205,8 +1271,9 @@ void fdelfwi_gpu_init_domain(modPar *mod, bndPar *bnd, recPar *rec,
     /* Create CUDA streams */
     cuda_streams_create(&s_streams);
 
-    /* Upload FD coefficients */
+    /* Upload FD coefficients to both forward and adjoint TUs */
     cuda_set_fd_coefficients(mod->iorder);
+    cuda_set_fd_coefficients_adj(mod->iorder);
 
     /* Allocate local model arrays */
     size_t local_bytes = s_field_size * sizeof(float);
@@ -1238,7 +1305,7 @@ void fdelfwi_gpu_init_domain(modPar *mod, bndPar *bnd, recPar *rec,
      * only touches columns within the PML zones which exist only on
      * physical-boundary ranks. Interior ranks' taper calls are no-ops. */
     cuda_alloc_bnd(&s_dbnd, bnd->ntap, s_nax,
-                    bnd->tapz, bnd->tapx, bnd->tapxz, bnd->surface);
+                    bnd->tapx, bnd->tapz, bnd->tapxz, bnd->surface);
 
     /* Allocate gradient arrays on device */
     CUDA_CHECK(cudaMalloc(&s_d_grad_lam, local_bytes));

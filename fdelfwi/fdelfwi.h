@@ -427,6 +427,50 @@ void accumGradient_rho_Dsig(modPar *mod, bndPar *bnd,
                             float dt,
                             float *grad_rho);
 
+/* --- acoustic4_adj.c: Acoustic discrete adjoint kernel --- */
+int acoustic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
+    float *vx, float *vz, float *p,
+    float *rox, float *roz, float *l2m,
+    int rec_delay, int rec_skipdt, int verbose);
+
+/* --- acoustic_gradient.c: Acoustic gradient imaging condition --- */
+void accumGradientAcoustic(modPar *mod, bndPar *bnd,
+    float *fwd_vx, float *fwd_vz,
+    float *fwd_vx_prev, float *fwd_vz_prev,
+    wflPar *wfl_adj, float dt,
+    float *grad_l2m, float *grad_rho,
+    float *hess_l2m, float *hess_rho,
+    float *wfld_energy);
+void convertGradientAcoustic(float *grad_l2m, float *grad_rho,
+    float *cp, float *rho, size_t sizem);
+
+/* --- toy2dac_scaling.c: TOY2DAC first-iteration scaling --- */
+float compute_toy2dac_scalingfactor(float *model_vec, float *grad_vec,
+    int nvec, int verbose);
+void apply_toy2dac_scaling(float *fcost, float *grad, int nvec, float sf);
+
+/* --- source_estimation.c: cc1 source amplitude estimation --- */
+float compute_cc1_shot(const char *syn_file, const char *obs_file,
+    int verbose);
+float compute_cc1_global(const char **syn_files, const char **obs_files,
+    int nshots, int verbose);
+
+/* --- regularization.c: Tikhonov + prior model --- */
+float tikhonov_cost(float *model, int nx, int nz, float dx,
+    float lambda, float lambda_x, float lambda_z,
+    const int *ibathy, int npar);
+void tikhonov_gradient(float *grad, float *model, int nx, int nz, float dx,
+    float lambda, float lambda_x, float lambda_z,
+    const int *ibathy, int npar);
+float prior_cost(float *model, float *prior, int n, float alpha);
+void prior_gradient(float *grad, float *model, float *prior, int n,
+    float alpha);
+
+/* --- shin_precond_acoustic.c: Shin diagonal preconditioner --- */
+void shin_apply_precond(float *grad_preco, const float *grad,
+    const float *hess_diag, int n, float eps_thresh,
+    float *norm_ratio_out);
+
 
 #if __STDC_VERSION__ >= 199901L
   /* "restrict" is a keyword */

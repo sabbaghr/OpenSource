@@ -559,6 +559,11 @@ void extractGradientVector(float *g, float *grad1, float *grad2, float *grad3,
 	if (param == 2 && elastic) {
 		convertGradientToVelocity(grad1, grad2, grad3,
 		                          mod->cp, mod->cs, mod->rho, sizem);
+	} else if (param == 2 && !elastic) {
+		/* Acoustic: kappa -> Vp chain rule */
+		void convertGradientAcoustic(float *grad_l2m, float *grad_rho,
+			float *cp, float *rho, size_t sizem);
+		convertGradientAcoustic(grad1, grad3, mod->cp, mod->rho, sizem);
 	}
 
 	/* Strip boundary: copy interior to flat vector */

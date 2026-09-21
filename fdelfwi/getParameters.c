@@ -621,13 +621,42 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
 	src_iz1=MAX(0,NINT((srcendz-sub_z0)/dz));
 	src_iz1=MIN(src_iz1,nz);
 
-	shot->x = (int *)calloc(shot->n,sizeof(int));
-	shot->z = (int *)calloc(shot->n,sizeof(int));
-	for (is=0; is<shot->n; is++) {
-		shot->x[is] = src_ix0+is*idxshot;
-		shot->z[is] = src_iz0+is*idzshot;
-		if (shot->x[is] > nx-1) shot->n = is-1;
-		if (shot->z[is] > nz-1) shot->n = is-1;
+	/* Check for shot position text file (overrides regular grid) */
+	{
+		char *shot_txt = NULL;
+		if (getparstring("shot_txt", &shot_txt)) {
+			FILE *fpshot = fopen(shot_txt, "r");
+			if (fpshot == NULL)
+				verr("Cannot open shot_txt file: %s", shot_txt);
+			/* Count lines */
+			int nshots_txt = 0;
+			while (!feof(fpshot)) if (fgetc(fpshot)=='\n') nshots_txt++;
+			fseek(fpshot, -1, SEEK_CUR);
+			if (fgetc(fpshot) != '\n') nshots_txt++;
+			rewind(fpshot);
+			shot->n = nshots_txt;
+			shot->x = (int *)calloc(shot->n, sizeof(int));
+			shot->z = (int *)calloc(shot->n, sizeof(int));
+			for (is = 0; is < shot->n; is++) {
+				float sx, sz;
+				if (fscanf(fpshot, "%e %e\n", &sx, &sz) != 2)
+					verr("shot_txt: cannot parse line %d", is);
+				shot->x[is] = MAX(0, MIN(NINT((sx - sub_x0) / dx), nx-1));
+				shot->z[is] = MAX(0, MIN(NINT((sz - sub_z0) / dz), nz-1));
+			}
+			fclose(fpshot);
+			if (verbose && pe == 0)
+				vmess("Read %d shot positions from %s", shot->n, shot_txt);
+		} else {
+			shot->x = (int *)calloc(shot->n, sizeof(int));
+			shot->z = (int *)calloc(shot->n, sizeof(int));
+			for (is=0; is<shot->n; is++) {
+				shot->x[is] = src_ix0+is*idxshot;
+				shot->z[is] = src_iz0+is*idzshot;
+				if (shot->x[is] > nx-1) shot->n = is-1;
+				if (shot->z[is] > nz-1) shot->n = is-1;
+			}
+		}
 	}
 
 	/* check if source array is defined */

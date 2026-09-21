@@ -50,6 +50,15 @@ int defineSource(wavPar wav, srcPar src, modPar mod, recPar rec,
 int allocStoreSourceOnSurface(srcPar src);
 int freeStoreSourceOnSurface(void);
 
+/* Acoustic forward/adjoint FD kernels */
+int acoustic4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime,
+    int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz,
+    float *p, float *rox, float *roz, float *l2m, int verbose);
+int acoustic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
+    float *vx, float *vz, float *p,
+    float *rox, float *roz, float *l2m,
+    int rec_delay, int rec_skipdt, int verbose);
+
 /* Forward FD kernels */
 int elastic4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime,
     int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz,
@@ -324,18 +333,26 @@ int main(int argc, char **argv)
 {
 		if (it == 0 && verbose > 2) threadAffinity();
 
-		if (mod.iorder == 4)
-			elastic4(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav,
-				fwd_vx, fwd_vz, fwd_tzz, fwd_txx, fwd_txz,
-				mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu, verbose);
-		else if (mod.iorder == 6)
-			elastic6(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav,
-				fwd_vx, fwd_vz, fwd_tzz, fwd_txx, fwd_txz,
-				mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu, verbose);
-		else if (mod.iorder == 8)
-			elastic8(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav,
-				fwd_vx, fwd_vz, fwd_tzz, fwd_txx, fwd_txz,
-				mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu, verbose);
+		if (mod.ischeme == 1) {
+			/* Acoustic: p is stored in fwd_tzz slot */
+			if (mod.iorder == 4)
+				acoustic4(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav,
+					fwd_vx, fwd_vz, fwd_tzz,
+					mod.rox, mod.roz, mod.l2m, verbose);
+		} else {
+			if (mod.iorder == 4)
+				elastic4(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav,
+					fwd_vx, fwd_vz, fwd_tzz, fwd_txx, fwd_txz,
+					mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu, verbose);
+			else if (mod.iorder == 6)
+				elastic6(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav,
+					fwd_vx, fwd_vz, fwd_tzz, fwd_txx, fwd_txz,
+					mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu, verbose);
+			else if (mod.iorder == 8)
+				elastic8(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav,
+					fwd_vx, fwd_vz, fwd_tzz, fwd_txx, fwd_txz,
+					mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu, verbose);
+		}
 }
 
 		/* Record wavefield at receiver positions.
@@ -355,7 +372,9 @@ int main(int argc, char **argv)
 				d_data[ir * it1 + it] = fwd_txx[rx * n1 + rz];
 			else if (rec_comp_id == 3)  /* tzz */
 				d_data[ir * it1 + it] = fwd_tzz[rx * n1 + rz];
-			else                        /* p = 0.5*(txx+tzz) */
+			else if (mod.ischeme == 1)  /* acoustic p: stored in tzz slot */
+				d_data[ir * it1 + it] = fwd_tzz[rx * n1 + rz];
+			else                        /* elastic p = 0.5*(txx+tzz) */
 				d_data[ir * it1 + it] = 0.5f * (fwd_txx[rx * n1 + rz] + fwd_tzz[rx * n1 + rz]);
 		}
 
@@ -524,8 +543,12 @@ int main(int argc, char **argv)
 		/* For stress source (P/explosive): extract BEFORE elastic4_adj.
 		 * Phase A1 doesn't modify stress, Phase A2 does. So extracting
 		 * here gives the correct value (before Phase A2 contamination). */
-		if (src.type == 1)
-			z_adj[it] = alpha * (adj_txx[src_ig] + adj_tzz[src_ig]);
+		if (src.type == 1) {
+			if (mod.ischeme == 1) /* acoustic: p stored in tzz only */
+				z_adj[it] = alpha * adj_tzz[src_ig];
+			else /* elastic: p = txx + tzz */
+				z_adj[it] = alpha * (adj_txx[src_ig] + adj_tzz[src_ig]);
+		}
 
 		/* ---- KERNEL: elastic adjoint FD step ---- */
 		/* applyAdjointSource inside the kernel handles ALL recording types:
@@ -536,21 +559,30 @@ int main(int argc, char **argv)
 {
 		if (it == it1 - 1 && verbose > 2) threadAffinity();
 
-		if (mod.iorder == 4)
-			elastic4_adj(mod, adj, bnd, it,
-				adj_vx, adj_vz, adj_tzz, adj_txx, adj_txz,
-				mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu,
-				/*rec_delay=*/0, /*rec_skipdt=*/1, verbose);
-		else if (mod.iorder == 6)
-			elastic6_adj(mod, adj, bnd, it,
-				adj_vx, adj_vz, adj_tzz, adj_txx, adj_txz,
-				mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu,
-				/*rec_delay=*/0, /*rec_skipdt=*/1, verbose);
-		else if (mod.iorder == 8)
-			elastic8_adj(mod, adj, bnd, it,
-				adj_vx, adj_vz, adj_tzz, adj_txx, adj_txz,
-				mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu,
-				/*rec_delay=*/0, /*rec_skipdt=*/1, verbose);
+		if (mod.ischeme == 1) {
+			/* Acoustic: p is stored in adj_tzz slot */
+			if (mod.iorder == 4)
+				acoustic4_adj(mod, adj, bnd, it,
+					adj_vx, adj_vz, adj_tzz,
+					mod.rox, mod.roz, mod.l2m,
+					/*rec_delay=*/0, /*rec_skipdt=*/1, verbose);
+		} else {
+			if (mod.iorder == 4)
+				elastic4_adj(mod, adj, bnd, it,
+					adj_vx, adj_vz, adj_tzz, adj_txx, adj_txz,
+					mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu,
+					/*rec_delay=*/0, /*rec_skipdt=*/1, verbose);
+			else if (mod.iorder == 6)
+				elastic6_adj(mod, adj, bnd, it,
+					adj_vx, adj_vz, adj_tzz, adj_txx, adj_txz,
+					mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu,
+					/*rec_delay=*/0, /*rec_skipdt=*/1, verbose);
+			else if (mod.iorder == 8)
+				elastic8_adj(mod, adj, bnd, it,
+					adj_vx, adj_vz, adj_tzz, adj_txx, adj_txz,
+					mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu,
+					/*rec_delay=*/0, /*rec_skipdt=*/1, verbose);
+		}
 }
 
 		/* ---- POST-KERNEL: force source extraction ---- */

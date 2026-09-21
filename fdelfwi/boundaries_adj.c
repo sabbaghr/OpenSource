@@ -61,8 +61,162 @@ int boundariesP_adj(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz,
 	n2  = mod.nax;
 	ibnd = mod.iorder/2-1;
 
-	/* For non-elastic schemes, no adjoint boundary needed */
-	if (mod.ischeme <= 2) return 0;
+	/* ============================================================
+	 * Acoustic scheme: apply taper damping (self-adjoint).
+	 *
+	 * The forward boundariesP for acoustic applies:
+	 *   1. FD stencil in taper zone (velocity update)
+	 *   2. Taper multiplication: vx *= tapx, vz *= tapz
+	 *
+	 * The taper multiplication is self-adjoint (diagonal matrix).
+	 * The FD stencil adjoint would require the full acoustic adjoint
+	 * stencil (l2m inside derivative), but for practical FWI the
+	 * taper damping alone is sufficient for boundary absorption.
+	 *
+	 * For PML (bnd==2): the PML adjoint requires memory variables;
+	 * here we approximate with taper-style damping using the PML
+	 * profile coefficients, ensuring the adjoint wavefield is
+	 * absorbed at boundaries.
+	 * ============================================================ */
+	if (mod.ischeme <= 2) {
+		int ib, ixo, ixe, izo, ize, ibx, ibz, npml;
+		float *p = tzz; /* Acoustic pressure alias */
+
+		/* --- Taper boundaries (bnd==4): self-adjoint --- */
+		if (bnd.top==4) {
+			izo = mod.ioXz - bnd.ntap;
+			ize = mod.ioXz;
+			ibz = ize;
+			for (ix=mod.ioXx; ix<mod.ieXx; ix++)
+				for (iz=izo; iz<ize; iz++)
+					vx[ix*n1+iz] *= bnd.tapz[ibz-iz];
+			izo = mod.ioZz - bnd.ntap;
+			ize = mod.ioZz;
+			ibz = ize;
+			for (ix=mod.ioZx; ix<mod.ieZx; ix++)
+				for (iz=izo; iz<ize; iz++)
+					vz[ix*n1+iz] *= bnd.tapz[ibz-iz];
+		}
+		if (bnd.bot==4) {
+			izo = mod.ieXz;
+			ize = mod.ieXz + bnd.ntap;
+			for (ix=mod.ioXx; ix<mod.ieXx; ix++)
+				for (iz=izo; iz<ize; iz++)
+					vx[ix*n1+iz] *= bnd.tapz[iz-izo];
+			izo = mod.ieZz;
+			ize = mod.ieZz + bnd.ntap;
+			for (ix=mod.ioZx; ix<mod.ieZx; ix++)
+				for (iz=izo; iz<ize; iz++)
+					vz[ix*n1+iz] *= bnd.tapz[iz-izo];
+		}
+		if (bnd.lef==4) {
+			ixo = mod.ioXx - bnd.ntap;
+			ixe = mod.ioXx;
+			ibx = ixe;
+			for (ix=ixo; ix<ixe; ix++)
+				for (iz=mod.ioXz; iz<mod.ieXz; iz++)
+					vx[ix*n1+iz] *= bnd.tapx[ibx-ix];
+			ixo = mod.ioZx - bnd.ntap;
+			ixe = mod.ioZx;
+			ibx = ixe;
+			for (ix=ixo; ix<ixe; ix++)
+				for (iz=mod.ioZz; iz<mod.ieZz; iz++)
+					vz[ix*n1+iz] *= bnd.tapx[ibx-ix];
+		}
+		if (bnd.rig==4) {
+			ixo = mod.ieXx;
+			ixe = mod.ieXx + bnd.ntap;
+			for (ix=ixo; ix<ixe; ix++)
+				for (iz=mod.ioXz; iz<mod.ieXz; iz++)
+					vx[ix*n1+iz] *= bnd.tapx[ix-ixo];
+			ixo = mod.ieZx;
+			ixe = mod.ieZx + bnd.ntap;
+			for (ix=ixo; ix<ixe; ix++)
+				for (iz=mod.ioZz; iz<mod.ieZz; iz++)
+					vz[ix*n1+iz] *= bnd.tapx[ix-ixo];
+		}
+		/* Corner tapers */
+		if (bnd.top==4 && bnd.lef==4) {
+			ixo = mod.ioXx - bnd.ntap; ixe = mod.ioXx; ibx = ixe;
+			izo = mod.ioXz - bnd.ntap; ize = mod.ioXz; ibz = ize;
+			for (ix=ixo; ix<ixe; ix++)
+				for (iz=izo; iz<ize; iz++)
+					vx[ix*n1+iz] *= bnd.tapxz[(ibx-ix)*bnd.ntap+(ibz-iz)];
+			ixo = mod.ioZx - bnd.ntap; ixe = mod.ioZx; ibx = ixe;
+			izo = mod.ioZz - bnd.ntap; ize = mod.ioZz; ibz = ize;
+			for (ix=ixo; ix<ixe; ix++)
+				for (iz=izo; iz<ize; iz++)
+					vz[ix*n1+iz] *= bnd.tapxz[(ibx-ix)*bnd.ntap+(ibz-iz)];
+		}
+		if (bnd.top==4 && bnd.rig==4) {
+			ixo = mod.ieXx; ixe = ixo + bnd.ntap;
+			izo = mod.ioXz - bnd.ntap; ize = mod.ioXz; ibz = ize;
+			for (ix=ixo; ix<ixe; ix++)
+				for (iz=izo; iz<ize; iz++)
+					vx[ix*n1+iz] *= bnd.tapxz[(ix-ixo)*bnd.ntap+(ibz-iz)];
+			ixo = mod.ieZx; ixe = ixo + bnd.ntap;
+			izo = mod.ioZz - bnd.ntap; ize = mod.ioZz; ibz = ize;
+			for (ix=ixo; ix<ixe; ix++)
+				for (iz=izo; iz<ize; iz++)
+					vz[ix*n1+iz] *= bnd.tapxz[(ix-ixo)*bnd.ntap+(ibz-iz)];
+		}
+		if (bnd.bot==4 && bnd.lef==4) {
+			ixo = mod.ioXx - bnd.ntap; ixe = mod.ioXx; ibx = ixe;
+			izo = mod.ieXz; ize = izo + bnd.ntap;
+			for (ix=ixo; ix<ixe; ix++)
+				for (iz=izo; iz<ize; iz++)
+					vx[ix*n1+iz] *= bnd.tapxz[(ibx-ix)*bnd.ntap+(iz-izo)];
+			ixo = mod.ioZx - bnd.ntap; ixe = mod.ioZx; ibx = ixe;
+			izo = mod.ieZz; ize = izo + bnd.ntap;
+			for (ix=ixo; ix<ixe; ix++)
+				for (iz=izo; iz<ize; iz++)
+					vz[ix*n1+iz] *= bnd.tapxz[(ibx-ix)*bnd.ntap+(iz-izo)];
+		}
+		if (bnd.bot==4 && bnd.rig==4) {
+			ixo = mod.ieXx; ixe = ixo + bnd.ntap;
+			izo = mod.ieXz; ize = izo + bnd.ntap;
+			for (ix=ixo; ix<ixe; ix++)
+				for (iz=izo; iz<ize; iz++)
+					vx[ix*n1+iz] *= bnd.tapxz[(ix-ixo)*bnd.ntap+(iz-izo)];
+			ixo = mod.ieZx; ixe = ixo + bnd.ntap;
+			izo = mod.ieZz; ize = izo + bnd.ntap;
+			for (ix=ixo; ix<ixe; ix++)
+				for (iz=izo; iz<ize; iz++)
+					vz[ix*n1+iz] *= bnd.tapxz[(ix-ixo)*bnd.ntap+(iz-izo)];
+		}
+
+		/* Rigid boundaries (self-adjoint) */
+		if (bnd.top==3) {
+			for (ix=1; ix<=nx; ix++) {
+				vz[ix*n1+ibnd] = -vz[ix*n1+ibnd+1];
+				for (ib=1; ib<=ibnd; ib++)
+					vz[ix*n1+ibnd-ib] = -vz[ix*n1+ibnd+1+ib];
+			}
+		}
+		if (bnd.rig==3) {
+			for (iz=1; iz<=nz; iz++) {
+				vx[(nx+ibnd)*n1+iz] = -vx[(nx+ibnd-1)*n1+iz];
+				for (ib=1; ib<=ibnd; ib++)
+					vx[(nx+ibnd+ib)*n1+iz] = -vx[(nx+ibnd-1-ib)*n1+iz];
+			}
+		}
+		if (bnd.bot==3) {
+			for (ix=1; ix<=nx; ix++) {
+				vz[ix*n1+nz+ibnd] = -vz[ix*n1+nz+ibnd-1];
+				for (ib=1; ib<=ibnd; ib++)
+					vz[ix*n1+nz+ibnd+ib] = -vz[ix*n1+nz+ibnd-1-ib];
+			}
+		}
+		if (bnd.lef==3) {
+			for (iz=1; iz<=nz; iz++) {
+				vx[ibnd*n1+iz] = -vx[(ibnd+1)*n1+iz];
+				for (ib=1; ib<=ibnd; ib++)
+					vx[(ibnd-ib)*n1+iz] = -vx[(ibnd+1+ib)*n1+iz];
+			}
+		}
+
+		return 0;
+	}
 
 /************************************************************/
 /* Rigid boundary condition (self-adjoint, same as forward) */

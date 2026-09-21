@@ -125,6 +125,12 @@ int adj_shot_gpu_domain(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
  *--------------------------------------------------------------------*/
 void fdelfwi_gpu_cleanup(void);
 
+/*--------------------------------------------------------------------
+ * cuda_set_fd_coefficients_adj -- Upload FD coefficients to the
+ * adjoint kernel translation unit (fdelfwi_cuda.cu).
+ *--------------------------------------------------------------------*/
+void cuda_set_fd_coefficients_adj(int iorder);
+
 #ifdef __cplusplus
 }
 #endif

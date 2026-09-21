@@ -73,12 +73,12 @@ int readEmModel(modPar mod, bndPar bnd, float *eprs, float *ksigma, float *mu)
 	ioPx=mod.ioPx;
 	ioPz=mod.ioPz;
     if (bnd.lef==4 || bnd.lef==2) {
-		ioPx += bnd.ntap;
-		ioTx += bnd.ntap;
+		ioPx += bnd.npml;
+		ioTx += bnd.npml;
 	}
     if (bnd.top==4 || bnd.top==2) {
-		ioPz += bnd.ntap;
-		ioTz += bnd.ntap;
+		ioPz += bnd.npml;
+		ioTz += bnd.npml;
 	}
 
 /* open files and read first header */
@@ -159,7 +159,7 @@ int readEmModel(modPar mod, bndPar bnd, float *eprs, float *ksigma, float *mu)
         
         /* eprs field */
         ixo = mod.ioPx;
-        ixe = mod.ioPx+bnd.ntap;
+        ixe = mod.ioPx+bnd.npml;
         izo = mod.ioPz;
         ize = mod.iePz;
         for (ix=ixo; ix<ixe; ix++) {
@@ -174,7 +174,7 @@ int readEmModel(modPar mod, bndPar bnd, float *eprs, float *ksigma, float *mu)
     if (bnd.rig==4 || bnd.rig==2) {
         
         /* eprs field */
-        ixo = mod.iePx-bnd.ntap;
+        ixo = mod.iePx-bnd.npml;
         ixe = mod.iePx;
         izo = mod.ioPz;
         ize = mod.iePz;
@@ -193,7 +193,7 @@ int readEmModel(modPar mod, bndPar bnd, float *eprs, float *ksigma, float *mu)
         ixo = mod.ioPx;
         ixe = mod.iePx;
         izo = mod.ioPz;
-        ize = mod.ioPz+bnd.ntap;
+        ize = mod.ioPz+bnd.npml;
         for (ix=ixo; ix<ixe; ix++) {
             for (iz=izo; iz<ize; iz++) {
                 eprs[ix*n1+iz] = eprs[ix*n1+ize];
@@ -208,7 +208,7 @@ int readEmModel(modPar mod, bndPar bnd, float *eprs, float *ksigma, float *mu)
         /* eprs field */
         ixo = mod.ioPx;
         ixe = mod.iePx;
-        izo = mod.iePz-bnd.ntap;
+        izo = mod.iePz-bnd.npml;
         ize = mod.iePz;
         for (ix=ixo; ix<ixe; ix++) {
             for (iz=izo; iz<ize; iz++) {

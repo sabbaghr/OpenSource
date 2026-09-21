@@ -51,7 +51,7 @@ makewave fp=20 dt=$dt file_out=wave.su nt=4096 t0=0.1
     ntaper=100 \
     sna_type_p=0 \
     sna_type_vz=1 \
-    xsnap1=-2250 xsnap2=2250 zsnap1=0 zsnap2=2000 \
+    xsnap1=-2250 xsnasuxmop2=2250 zsnap1=0 zsnap2=2000 \
     dxsnap=10 dzsnap=10 tsnap1=0.1 tsnap2=2.1 dtsnap=0.005 \
     left=4 right=4 top=4 bottom=4
 

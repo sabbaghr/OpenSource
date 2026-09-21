@@ -158,6 +158,16 @@ char *sdoc[] = {
 "   niter_band=         max iterations per band, comma-separated (default: niter for each)",
 "                        example: freq_lo=2,2,2 freq_hi=5,10,20 niter_band=5,10,15",
 " ",
+" TOY2DAC-compatible acoustic FWI options:",
+"   scaling_mode=0     0=Brossier range scaling (default), 1=TOY2DAC 10e-4 scaling",
+"   src_estim=0        source estimation: 0=off, 1=global cc1, 2=per-shot cc1",
+"   tik_lambda=0       Tikhonov regularization strength (0=off)",
+"   tik_lx=1           Tikhonov horizontal weight",
+"   tik_lz=1           Tikhonov vertical weight",
+"   prior_lambda=0     prior model regularization strength (0=off)",
+"   shin_precond=0     Shin diagonal preconditioner for acoustic (0=off, 1=on)",
+"   shin_eps=1e-4      Shin preconditioner threshold parameter",
+" ",
 NULL};
 
 
@@ -1209,6 +1219,31 @@ int main(int argc, char **argv)
 	if (!getparint("srt_filtsize", &srt_filtsize)) srt_filtsize = 1;
 	if (!getparint("scaling", &scaling)) scaling = 0;
 
+	/* TOY2DAC-compatible scaling (overrides Brossier range scaling) */
+	int scaling_mode = 0;  /* 0=Brossier (default), 1=TOY2DAC 10e-4 */
+	if (!getparint("scaling_mode", &scaling_mode)) scaling_mode = 0;
+	float toy2dac_sf = 1.0f;  /* stored after first gradient */
+
+	/* Source estimation: cc1 = <d_cal,d_obs> / <d_cal,d_cal> */
+	int src_estim = 0;  /* 0=off, 1=global, 2=per-shot */
+	if (!getparint("src_estim", &src_estim)) src_estim = 0;
+
+	/* Tikhonov regularization */
+	float tik_lambda = 0.0f, tik_lx = 1.0f, tik_lz = 1.0f;
+	if (!getparfloat("tik_lambda", &tik_lambda)) tik_lambda = 0.0f;
+	if (!getparfloat("tik_lx", &tik_lx)) tik_lx = 1.0f;
+	if (!getparfloat("tik_lz", &tik_lz)) tik_lz = 1.0f;
+
+	/* Prior model regularization */
+	float prior_lambda = 0.0f;
+	if (!getparfloat("prior_lambda", &prior_lambda)) prior_lambda = 0.0f;
+
+	/* Shin preconditioner for acoustic */
+	int shin_precond = 0;
+	float shin_eps = 1e-4f;
+	if (!getparint("shin_precond", &shin_precond)) shin_precond = 0;
+	if (!getparfloat("shin_eps", &shin_eps)) shin_eps = 1e-4f;
+
 #ifdef USE_CUDA
 	if (!getparint("ndom", &ndom)) ndom = 1;
 	if (ndom < 1) verr("ndom must be >= 1");
@@ -1891,8 +1926,63 @@ int main(int argc, char **argv)
 			diag_gnorm_raw_start = (float)sqrt(g2);
 		}
 
-		if (scaling > 0)
+		/* Tikhonov regularization (before scaling) */
+		if (tik_lambda > 0.0f) {
+			fcost += tikhonov_cost(grad_vec + 0, mod.nx, mod.nz, mod.dx,
+			                       tik_lambda, tik_lx, tik_lz, NULL, 1);
+			tikhonov_gradient(grad_vec, grad_vec + 0, mod.nx, mod.nz, mod.dx,
+			                   tik_lambda, tik_lx, tik_lz, NULL, 1);
+			if (verbose >= 1)
+				vmess("Tikhonov: lambda=%.2e lx=%.2f lz=%.2f",
+				      tik_lambda, tik_lx, tik_lz);
+		}
+
+		/* Prior model regularization (before scaling) */
+		if (prior_lambda > 0.0f) {
+			/* TODO: load prior model from file */
+			if (verbose >= 1)
+				vmess("Prior regularization: lambda=%.2e (not yet wired)", prior_lambda);
+		}
+
+		/* TOY2DAC scaling (first iteration: compute, all iterations: apply) */
+		if (scaling_mode == 1) {
+			if (toy2dac_sf == 1.0f) {
+				toy2dac_sf = compute_toy2dac_scalingfactor(
+				    x, grad_vec, nmodel, verbose);
+			}
+			apply_toy2dac_scaling(&fcost, grad_vec, nvec, toy2dac_sf);
+		}
+
+		/* Brossier range scaling (mutually exclusive with TOY2DAC) */
+		if (scaling > 0 && scaling_mode == 0)
 			scaling_scale_gradient(grad_vec, nmodel, nparam, m0);
+
+		/* Shin diagonal preconditioner for acoustic */
+		if (shin_precond && !elastic && hess_lam && grad_preco_vec &&
+		    (algorithm == 2 || algorithm == 6)) {
+			/* Extract Shin diagonal from hess_lam (accumulated by
+			 * accumGradientAcoustic) into flat vector */
+			float *shin_diag = (float *)calloc(nmodel, sizeof(float));
+			int ibx_s = mod.ioPx, ibz_s = mod.ioPz;
+			if (bnd.lef == 4 || bnd.lef == 2) ibx_s += bnd.ntap;
+			if (bnd.top == 4 || bnd.top == 2) ibz_s += bnd.ntap;
+			for (ix = 0; ix < mod.nx; ix++)
+				for (iz = 0; iz < mod.nz; iz++)
+					shin_diag[ix*mod.nz+iz] = hess_lam[(ix+ibx_s)*n1+iz+ibz_s];
+
+			float nr;
+			shin_apply_precond(grad_preco_vec, grad_vec,
+			    shin_diag, nmodel, shin_eps, &nr);
+			/* For 2-parameter: also precondition rho with same diagonal */
+			if (nparam >= 2)
+				shin_apply_precond(grad_preco_vec + nmodel, grad_vec + nmodel,
+				    shin_diag, nmodel, shin_eps, NULL);
+			applyParamMask(grad_preco_vec, nmodel, nparam, &pmask);
+			applyWaterMask(grad_preco_vec, nmodel, nparam, water_mask);
+			free(shin_diag);
+			if (verbose >= 1)
+				vmess("Shin precond: eps=%.2e norm_ratio=%.4f", shin_eps, nr);
+		}
 
 		/* Build Yang block preconditioner and apply to gradient */
 		if (use_precond && hess_lam) {
@@ -2279,8 +2369,41 @@ int main(int argc, char **argv)
 					diag_gnorm_raw = (float)sqrt(g2);
 				}
 
-				if (scaling > 0)
+				/* Tikhonov regularization (loop) */
+				if (tik_lambda > 0.0f) {
+					fcost += tikhonov_cost(grad_vec + 0, mod.nx, mod.nz, mod.dx,
+					                       tik_lambda, tik_lx, tik_lz, NULL, 1);
+					tikhonov_gradient(grad_vec, grad_vec + 0, mod.nx, mod.nz, mod.dx,
+					                   tik_lambda, tik_lx, tik_lz, NULL, 1);
+				}
+
+				/* TOY2DAC scaling (loop) */
+				if (scaling_mode == 1)
+					apply_toy2dac_scaling(&fcost, grad_vec, nvec, toy2dac_sf);
+
+				/* Brossier range scaling (loop) */
+				if (scaling > 0 && scaling_mode == 0)
 					scaling_scale_gradient(grad_vec, nmodel, nparam, m0);
+
+				/* Shin diagonal preconditioner (loop) */
+				if (shin_precond && !elastic && hess_lam && grad_preco_vec &&
+				    (algorithm == 2 || algorithm == 6) && diag_new_iter) {
+					float *shin_diag = (float *)calloc(nmodel, sizeof(float));
+					int ibx_sh = mod.ioPx, ibz_sh = mod.ioPz;
+					if (bnd.lef == 4 || bnd.lef == 2) ibx_sh += bnd.ntap;
+					if (bnd.top == 4 || bnd.top == 2) ibz_sh += bnd.ntap;
+					for (ix = 0; ix < mod.nx; ix++)
+						for (iz = 0; iz < mod.nz; iz++)
+							shin_diag[ix*mod.nz+iz] = hess_lam[(ix+ibx_sh)*n1+iz+ibz_sh];
+					shin_apply_precond(grad_preco_vec, grad_vec,
+					    shin_diag, nmodel, shin_eps, NULL);
+					if (nparam >= 2)
+						shin_apply_precond(grad_preco_vec + nmodel, grad_vec + nmodel,
+						    shin_diag, nmodel, shin_eps, NULL);
+					applyParamMask(grad_preco_vec, nmodel, nparam, &pmask);
+					applyWaterMask(grad_preco_vec, nmodel, nparam, water_mask);
+					free(shin_diag);
+				}
 
 				/* Build Yang block preconditioner and apply to gradient.
 				 * During linesearch, do NOT rebuild the preconditioner —

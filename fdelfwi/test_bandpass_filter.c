@@ -8,6 +8,9 @@
 void vmess(char *fmt, ...);
 void verr(char *fmt, ...);
 
+/* Required by docpkge.c */
+char *sdoc[] = { "test_bandpass_filter", NULL };
+
 /* Write a 1D float array as a single-trace SU file */
 static void write_su_trace(const char *fname, const float *data, int ns,
                            float dt_sec)

@@ -76,6 +76,8 @@ SRCC	= fdfwimodc.c \
 		adj_shot.c  \
 		fwi_gradient.c  \
 		applyAdjointSource.c  \
+		acoustic4_adj.c  \
+		acoustic_gradient.c  \
 		elastic4_adj.c  \
 		elastic6_adj.c  \
 		elastic8_adj.c  \
@@ -88,6 +90,10 @@ SRCC	= fdfwimodc.c \
 		precond_shot.c  \
 		smooth2d.c  \
 		scaling.c  \
+		toy2dac_scaling.c  \
+		source_estimation.c  \
+		regularization.c  \
+		shin_precond_acoustic.c  \
 		bandpass_filter.c  \
 		sourceOnSurface.c  \
 		getWaveletHeaders.c  \

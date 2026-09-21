@@ -641,7 +641,7 @@ __global__ void extract_receivers_kernel(
     int ix = rec_ix[irec];
     int iz = rec_iz[irec];
     int idx = ix * n1 + iz;
-    int out_idx = it * nrec + irec;  /* column-major: [nrec × nt] */
+    int out_idx = irec * nt + it;  /* receiver-major: [nrec × nt], matches writeRec layout */
 
     if (rec_vx)  rec_vx[out_idx]  = vx[idx];
     if (rec_vz)  rec_vz[out_idx]  = vz[idx];

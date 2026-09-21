@@ -1,0 +1,122 @@
+#!/bin/bash
+# Illustrates the effect of (absorbing) tapering of the edges, used in Figure 4 of the manual.
+
+#OK:
+ROOT=/rcp3/software/codes/OpenSource_SL10
+BIN=${ROOT}/bin
+CWP=/rcp3/software/codes/cwp/bin
+export PATH=${BIN}:${CWP}:${PATH}
+
+WORKDIR=wavefield_reconstruction
+
+rm -rf ${WORKDIR}
+mkdir -p ${WORKDIR}
+cd ${WORKDIR}
+
+dt=0.0005
+dx=5
+cp=2500
+clip=1
+
+# fp=25 Hz: wavelength_P=100m (20 pts), wavelength_S=48m (9.6 pts) at dx=5m — fine for 4th-order.
+# dt=0.0005 s: CFL = cp*dt/dx = 2500*0.0005/5 = 0.25 (stable for elastic 4th-order).
+# nt=1024: covers 1024*0.0005=0.512 s, enough for G2 wavelet at 25 Hz to decay.
+makewave file_out=wavelet.su dt=$dt nt=1024 fp=25 shift=1 w=g2 verbose=1
+
+makemod file_base=model.su \
+       cp0=$cp ro0=2100 cs0=1200 sizex=1000 sizez=1000 \
+       dx=$dx dz=$dx orig=0,0 \
+
+export filecp=model_cp.su
+export filecs=model_cs.su
+export filero=model_ro.su
+
+
+set -x
+# All 4 sides of the model — closed surface around source at (500,500).
+# dx=5m grid; corners assigned to horizontal sides; vertical sides exclude endpoints.
+#   Array 0 (top):    x=10..990, z=10,      dxrcv=5, dzrcv=0 -> 197 receivers
+#   Array 1 (bottom): x=10..990, z=990,     dxrcv=5, dzrcv=0 -> 197 receivers
+#   Array 2 (left):   x=10,      z=15..985, dxrcv=0, dzrcv=5 -> 195 receivers
+#   Array 3 (right):  x=990,     z=15..985, dxrcv=0, dzrcv=5 -> 195 receivers
+#   Total: 784 receivers
+fdelmodc \
+        file_cp=$filecp file_cs=$filecs file_den=$filero \
+        ischeme=3 \
+        file_src=wavelet.su verbose=1 \
+        file_rcv=rec.su \
+        file_snap=snap_nodisp.su \
+        dtrcv=$dt \
+        xrcv1=10,10,10,990 xrcv2=990,990,10,990 \
+        zrcv1=10,990,15,15  zrcv2=10,990,985,985 \
+        dxrcv=5,5,0,0       dzrcv=0,0,5,5 \
+        rec_type_vx=1 rec_type_vz=1 rec_type_tzz=1 rec_type_txx=1 \
+        xsrc=500 zsrc=500 nshot=1 \
+        src_type=6 tmod=0.8 \
+		npml=100 R=1e-7 m=3.0 \
+		left=2 right=2 bottom=2 top=2 \
+        tsnap1=0.1 tsnap2=0.8 dtsnap=0.05 \
+        sna_type_vx=1 sna_type_vz=1 sna_type_tzz=1 fmax=25 snapwithbnd=1
+
+# P = 0.5*(Txx + Tzz).  src_type=1 adds the wavelet to BOTH Txx and Tzz,
+# so inject P = 0.5*(Txx+Tzz) directly -- each stress component receives 0.5*P. Correct.
+suop2 rec_rtxx.su rec_rtzz.su op=sum | sugain scale=0.5 > rec_rp.su
+
+# Taper the last 50 samples of every receiver trace to zero before back-injection.
+# Reason: grid_dir=1 (reverse time) injects the END of the trace first (at t=tmod).
+# If the wavefield hasn't fully decayed, the last sample is non-zero, creating a
+# step discontinuity at the start of the reverse simulation -> spurious broadband energy.
+# sutaper tend=200: 200 * 0.0005 s/sample = 0.1 s = 2.5 periods at 25 Hz.  Smooth start.
+ntr=784   # 4 arrays: 197+197+195+195
+sutaper <rec_rvx.su  ntr=$ntr tend=200 >tmp.su; mv tmp.su rec_rvx.su
+sutaper <rec_rvz.su  ntr=$ntr tend=200 >tmp.su; mv tmp.su rec_rvz.su
+sutaper <rec_rp.su   ntr=$ntr tend=200 >tmp.su; mv tmp.su rec_rp.su
+
+# Back-injection: elastic representation theorem — inject Vz as Fz force sources.
+#
+# WHERE sources are injected: src_at_rcv=1 reads the gx/gelev headers from rec_rvz.su,
+# which hold the original receiver positions (all 4 sides of the closed square).
+# Each trace becomes a Fz force source at its receiver location, injected in reverse time.
+#
+# WHY Vz -> Fz (not pressure):
+#   Forward source was src_type=6 (Fx, horizontal force) -> wavefield has P + S waves.
+#   The representation theorem (Betti-Rayleigh) says: to reconstruct the elastic wavefield
+#   from a closed surface, inject the recorded PARTICLE VELOCITY as FORCE sources.
+#   Injecting just pressure (rec_rp) only reconstructs the P-wave part.
+#   Injecting Vz as Fz (src_type=7) recovers both P and S via the vertical component.
+#
+# Note: src_type=6,7 always force src_injectionrate=1 internally — no 1/(j*omega) integration.
+# grid_dir=1: reverse-time, reads last sample of rec_rvz.su first (t=tmod -> t=0).
+fdelmodc \
+        file_cp=$filecp file_cs=$filecs file_den=$filero \
+        ischeme=3 \
+        file_src=rec_rp.su verbose=1 \
+        file_snap=snap_rev_p.su \
+        grid_dir=1 \
+        src_injectionrate=1 \
+        src_at_rcv=1 \
+        dt=$dt \
+        src_type=1 tmod=0.8 \
+		npml=100 R=1e-7 m=3.0 \
+		left=2 right=2 bottom=2 top=2 \
+        tsnap1=0.1 tsnap2=0.8 dtsnap=0.05 \
+        sna_type_vx=1 sna_type_vz=1 sna_type_tzz=1 fmax=25 snapwithbnd=1
+
+# --- Display ---
+# n2=648: measured from actual snapshot (9720 traces / 15 frames). Verify: surange < snap_nodisp_svz.su
+# clip_fwd: forward vz peak is ~1.86e-5; clip at 80% of peak
+# clip_rev: reconstructed vz peak is ~0.84 but that is source focus; clip at 5% to see wavefront
+clip_fwd=1e-5   # adjust: run surange < snap_nodisp_svz.su to find actual peak
+clip_rev=5
+
+# Forward wavefield Vz
+suxmovie < snap_nodisp_svz.su clip=$clip_fwd title="Forward Vz" loop=1 &
+
+# Reconstructed wavefield Vz (Vz back-injection: elastic representation theorem)
+suxmovie < snap_rev_p_svz.su n2=648 d2=$dx d1=$dx clip=$clip_rev title="Reconstructed Vz (Vz->Fz src)" loop=1 &
+
+
+
+
+
+

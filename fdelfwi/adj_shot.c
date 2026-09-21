@@ -34,6 +34,21 @@ int acoustic6(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixs
 int elastic4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float *l2m, float *lam, float *mul, int verbose);
 int elastic6(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float *l2m, float *lam, float *mul, int verbose);
 
+/* Acoustic adjoint FD kernel */
+int acoustic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
+	float *vx, float *vz, float *p,
+	float *rox, float *roz, float *l2m,
+	int rec_delay, int rec_skipdt, int verbose);
+
+/* Acoustic gradient imaging condition (acoustic_gradient.c) */
+void accumGradientAcoustic(modPar *mod, bndPar *bnd,
+	float *fwd_vx, float *fwd_vz,
+	float *fwd_vx_prev, float *fwd_vz_prev,
+	wflPar *wfl_adj, float dt,
+	float *grad_l2m, float *grad_rho,
+	float *hess_l2m, float *hess_rho,
+	float *wfld_energy);
+
 /* Forward FD kernel (8th order) */
 int elastic8(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float *l2m, float *lam, float *mul, int verbose);
 
@@ -113,7 +128,11 @@ void callAdjKernel(modPar *mod, adjSrcPar *adj, bndPar *bnd,
 {
 	switch (mod->ischeme) {
 		case 1:
-			/* TODO: acoustic4_adj / acoustic6_adj */
+			if (mod->iorder == 4)
+				acoustic4_adj(*mod, *adj, *bnd, it,
+					wfl->vx, wfl->vz, wfl->tzz,
+					mod->rox, mod->roz, mod->l2m,
+					rec_delay, rec_skipdt, verbose);
 			break;
 		case 3:
 		case 5:
@@ -411,20 +430,34 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			 * step via D_σ), but pass prev velocity for density
 			 * illumination (uses dv/dt approximation, which is fine
 			 * for an approximate Hessian diagonal). */
-			accumGradient(mod, bnd,
-				buf_vx + (size_t)j * sizem,
-				buf_vz + (size_t)j * sizem,
-				(j > 0) ? buf_vx + (size_t)(j-1) * sizem : NULL,
-				(j > 0) ? buf_vz + (size_t)(j-1) * sizem : NULL,
-				buf_txx ? buf_txx + (size_t)j * sizem : NULL,
-				buf_tzz ? buf_tzz + (size_t)j * sizem : NULL,
-				buf_txz ? buf_txz + (size_t)j * sizem : NULL,
-				&wfl_adj, dt,
-				grad_lam, grad_muu, NULL,
-				hess_lam, hess_muu, hess_rho,
-				hess_lam_muu, hess_lam_rho, hess_muu_rho,
-				K_lam_tmp, K_muu_tmp, K_rho_tmp,
-				wfld_energy);
+			if (mod->ischeme <= 2) {
+				/* Acoustic: kappa + rho gradient via divergence imaging */
+				accumGradientAcoustic(mod, bnd,
+					buf_vx + (size_t)j * sizem,
+					buf_vz + (size_t)j * sizem,
+					(j > 0) ? buf_vx + (size_t)(j-1) * sizem : NULL,
+					(j > 0) ? buf_vz + (size_t)(j-1) * sizem : NULL,
+					&wfl_adj, dt,
+					grad_lam, grad_rho,
+					hess_lam, hess_rho,
+					wfld_energy);
+			} else {
+				/* Elastic: lambda + mu gradient via stress-strain imaging */
+				accumGradient(mod, bnd,
+					buf_vx + (size_t)j * sizem,
+					buf_vz + (size_t)j * sizem,
+					(j > 0) ? buf_vx + (size_t)(j-1) * sizem : NULL,
+					(j > 0) ? buf_vz + (size_t)(j-1) * sizem : NULL,
+					buf_txx ? buf_txx + (size_t)j * sizem : NULL,
+					buf_tzz ? buf_tzz + (size_t)j * sizem : NULL,
+					buf_txz ? buf_txz + (size_t)j * sizem : NULL,
+					&wfl_adj, dt,
+					grad_lam, grad_muu, NULL,
+					hess_lam, hess_muu, hess_rho,
+					hess_lam_muu, hess_lam_rho, hess_muu_rho,
+					K_lam_tmp, K_muu_tmp, K_rho_tmp,
+					wfld_energy);
+			}
 
 			/* Advance adjoint wavefield with multicomponent source injection.
 			 * The adjoint kernel injects force residuals (Fx,Fz) at the
@@ -449,40 +482,25 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			 * For j=0 at k>0: uses pre-computed end-of-segment-(k-1)
 			 * stress from the pre-pass.
 			 * For j=0 at k=0: zero IC → zero contribution, skip. */
-			if (buf_txx && j > 0) {
-				accumGradient_rho_Dsig(mod, bnd,
-					buf_txx + (size_t)(j-1) * sizem,
-					buf_tzz + (size_t)(j-1) * sizem,
-					buf_txz + (size_t)(j-1) * sizem,
-					&wfl_adj, dt,
-					grad_rho);
-			}
-			else if (seg_end_txx && j == 0 && k > 0) {
-				/* At j=0 of segment k>0: use end-of-segment-(k-1) stress.
-				 * Matches born_shot's saved_txx at segment boundaries. */
-				accumGradient_rho_Dsig(mod, bnd,
-					seg_end_txx + (size_t)(k-1) * sizem,
-					seg_end_tzz + (size_t)(k-1) * sizem,
-					seg_end_txz + (size_t)(k-1) * sizem,
-					&wfl_adj, dt,
-					grad_rho);
-			}
-			else if (!buf_txx && grad_rho) {
-				/* Fallback to dv/dt for acoustic (no stress buffers) */
-				float *vx_prev = (j > 0) ? buf_vx + (size_t)(j-1) * sizem : NULL;
-				float *vz_prev = (j > 0) ? buf_vz + (size_t)(j-1) * sizem : NULL;
-
-				accumGradient(mod, bnd,
-					buf_vx + (size_t)j * sizem,
-					buf_vz + (size_t)j * sizem,
-					vx_prev, vz_prev,
-					NULL, NULL, NULL,
-					&wfl_adj, dt,
-					NULL, NULL, grad_rho,
-					NULL, NULL, NULL,
-					NULL, NULL, NULL,
-					NULL, NULL, NULL,
-					NULL);
+			/* Density gradient (elastic only — acoustic rho is
+			 * already handled by accumGradientAcoustic above) */
+			if (mod->ischeme > 2) {
+				if (buf_txx && j > 0) {
+					accumGradient_rho_Dsig(mod, bnd,
+						buf_txx + (size_t)(j-1) * sizem,
+						buf_tzz + (size_t)(j-1) * sizem,
+						buf_txz + (size_t)(j-1) * sizem,
+						&wfl_adj, dt,
+						grad_rho);
+				}
+				else if (seg_end_txx && j == 0 && k > 0) {
+					accumGradient_rho_Dsig(mod, bnd,
+						seg_end_txx + (size_t)(k-1) * sizem,
+						seg_end_tzz + (size_t)(k-1) * sizem,
+						seg_end_txz + (size_t)(k-1) * sizem,
+						&wfl_adj, dt,
+						grad_rho);
+				}
 			}
 
 			/* Write adjoint wavefield snapshot if requested. */

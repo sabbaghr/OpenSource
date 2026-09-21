@@ -257,7 +257,7 @@ int getEmParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *
 
     /* calculate default taper length to be three wavelenghts */
 	if (!getparint("ntaper",&ntaper)) ntaper=5*NINT((cp_max/wav->fmax)/dx);
-	bnd->ntap=ntaper;
+	bnd->npml=ntaper;
 	
 	if (ntaper) {
 		bnd->tapx  = (float *)malloc(ntaper*sizeof(float));
