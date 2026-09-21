@@ -98,3 +98,9 @@ extrap/main/migr
 extrap/main/onewvsp
 extrap/main/opercalc
 extrap/main/migr_mpi
+fdelfwi/fwi_inversion
+fdelfwi/fwi_mpi_inversion
+fdelfwi/test_wave_op_dp
+fdelfwi/test_bandpass_filter
+._*
+fdelmodc/demo/marmousi_acoustic/*.pdf
