@@ -100,6 +100,55 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
     if (!getparstring("file_rcv",&rec->file_rcv)) rec->file_rcv="recv.su";
     if (!getparint("grid_dir",&mod->grid_dir)) mod->grid_dir=0;
     if (!getparint("src_at_rcv",&src->src_at_rcv)) src->src_at_rcv=1;
+
+    /* Wavefield reconstruction boundary (Aaker et al. 2020): 0=off, 1=record, 2=inject */
+    if (!getparint("wfl_recon",&mod->wfl_recon)) mod->wfl_recon=0;
+    mod->wfl_bwd=0; /* [BWD-KERNEL] default off, parsed below when wfl_recon is set */
+    mod->wfl_tshift=0; /* [TSHIFT] default off */
+    mod->wfl_corner2=0; /* [CORNER2] default off */
+    mod->wfl_open=0; /* [OPEN] default off */
+    mod->wfl_edgesign=1.0; /* [EDGESIGN] default: unchanged */
+    mod->wfl_taper=0; /* [TAPER] default off */
+    mod->wfl_fwd=0; /* [FWD-ORDER] default off */
+    mod->wfl_vectorial=0; /* [VECTORIAL] default off */
+    if (mod->wfl_recon) {
+        if (!getparfloat("wfl_x1",&mod->wfl_x1)) verr("wfl_recon requires wfl_x1");
+        if (!getparfloat("wfl_x2",&mod->wfl_x2)) verr("wfl_recon requires wfl_x2");
+        if (!getparfloat("wfl_z1",&mod->wfl_z1)) verr("wfl_recon requires wfl_z1");
+        /* [OPEN] single-sided surface: only the top face is used, wfl_z2 is optional (ignored) */
+        if (!getparint("wfl_open",&mod->wfl_open)) mod->wfl_open=0;
+        if (!getparfloat("wfl_z2",&mod->wfl_z2)) {
+            if (mod->wfl_open) mod->wfl_z2 = mod->wfl_z1 + 1000.0;
+            else verr("wfl_recon requires wfl_z2");
+        }
+        if (!getparstring("wfl_file",&mod->wfl_file)) verr("wfl_recon requires wfl_file");
+        if (mod->wfl_recon!=1 && mod->wfl_recon!=2) verr("wfl_recon must be 0, 1 or 2");
+        if (mod->ischeme<=2) verr("wfl_recon currently only supports the elastic scheme (ischeme>2)");
+        /* [BWD-KERNEL] opt-in backward-kernel reconstruction, default off */
+        if (!getparint("wfl_bwd",&mod->wfl_bwd)) mod->wfl_bwd=0;
+        if (mod->wfl_bwd && mod->wfl_recon!=2) verr("wfl_bwd=1 requires wfl_recon=2");
+        /* [TSHIFT] traction sample offset for the force sources (injection only) */
+        if (!getparint("wfl_tshift",&mod->wfl_tshift)) mod->wfl_tshift=0;
+        if (mod->wfl_tshift<0) verr("wfl_tshift must be >= 0");
+        if (mod->wfl_tshift && mod->wfl_recon!=2) verr("wfl_tshift requires wfl_recon=2");
+        /* [CORNER2] duplicate corner points on the vertical faces; use the SAME value in the recording and the injection run */
+        if (!getparint("wfl_corner2",&mod->wfl_corner2)) mod->wfl_corner2=0;
+        if (mod->wfl_open && mod->wfl_corner2) verr("wfl_open and wfl_corner2 are mutually exclusive");
+        /* [TAPER] number of points of the cosine ramp at each end of the horizontal face(s), injection run */
+        if (!getparint("wfl_taper",&mod->wfl_taper)) mod->wfl_taper=0;
+        if (mod->wfl_taper<0) verr("wfl_taper must be >= 0");
+        /* [EDGESIGN] polarity/gain of the sources at the first and last point of the horizontal face(s), injection run */
+        if (!getparfloat("wfl_edgesign",&mod->wfl_edgesign)) mod->wfl_edgesign=1.0;
+        /* [FWD-ORDER] forward-time-order injection (retarded field), required for an open (single-sided) surface */
+        if (!getparint("wfl_fwd",&mod->wfl_fwd)) mod->wfl_fwd=0;
+        if (mod->wfl_fwd && mod->wfl_recon!=2) verr("wfl_fwd=1 requires wfl_recon=2");
+        if (mod->wfl_fwd && mod->wfl_bwd) verr("wfl_fwd=1 and wfl_bwd=1 are mutually exclusive (forward-order injection uses the forward kernel)");
+        if (mod->wfl_fwd && mod->wfl_tshift) verr("wfl_fwd=1 needs wfl_tshift=0 (forward-order timing is already consistent)");
+        /* [VECTORIAL] Ravasi & Curtis (2013) eq. 8 heuristic: recorded vx,vz only, routed through the
+         * FORCE channel (-> vx,vz update), nothing injected into txx,tzz,txz. Injection-only. */
+        if (!getparint("wfl_vectorial",&mod->wfl_vectorial)) mod->wfl_vectorial=0;
+        if (mod->wfl_vectorial && mod->wfl_recon!=2) verr("wfl_vectorial=1 requires wfl_recon=2");
+    }
     
     /* read model parameters, which are used to set up source and receivers and check stability */
     

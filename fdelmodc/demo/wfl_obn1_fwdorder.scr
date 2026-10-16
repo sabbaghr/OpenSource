@@ -1,0 +1,9 @@
+#!/bin/bash
+# One-sided OBN reconstruction: water layer + free surface, receivers (vx, vz, txz, tzz=-p) on a line just below the
+# seafloor, FORWARD-ORDER (retarded) injection of the recorded OBN data (wfl_open=1 wfl_fwd=1) -> the total wavefield
+# below the seafloor (downgoing + reflected), no time reversal in the comparisons. Self-contained.
+# Parameters: wfl_params_obn.sh.  Outputs: demo/wfl_cases_obn/fwdorder/.
+# Options: VIEW=0 SNAPFIELDS="vx vz" PLOTCOMPS="vz tzz" ./wfl_obn1_fwdorder.scr
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_obn.sh"
+export WFL_FWD=1
+exec "$(dirname "$0")/wfl_case.sh" fwdorder 0 0

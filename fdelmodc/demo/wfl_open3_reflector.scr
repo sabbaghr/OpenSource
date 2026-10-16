@@ -1,0 +1,8 @@
+#!/bin/bash
+# One-sided (open top line) reconstruction with a free surface AND a reflector at z=1600, forward-order injection.
+# Same as wfl_open1_fwdorder.scr plus a flat interface below the receivers: the line records the downgoing and the
+# reflected waves; the reconstruction below the line should contain both. Parameters: wfl_params_open_refl.sh.
+# Outputs: demo/wfl_cases_open/reflector/.  Options: VIEW=0 SNAPFIELDS="vx vz" PLOTCOMPS="vz tzz" ./wfl_open3_reflector.scr
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_open_refl.sh"
+export WFL_FWD=1
+exec "$(dirname "$0")/wfl_case.sh" reflector 0 0

@@ -1,0 +1,13 @@
+#!/bin/bash
+# Same as wfl_obn4 (REFSUB: inject the scattered field = true - background-model recording), but ALSO
+# mutes the first (strongest, closest) scattered arrival on the residual -- the seafloor's own primary
+# reflection, which arrives almost with the direct wave here (line is only 5 m below the seafloor) and,
+# per Ravasi & Curtis (2013) Region-A discussion, still radiates both ways from a one-sided line when
+# its own source-side path is this short. Keeps only later/deeper reflections (the target interface).
+# Outputs: demo/wfl_cases_obn/timereversed_refsub_mute/.
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_obn.sh"
+export WFL_FWD=0 BWD=1
+export REFSUB=1 MUTE=1
+export MUTE_THRESH=${MUTE_THRESH:-0.15} MUTE_PAD=${MUTE_PAD:-0.05} MUTE_TAPER=${MUTE_TAPER:-0.05}
+export SNAP_DTSNAP=${SNAP_DTSNAP:-0.01}
+exec "$(dirname "$0")/wfl_case.sh" timereversed 1 0

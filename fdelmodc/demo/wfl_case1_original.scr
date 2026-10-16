@@ -1,0 +1,6 @@
+#!/bin/bash
+# Case 1: original   (wfl_tshift=0 wfl_corner2=0, original contour and timing)
+# Self-contained: builds model/wavelets, runs forward + reconstruction, shows snapshots and the
+# point-receiver comparison. Outputs in demo/wfl_cases/original/.
+# Options: BWD=0 VIEW=0 SNAPFIELDS="vx vz txz" CLIPFRAC=0.1 ./wfl_case1_original.scr
+exec "$(dirname "$0")/wfl_case.sh" original 0 0

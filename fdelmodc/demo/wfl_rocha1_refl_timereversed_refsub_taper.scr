@@ -1,0 +1,21 @@
+#!/bin/bash
+# Model geometry matching Figures 3-5 of Rocha, Tanushev & Sava (2016, geo2015-0487): horizontal
+# reflector at z=1500m, vertical-displacement source at x=5000m, domain 10000m x 2500m.
+# Same reverse-time, REFSUB (scattered field), taper-on-line-ends recipe as wfl_open5, applied to this
+# geometry. Default top boundary: absorbing (matches most of this project's recent investigation).
+# Outputs: demo/wfl_cases_rocha/<name>_taper_refsub/.
+# Snapshots are taken finely (SNAP_DTSNAP) for the RTM imaging condition -- the QC default dtsnap=0.05
+# (inherited from wfl_params_open.sh) is too coarse for a clean energy-norm crosscorrelation image.
+# For energy-norm RTM (wfl_rtm_energy_stress.py) also pass SNAPFIELDS="vx vz txx tzz txz" (stress fields
+# aren't saved by default; see wfl_cases_rocha lesson in project memory -- stale stress snapshots from a
+# previous run will silently corrupt the image otherwise).
+# Options: SNAPFIELDS="vx vz txx tzz txz" SNAP_DTSNAP=0.01 VIEW=0 ./wfl_rocha1_refl_timereversed_refsub_taper.scr
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_rocha_refl.sh"
+export WFL_FWD=0 BWD=1
+export BND_TOP_FWD=${BND_TOP_FWD:-2} BND_TOP_RECON=${BND_TOP_RECON:-2}
+export WFL_X1=10 WFL_X2=9990
+export REFSUB=${REFSUB:-1}
+export TAPER=${TAPER:-270}
+export SNAP_DTSNAP=${SNAP_DTSNAP:-0.01}
+if [ "$BND_TOP_FWD" = "1" ]; then base=reflector_fs; else base=reflector_abs; fi
+exec "$(dirname "$0")/wfl_case.sh" $base 1 0

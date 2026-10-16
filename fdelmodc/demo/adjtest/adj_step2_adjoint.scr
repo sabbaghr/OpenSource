@@ -1,0 +1,75 @@
+#!/bin/bash
+# adj_step2_adjoint.scr -- Step 2 adjoint half + the dot-product test itself.
+#
+# Builds y at P_y (independent of x), constructs the adjoint source s~=M^{-1}y, time-reverses
+# it, runs it as an fdelmodc source AT P_y while recording AT P_x (source/receiver roles
+# swapped from the forward run), time-reverses the result again, applies M, and compares
+#   a = <Fx, y>   (Fx from run_step2_fwd_seed<SEED>, y built here)
+#   b = <x, F^t y> (x = the forward run's own raw source files, F^t y = wdag_* built here)
+# eps itself (|a-b|/max(|a|,|b|)) is not computed here -- see the printed a, b values.
+set -e
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/adj_params.sh"
+. "$HERE/adj_lib.sh"
+
+BASESEED=${1:-101}
+MODELDIR="$HERE/run_step1"
+FWDDIR="$HERE/run_step2_fwd_seed${BASESEED}"
+OUT="$HERE/run_step2_adj_seed${BASESEED}"
+rm -rf "$OUT"
+mkdir -p "$OUT"
+
+if [ ! -f "$FWDDIR/rec_total_rvx.su" ]; then
+	echo "Forward run not found in $FWDDIR -- run adj_step2_forward.scr $BASESEED first." >&2
+	exit 1
+fi
+
+echo "############ Building y at the 10 P_y points (independent of x) ############"
+adj_build_y "$BASESEED" "$OUT/y"
+
+echo "############ Building the adjoint source s~ = M^{-1} y, prescaled + time-reversed ############"
+adj_build_adjsrc "$OUT/y" "$OUT/adjsrc"
+
+echo "############ Running the 5 adjoint passes: inject at P_y, record at P_x ############"
+for compidx in 1 2 3 4 5; do
+	name=${COMP_NAMES[$((compidx-1))]}
+	echo "-- src_type=${COMP_SRC_TYPE[$((compidx-1))]} ($name) injected at P_y, recording at P_x --"
+	snap=0; [ "$compidx" = "1" ] && snap=1   # snapshots on the Fx pass only (src_type<=6, safe path)
+	adj_run_adjoint_component "$compidx" "$OUT/adjsrc" "$MODELDIR" "$OUT/adjrun" "$snap"
+	tail -3 "$OUT/adjrun/log_adj_${name}.txt"
+done
+
+cd "$OUT/adjrun"
+echo ""
+echo "############ Summing the 5 adjoint runs, then time-reversing (2nd reversal) ############"
+mkdir -p "$OUT/rev"
+for r in vx vz txx tzz txz; do
+	cp "rec_Fx_r${r}.su" "raw_r${r}.su"
+	for name in Fz Txx Tzz Txz; do
+		suop2 "raw_r${r}.su" "rec_${name}_r${r}.su" op=sum > "raw_r${r}.su.tmp"
+		mv "raw_r${r}.su.tmp" "raw_r${r}.su"
+	done
+	suflip < "raw_r${r}.su" flip=3 > "$OUT/rev/rev_${r}.su"
+done
+
+echo "############ Applying M to get w+ = F^t y at P_x ############"
+adj_apply_M "$OUT/rev" "$OUT/wdag"
+
+echo ""
+echo "############ Building the concatenated x and w+ vectors (component order Fx,Fz,Txx,Tzz,Txz / vx,vz,txx,tzz,txz) ############"
+cat "$FWDDIR/src_Fx.su" "$FWDDIR/src_Fz.su" "$FWDDIR/src_Txx.su" "$FWDDIR/src_Tzz.su" "$FWDDIR/src_Txz.su" > "$OUT/x_all.su"
+cat "$OUT/wdag/wdag_vx.su" "$OUT/wdag/wdag_vz.su" "$OUT/wdag/wdag_txx.su" "$OUT/wdag/wdag_tzz.su" "$OUT/wdag/wdag_txz.su" > "$OUT/wdag_all.su"
+
+echo "############ Building the concatenated Fx and y vectors (component order vx,vz,txx,tzz,txz) ############"
+cat "$FWDDIR/rec_total_rvx.su" "$FWDDIR/rec_total_rvz.su" "$FWDDIR/rec_total_rtxx.su" "$FWDDIR/rec_total_rtzz.su" "$FWDDIR/rec_total_rtxz.su" > "$OUT/Fx_all.su"
+cat "$OUT/y/y_vx.su" "$OUT/y/y_vz.su" "$OUT/y/y_txx.su" "$OUT/y/y_tzz.su" "$OUT/y/y_txz.su" > "$OUT/y_all.su"
+
+echo ""
+echo "############ a = <Fx, y>  and  b = <x, F^t y> ############"
+A=$(adj_dotprod "$OUT/Fx_all.su" "$OUT/y_all.su")
+B=$(adj_dotprod "$OUT/x_all.su" "$OUT/wdag_all.su")
+echo "a = $A"
+echo "b = $B"
+echo ""
+echo "############ Step 2 (forward + adjoint) done for seed $BASESEED: $OUT ############"

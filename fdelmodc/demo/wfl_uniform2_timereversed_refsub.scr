@@ -1,0 +1,9 @@
+#!/bin/bash
+# Uniform elastic background, single point diffractor, REVERSE-TIME injection of the scattered field
+# (true model minus the SAME uniform background with no diffractor at all -- exact everywhere except at
+# the single point). No water/seafloor. Outputs: demo/wfl_cases_uniform_diffr/timereversed_refsub/.
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_uniform_diffr.sh"
+export WFL_FWD=0 BWD=1
+export REFSUB=1
+export SNAP_DTSNAP=${SNAP_DTSNAP:-0.02}
+exec "$(dirname "$0")/wfl_case.sh" timereversed 1 0

@@ -1,0 +1,61 @@
+#!/bin/bash
+# adj_step2_forward.scr -- Step 2 forward half: compute Fx (recorded data at every P_y point,
+# all 5 components, from the full x test vector at every P_x point) for one seed group, and
+# save vx/vz/tzz snapshots for every component's run so they can be viewed.
+#
+# x is built from 5 independent src_types (Fx,Fz,Txx,Tzz,Txz -- one run each, since a single
+# fdelmodc run only supports one src_type) run at all 5 P_x points simultaneously
+# (src_multiwav=1), each point getting its own independent random signal (adj_seed). The 5
+# runs' recordings at the 10 P_y points are summed by linearity (suop2 op=sum) into the total
+# Fx. Boundary: rigid on all sides ($BND in adj_params.sh) for now; Step 4 will sweep this.
+set -e
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/adj_params.sh"
+. "$HERE/adj_lib.sh"
+
+BASESEED=${1:-101}
+MODELDIR="$HERE/run_step1"
+OUT="$HERE/run_step2_fwd_seed${BASESEED}"
+rm -rf "$OUT"
+
+if [ ! -f "$MODELDIR/model_cp.su" ]; then
+	echo "Model not found in $MODELDIR -- run adj_step1_setup.scr first." >&2
+	exit 1
+fi
+
+echo "############ Step 2 forward, seed group $BASESEED, boundary=$BND (1=free 2=pml 3=rigid 4=taper) ############"
+for compidx in 1 2 3 4 5; do
+	name=${COMP_NAMES[$((compidx-1))]}
+	echo "-- running src_type=${COMP_SRC_TYPE[$((compidx-1))]} ($name) at all 5 P_x points, snapshots on --"
+	adj_run_forward "$compidx" "$BASESEED" "$MODELDIR" "$OUT" 1
+	tail -5 "$OUT/log_fwd_${name}.txt"
+done
+
+cd "$OUT"
+echo ""
+echo "############ Summing the 5 src_type runs by linearity (suop2 op=sum) ############"
+for r in vx vz txx tzz txz; do
+	cp "rec_Fx_r${r}.su" "rec_total_r${r}.su"
+	for name in Fz Txx Tzz Txz; do
+		suop2 "rec_total_r${r}.su" "rec_${name}_r${r}.su" op=sum > "rec_total_r${r}.su.tmp"
+		mv "rec_total_r${r}.su.tmp" "rec_total_r${r}.su"
+	done
+done
+echo "-- wrote rec_total_r{vx,vz,txx,tzz,txz}.su : Fx recorded at the 10 P_y points --"
+
+echo ""
+echo "############ Sanity: mid-record sample at receiver y1 (200,200), every total component ############"
+echo "(nonzero and distinct across components is the expected, healthy pattern; all identical or all"
+echo " exactly zero would indicate a wiring bug in the forward run. Receiver files number traces"
+echo " tracl=1..10, unlike the model files' tracl=0..200 -- verified separately, not the same convention.)"
+for r in vx vz txx tzz txz; do
+	printf "  rec_total_r%-3s trace1 (y1) sample %d: " "$r" $((NT/2))
+	suwind < "rec_total_r${r}.su" key=tracl min=1 max=1 | suascii ftn=0 2>/dev/null | grep -E "^ *$((NT/2)) "
+done
+
+echo ""
+echo "############ Snapshots written (one file per component run) ############"
+ls -la snap_*.su
+echo ""
+echo "############ Step 2 forward done: $OUT ############"

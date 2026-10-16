@@ -1,0 +1,6 @@
+#!/bin/bash
+# Same closed-box "both" recipe (source outside Omega, reflector inside Omega) as wfl_closed_refl_both.scr,
+# but at half the grid spacing (dx=dz=2m) -- see wfl_params_closed_refl_fine.sh.
+# Outputs in demo/wfl_cases_closed_refl/both_fine/.
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_closed_refl_fine.sh"
+exec "$(dirname "$0")/wfl_case.sh" both_fine 1 1

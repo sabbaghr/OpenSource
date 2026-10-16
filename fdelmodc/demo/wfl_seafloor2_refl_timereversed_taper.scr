@@ -1,0 +1,15 @@
+#!/bin/bash
+# Same geometry as wfl_seafloor1 (water + known seafloor at z=500 + reflector at z=1100, free surface,
+# open receiver line x=10..2990 just below the seafloor, reverse-time injection, taper on the line ends)
+# but WITHOUT reference-model subtraction: REFSUB=0, so the injected data is the full recorded field
+# (boundary.bin, direct wave + reflections) and the reconstruction propagates through the TRUE model
+# (no modelref_* override, since there is nothing to subtract). This reconstructs the TOTAL wavefield,
+# direct arrival included, as opposed to wfl_seafloor1's scattered-field-only migration workflow.
+# Outputs: demo/wfl_cases_seafloor_refl/timereversed_taper/.
+# Options: NPML=200 SNAPFIELDS="vx vz txx tzz txz" SNAP_DTSNAP=0.01 ./wfl_seafloor2_refl_timereversed_taper.scr
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_seafloor_refl.sh"
+export WFL_FWD=0 BWD=1
+export WFL_X1=10 WFL_X2=2990
+export REFSUB=0
+export TAPER=${TAPER:-100}
+exec "$(dirname "$0")/wfl_case.sh" timereversed 1 0

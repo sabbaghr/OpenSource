@@ -5,6 +5,7 @@
 #include<string.h>
 #include"par.h"
 #include"fdelmodc.h"
+#include"bndsrc.h"
 #ifdef USE_CUDA
 #include"fdelmodc_gpu.h"
 #endif
@@ -319,6 +320,8 @@ int main(int argc, char **argv)
 	float *rox, *roz, *l2m, *lam, *mul;
 	float *tss, *tes, *tep, *p, *q, *r;
 	float *vx, *vz, *tzz, *txz, *txx;
+	bndSrcPar rb;
+	float *bs_vx=NULL, *bs_vz=NULL, *bs_txx=NULL, *bs_tzz=NULL, *bs_txz=NULL;
 	float *rec_vx, *rec_vz, *rec_p;
 	float *rec_txx, *rec_tzz, *rec_txz;
 	float *rec_pp, *rec_ss, *rec_q;
@@ -385,6 +388,18 @@ int main(int argc, char **argv)
 
 	readModel(mod, bnd, rox, roz, l2m, lam, mul, tss, tes, tep);
 
+	/* [BWD-KERNEL] opt-in (wfl_bwd=1): backward kernel = same update code
+	 * with dt -> -dt. dt enters the kernel only through rox,roz,l2m,lam,mul
+	 * (fac=dt/dx in readModel.c), so negating them runs the leapfrog
+	 * backward. CPML b,c,ik do not depend on these arrays. */
+	if (mod.wfl_bwd) {
+		size_t kk;
+		for (kk=0; kk<sizem; kk++) {
+			rox[kk]=-rox[kk]; roz[kk]=-roz[kk];
+			l2m[kk]=-l2m[kk]; lam[kk]=-lam[kk]; mul[kk]=-mul[kk];
+		}
+	}
+
 	/* read and/or define source wavelet(s) */
 
 	/* Using a random source, which can have a random length 
@@ -423,7 +438,61 @@ int main(int argc, char **argv)
 		txz = (float *)calloc(sizem,sizeof(float));
 		txx = (float *)calloc(sizem,sizeof(float));
 	}
-	
+
+	/* wavefield reconstruction boundary (Aaker et al. 2020): build the
+	 * contour once, then either allocate a fresh recording buffer
+	 * (mode 1) or read a previously recorded one back (mode 2) */
+	if (mod.wfl_recon) {
+		defineRecBoundary(mod, mod.wfl_x1-mod.x0, mod.wfl_x2-mod.x0,
+			mod.wfl_z1-mod.z0, mod.wfl_z2-mod.z0, &rb, verbose);
+		if (mod.wfl_recon==1) {
+			bs_vx  = (float *)calloc((size_t)rb.n*mod.nt,sizeof(float));
+			bs_vz  = (float *)calloc((size_t)rb.n*mod.nt,sizeof(float));
+			bs_txx = (float *)calloc((size_t)rb.n*mod.nt,sizeof(float));
+			bs_tzz = (float *)calloc((size_t)rb.n*mod.nt,sizeof(float));
+			bs_txz = (float *)calloc((size_t)rb.n*mod.nt,sizeof(float));
+		}
+		else if (mod.wfl_recon==2) {
+			size_t k;
+			readBoundaryWav(mod.wfl_file, rb, mod.nt, &bs_vx, &bs_vz, &bs_txx, &bs_tzz, &bs_txz);
+			/* Genuine time-reversed reconstruction (time-reversal mirror):
+			 * for a lossless medium the wave equations are reversible under
+			 * v'(t)=-v(-t), tau'(t)=tau(-t) -- velocity flips sign under
+			 * time reversal, stress does not (derived against THIS code's
+			 * own sign convention in elastic4.c, not just the textbook
+			 * one). The force term (built from tau) only needs its time
+			 * index reversed at the call site below; the deformation-rate
+			 * term (built from v) needs v negated here as well. Negating
+			 * once at load time, rather than per-sample at injection time,
+			 * keeps injectBoundary() itself unaware of forward vs.
+			 * time-reversed use.
+			 *
+			 * NOTE (restored verbatim at the user's request, to reproduce
+			 * the "let's fix the ghost" checkpoint exactly): the user
+			 * later stated this negation is wrong -- true kinematic
+			 * time-reversal of an isolated mechanical system does flip
+			 * velocity's sign, but that may not be the right symmetry to
+			 * apply to RTM-style boundary re-injection, where standard
+			 * practice is to replay recorded data in reverse order with
+			 * no polarity flip. That objection has NOT been re-resolved;
+			 * this code is back to asserting the flip is correct only
+			 * because that's what existed at the checkpoint being
+			 * restored, not because the objection was found to be wrong. */
+			if (mod.wfl_fwd) { /* [FWD-ORDER] forward-order (retarded) injection: negate ALL five recorded fields, so
+			                    * that injectBoundary's (+T, +C:v(x)n) become the truncation sources f=-T, s=-C:(v(x)n) */
+				for (k=0; k<(size_t)rb.n*mod.nt; k++) {
+					bs_vx[k] = -bs_vx[k]; bs_vz[k] = -bs_vz[k];
+					bs_txx[k] = -bs_txx[k]; bs_tzz[k] = -bs_tzz[k]; bs_txz[k] = -bs_txz[k];
+				}
+			}
+			else if (!mod.wfl_bwd) /* [BWD-KERNEL] backward kernel uses unnegated data */
+			for (k=0; k<(size_t)rb.n*mod.nt; k++) {
+				bs_vx[k] = -bs_vx[k];
+				bs_vz[k] = -bs_vz[k];
+			}
+		}
+	}
+
 	size = rec.n*rec.nt;
 	if (rec.type.vz)  rec_vz  = (float *)calloc(size,sizeof(float));
 	if (rec.type.vx)  rec_vx  = (float *)calloc(size,sizeof(float));
@@ -688,6 +757,36 @@ shared (shot, bnd, mod, src, wav, rec, ixsrc, izsrc, it, src_nwav, verbose)
 
 #pragma omp master
 {
+			/* wavefield reconstruction boundary: record or inject every
+			 * timestep (full resolution, not decimated by rec.skipdt).
+			 * NOTE: called once per full timestep, after elastic4() has
+			 * updated vx,vz AND txx,tzz,txz for this it -- so the force
+			 * term injected into vx,vz here is not seen by txx,tzz,txz's
+			 * update until the NEXT timestep, a ~half-dt timing
+			 * approximation relative to injecting at each field's own
+			 * natural half-step (as applySource does from inside the
+			 * kernel). Fine for a first qualitative snapshot comparison;
+			 * revisit if the reconstructed/modelled difference plot shows
+			 * a systematic lag. */
+			if (mod.wfl_recon==1) {
+				storeBoundaryWav(rb, mod.nt, it, vx, vz, txx, tzz, txz, mod.naz,
+					bs_vx, bs_vz, bs_txx, bs_tzz, bs_txz);
+			}
+			else if (mod.wfl_recon==2) {
+				/* time-reversed playback: forward loop index it steps
+				 * through the recording backward, last-recorded-sample
+				 * first (bs_vx/bs_vz were already negated at load time,
+				 * above) */
+				if (mod.wfl_bwd) /* [BWD-KERNEL] */
+				injectBoundaryBwd(rb, mod.nt, (mod.wfl_fwd ? it : mod.nt-1-it), vx, vz, txx, tzz, txz, mod.naz,
+					rox, roz, l2m, lam, mul, mod.dx, mod.dz, mod.wfl_tshift, mod.wfl_vectorial,
+					bs_vx, bs_vz, bs_txx, bs_tzz, bs_txz);
+				else
+				injectBoundary(rb, mod.nt, (mod.wfl_fwd ? it : mod.nt-1-it), /* [FWD-ORDER] it, not reversed */ vx, vz, txx, tzz, txz, mod.naz,
+					rox, roz, l2m, lam, mul, mod.dx, mod.dz, mod.wfl_tshift, mod.wfl_vectorial,
+					bs_vx, bs_vz, bs_txx, bs_tzz, bs_txz);
+			}
+
 			if ( (((it-rec.delay) % rec.skipdt)==0) && (it >= rec.delay) ) {
 				int writeToFile, itwritten;
 
@@ -806,6 +905,10 @@ gpu_post_shot:
 #endif
 	} /* end of loop over number of shots */
 
+	if (mod.wfl_recon==1) {
+		writeBoundaryWav(mod.wfl_file, rb, mod.nt, bs_vx, bs_vz, bs_txx, bs_tzz, bs_txz);
+	}
+
 /* close files that where opened to write data */
 #ifdef MPI
 //    vmess("MPI: pe=%d before barrier", pe);
@@ -834,6 +937,10 @@ gpu_post_shot:
 	free(vx);
 	free(vz);
 	free(tzz);
+	if (mod.wfl_recon) {
+		freeRecBoundary(&rb);
+		free(bs_vx); free(bs_vz); free(bs_txx); free(bs_tzz); free(bs_txz);
+	}
 	freeStoreSourceOnSurface();
 	if (rec.type.vz)  free(rec_vz);
 	if (rec.type.vx)  free(rec_vx);

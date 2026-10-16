@@ -1,0 +1,7 @@
+#!/bin/bash
+# Single point-diffractor OBN case, forward-time-order (causal) injection -- the case we've already
+# validated works cleanly; run first as a sanity check of the new simplified model/geometry/timing.
+# Outputs: demo/wfl_cases_obn_diffr/fwdorder/.
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_obn_diffr.sh"
+export WFL_FWD=1
+exec "$(dirname "$0")/wfl_case.sh" fwdorder 0 0

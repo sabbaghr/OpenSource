@@ -1,0 +1,18 @@
+#!/bin/bash
+# Same REFSUB/taper case as wfl_seafloor1, but the receiver line is moved into the WATER (z=495, 5 m
+# above the seafloor) instead of the solid (z=505, wfl_seafloor1's "geophone" line). In the water
+# (cs=0, a fluid) tzz=-p and txz=0 identically -- this run exists only to harvest those two fields
+# (the "hydrophone" component). Its own reconstruction pass (injecting the z=495 water-line data
+# through itself) is not used by anything; only its boundary_scat.bin is read, by
+# wfl_seafloor_realistic_recon.sh, which runs this AND wfl_seafloor1 and splices vx,vz (geophone,
+# z=505) with tzz,txz (hydrophone, z=495) into one physically-realistic injection (txx is not needed:
+# the horizontal-face injection formula in injectBoundaryBwd.c never reads it -- see the traction
+# T=(txz,tzz).n on a horizontal face, and the stress-update terms use only vx,vz).
+# Outputs: demo/wfl_cases_seafloor_refl/timereversed_hydro_taper_refsub/.
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_seafloor_refl.sh"
+export WFL_FWD=0 BWD=1
+export WFL_X1=10 WFL_X2=2990
+export WFL_Z1=495
+export REFSUB=1
+export TAPER=${TAPER:-300}
+exec "$(dirname "$0")/wfl_case.sh" timereversed_hydro 1 0

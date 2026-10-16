@@ -1,0 +1,6 @@
+#!/bin/bash
+# Simplest possible sanity check: uniform elastic background, single point diffractor, forward-time-order
+# (causal) injection. No water/seafloor at all. Outputs: demo/wfl_cases_uniform_diffr/fwdorder/.
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_uniform_diffr.sh"
+export WFL_FWD=1
+exec "$(dirname "$0")/wfl_case.sh" fwdorder 0 0

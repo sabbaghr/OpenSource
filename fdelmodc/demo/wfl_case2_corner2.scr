@@ -1,0 +1,6 @@
+#!/bin/bash
+# Case 2: corner2   (wfl_tshift=0 wfl_corner2=1, corner points repeated on the vertical faces only)
+# Self-contained: builds model/wavelets, runs forward + reconstruction, shows snapshots and the
+# point-receiver comparison. Outputs in demo/wfl_cases/corner2/.
+# Options: BWD=0 VIEW=0 SNAPFIELDS="vx vz txz" CLIPFRAC=0.1 ./wfl_case2_corner2.scr
+exec "$(dirname "$0")/wfl_case.sh" corner2 0 1

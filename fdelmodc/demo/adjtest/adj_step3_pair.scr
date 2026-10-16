@@ -1,0 +1,177 @@
+#!/bin/bash
+# adj_step3_pair.scr XSRC ZSRC XREC ZREC -- single source-point <-> single receiver-point
+# adjoint dot-product test, one src_type/rec_type relationship at a time (not summed across
+# points or across components). n=1 on both sides throughout, so this also sidesteps the
+# src_multiwav+src_type>6 fdelmodc bug entirely (wav.nx=1 always -> shot.x[0] is always valid).
+#
+# Groups (Txx/Tzz tested together, not separable -- C^{-1} genuinely couples them physically):
+#   G1: Fx -> vx      G2: Fz -> vz      G3: {Txx,Tzz} -> {txx,tzz}      G4: Txz -> txz
+set -e
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/adj_params.sh"
+. "$HERE/adj_lib.sh"
+
+XSRC=${1:-300}; ZSRC=${2:-300}; XREC=${3:-200}; ZREC=${4:-200}
+MODELDIR="${5:-$HERE/run_step1}"
+TAG="${6:-default}"
+# TSHIFT_FZ: defineSource.c:172 delays any src_type>6 wavelet (Fz=7 is the only one of our 5
+# types affected) by tshift=0.5*dt+0.5*dz/cp_local(at that run's own xsrc,zsrc) BEFORE injecting
+# it -- this happens on every run regardless of forward/adjoint role, so the adjoint run's
+# manually time-reversed Fz source gets this same forward-delay tacked on where a pure reversal
+# is wanted. Compensate by advancing the reversed adjoint Fz source by tshift (sub-sample, via
+# suresamp's sinc interpolation, since tshift is not a whole number of dt) before feeding it to
+# fdelmodc. TSHIFT_FZ must be computed by hand from cp AT (XREC,ZREC) (the adjoint run's source
+# point) for whatever model is in use -- 0 disables the correction (the previous behavior).
+TSHIFT_FZ=${7:-0}
+OUT="$HERE/run_step3_pair_${TAG}_${XSRC}_${ZSRC}_to_${XREC}_${ZREC}"
+rm -rf "$OUT"; mkdir -p "$OUT"
+cd "$OUT"
+
+# fwd1 SRCFILE SRC_TYPE RECTYPE -> writes fwd_r<rectype>.su (single trace) at (XREC,ZREC)
+# from a single source SRCFILE of type SRC_TYPE at (XSRC,ZSRC).
+fwd1() {
+	local srcfile="$1" stype="$2" rt="$3" tag="$4"
+	fdelmodc file_cp=$MODELDIR/model_cp.su file_cs=$MODELDIR/model_cs.su file_den=$MODELDIR/model_ro.su \
+		ischeme=3 iorder=4 dt=$DT dtrcv=$DT \
+		file_src=$srcfile src_type=$stype src_orient=1 src_injectionrate=1 \
+		xsrc=$XSRC zsrc=$ZSRC \
+		file_rcv=fwd_${tag}.su xrcva=$XREC zrcva=$ZREC \
+		rec_type_vx=1 rec_type_vz=1 rec_type_txx=1 rec_type_tzz=1 rec_type_txz=1 rec_type_p=0 \
+		rec_int_vx=0 rec_int_vz=0 rec_int_p=0 \
+		left=$BND right=$BND top=$BND bottom=$BND verbose=0 > log_fwd_${tag}.txt 2>&1
+}
+# adj1: same as fwd1 but injecting AT (XREC,ZREC) and recording AT (XSRC,ZSRC) -- source and
+# receiver roles swapped, for the adjoint half.
+adj1() {
+	local srcfile="$1" stype="$2" tag="$3"
+	fdelmodc file_cp=$MODELDIR/model_cp.su file_cs=$MODELDIR/model_cs.su file_den=$MODELDIR/model_ro.su \
+		ischeme=3 iorder=4 dt=$DT dtrcv=$DT \
+		file_src=$srcfile src_type=$stype src_orient=1 src_injectionrate=1 \
+		xsrc=$XREC zsrc=$ZREC \
+		file_rcv=adj_${tag}.su xrcva=$XSRC zrcva=$ZSRC \
+		rec_type_vx=1 rec_type_vz=1 rec_type_txx=1 rec_type_tzz=1 rec_type_txz=1 rec_type_p=0 \
+		rec_int_vx=0 rec_int_vz=0 rec_int_p=0 \
+		left=$BND right=$BND top=$BND bottom=$BND verbose=0 > log_adj_${tag}.txt 2>&1
+}
+onetrace_dot() { adj_dotprod "$1" "$2"; }
+
+echo "############ Point pair: source (${XSRC},${ZSRC}) <-> receiver (${XREC},${ZREC}) ############"
+
+echo ""
+echo "==== G1: Fx -> vx ===="
+# SNR note: S_c(Fx)~5e-9 makes a,b for a raw ~O(0.1) signal sit at the float32 noise floor when
+# printed. Scaling x and y by the same big constant scales a and b by that constant too (both
+# linear in x and in y throughout, including through the adjoint pipeline), so it doesn't change
+# a/b or eps -- purely a print-precision aid, not a change to the test.
+BOOST=1000000000
+# G1 tests native Fx against itself (both sides use the real, as-implemented -- 0.5x-weak --
+# mechanism), so x_fx stays uncorrected here; see adj_params.sh's AS_FX/AS_FX_CLEAN note.
+adj_make_signal 501001 x_fx_raw.su; sugain < x_fx_raw.su scale=$BOOST > x_fx.su
+adj_make_signal 502001 y_vx_raw.su; sugain < y_vx_raw.su scale=$BOOST > y_vx.su
+fwd1 x_fx.su 6 vx g1fwd
+A=$(onetrace_dot fwd_g1fwd_rvx.su y_vx.su)
+sugain < y_vx.su scale=$AS_FX | suflip flip=3 > adjsrc_g1.su
+adj1 adjsrc_g1.su 6 g1adj
+suflip < adj_g1adj_rvx.su flip=3 | sugain scale=$RHO0 > wdag_g1.su
+B=$(onetrace_dot x_fx.su wdag_g1.su)
+echo "a = $A"
+echo "b = $B"
+
+echo ""
+echo "==== G2: Fz -> vz ===="
+adj_make_signal 501002 x_fz_raw.su; sugain < x_fz_raw.su scale=$BOOST > x_fz.su
+adj_make_signal 502002 y_vz_raw.su; sugain < y_vz_raw.su scale=$BOOST > y_vz.su
+fwd1 x_fz.su 7 vz g2fwd
+A=$(onetrace_dot fwd_g2fwd_rvz.su y_vz.su)
+if [ "$TSHIFT_FZ" != "0" ]; then
+	sugain < y_vz.su scale=$AS_FZ | suflip flip=3 | suresamp dt=$DT nt=$NT tmin=$TSHIFT_FZ > adjsrc_g2.su
+else
+	sugain < y_vz.su scale=$AS_FZ | suflip flip=3 > adjsrc_g2.su
+fi
+adj1 adjsrc_g2.su 7 g2adj
+suflip < adj_g2adj_rvz.su flip=3 | sugain scale=$RHO0 > wdag_g2.su
+B=$(onetrace_dot x_fz.su wdag_g2.su)
+echo "a = $A"
+echo "b = $B"
+
+echo ""
+echo "==== G3: {Txx,Tzz} -> {txx,tzz} (coupled by C, C^{-1} -- tested together) ===="
+adj_make_signal 501003 x_txx.su
+adj_make_signal 501004 x_tzz.su
+adj_make_signal 502003 y_txx.su
+adj_make_signal 502004 y_tzz.su
+fwd1 x_txx.su 4 txx g3fwd_txx_txx; fwd1 x_txx.su 4 tzz g3fwd_txx_tzz
+fwd1 x_tzz.su 3 txx g3fwd_tzz_txx; fwd1 x_tzz.su 3 tzz g3fwd_tzz_tzz
+suop2 fwd_g3fwd_txx_txx_rtxx.su fwd_g3fwd_tzz_txx_rtxx.su op=sum > Fx_txx_total.su
+suop2 fwd_g3fwd_txx_tzz_rtzz.su fwd_g3fwd_tzz_tzz_rtzz.su op=sum > Fx_tzz_total.su
+A1=$(onetrace_dot Fx_txx_total.su y_txx.su); A2=$(onetrace_dot Fx_tzz_total.su y_tzz.su)
+echo "a1(txx)=$A1  a2(tzz)=$A2"
+
+sugain < y_txx.su scale=$AS_TXX_SELF  > s1.su; sugain < y_tzz.su scale=$AS_TXX_CROSS > s2.su
+suop2 s1.su s2.su op=sum | suflip flip=3 > adjsrc_txx.su
+sugain < y_txx.su scale=$AS_TZZ_CROSS > s3.su; sugain < y_tzz.su scale=$AS_TZZ_SELF  > s4.su
+suop2 s3.su s4.su op=sum | suflip flip=3 > adjsrc_tzz.su
+adj1 adjsrc_txx.su 4 g3adj_txx_txx; adj1 adjsrc_txx.su 4 g3adj_txx_tzz  # (single run gives both rec comps)
+adj1 adjsrc_tzz.su 3 g3adj_tzz_txx; adj1 adjsrc_tzz.su 3 g3adj_tzz_tzz
+suop2 adj_g3adj_txx_txx_rtxx.su adj_g3adj_tzz_txx_rtxx.su op=sum > raw_txx.su
+suop2 adj_g3adj_txx_tzz_rtzz.su adj_g3adj_tzz_tzz_rtzz.su op=sum > raw_tzz.su
+suflip < raw_txx.su flip=3 > rev_txx.su
+suflip < raw_tzz.su flip=3 > rev_tzz.su
+sugain < rev_txx.su scale=-$CINV_DIAG > w1.su; sugain < rev_tzz.su scale=$CINV_OFFDIAG > w2.su
+suop2 w1.su w2.su op=sum > wdag_txx.su
+sugain < rev_txx.su scale=$CINV_OFFDIAG > w3.su; sugain < rev_tzz.su scale=-$CINV_DIAG > w4.su
+suop2 w3.su w4.su op=sum > wdag_tzz.su
+B1=$(onetrace_dot x_txx.su wdag_txx.su); B2=$(onetrace_dot x_tzz.su wdag_tzz.su)
+echo "b1(txx)=$B1  b2(tzz)=$B2"
+echo "a = $A1 + $A2"
+echo "b = $B1 + $B2"
+
+echo ""
+echo "==== G4: Txz -> txz ===="
+adj_make_signal 501005 x_txz.su
+adj_make_signal 502005 y_txz.su
+fwd1 x_txz.su 2 txz g4fwd
+A=$(onetrace_dot fwd_g4fwd_rtxz.su y_txz.su)
+sugain < y_txz.su scale=$AS_TXZ | suflip flip=3 > adjsrc_g4.su
+adj1 adjsrc_g4.su 2 g4adj
+suflip < adj_g4adj_rtxz.su flip=3 | sugain scale=-$CINV_SHEAR > wdag_g4.su
+B=$(onetrace_dot x_txz.su wdag_g4.su)
+echo "a = $A"
+echo "b = $B"
+
+echo ""
+echo "==== G5: Fx -> vz  (off-diagonal; its adjoint is Fz-type at the receiver point, read vx back at the source point) ===="
+# G5 tests Fx-forward (native, 0.5x-weak) against a Fz-adjoint (native, clean strength), so
+# x_fx2 stays native (scaling the shared test vector is a no-op for a/b's ratio -- the fix
+# belongs on the Fz-adjoint side instead, via AS_FZ_HALF below).
+adj_make_signal 501006 x_fx2_raw.su; sugain < x_fx2_raw.su scale=$BOOST > x_fx2.su
+adj_make_signal 502006 y_vz2_raw.su; sugain < y_vz2_raw.su scale=$BOOST > y_vz2.su
+fwd1 x_fx2.su 6 vz g5fwd
+A=$(onetrace_dot fwd_g5fwd_rvz.su y_vz2.su)
+# native Fz is 2x clean-strong relative to native-weak Fx -- use AS_FZ_HALF so this Fz-adjoint
+# matches native Fx's strength (the forward half this test actually used).
+sugain < y_vz2.su scale=$AS_FZ_HALF | suflip flip=3 > adjsrc_g5.su
+adj1 adjsrc_g5.su 7 g5adj
+suflip < adj_g5adj_rvx.su flip=3 | sugain scale=$RHO0 > wdag_g5.su
+B=$(onetrace_dot x_fx2.su wdag_g5.su)
+echo "a = $A"
+echo "b = $B"
+
+echo ""
+echo "==== G6: Fz -> vx  (off-diagonal; its adjoint is Fx-type at the receiver point, read vz back at the source point) ===="
+adj_make_signal 501007 x_fz2_raw.su; sugain < x_fz2_raw.su scale=$BOOST > x_fz2.su
+adj_make_signal 502007 y_vx2_raw.su; sugain < y_vx2_raw.su scale=$BOOST > y_vx2.su
+fwd1 x_fz2.su 7 vx g6fwd
+A=$(onetrace_dot fwd_g6fwd_rvx.su y_vx2.su)
+# G6 tests Fz-forward (native, clean) against a Fx-adjoint, so the Fx-adjoint uses AS_FX_CLEAN
+# (the x2-corrected constant) to bring it up to clean strength to match.
+sugain < y_vx2.su scale=$AS_FX_CLEAN | suflip flip=3 > adjsrc_g6.su
+adj1 adjsrc_g6.su 6 g6adj
+suflip < adj_g6adj_rvz.su flip=3 | sugain scale=$RHO0 > wdag_g6.su
+B=$(onetrace_dot x_fz2.su wdag_g6.su)
+echo "a = $A"
+echo "b = $B"
+
+echo ""
+echo "############ done: $OUT ############"

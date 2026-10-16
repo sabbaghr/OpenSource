@@ -1,0 +1,60 @@
+#!/bin/bash
+# adj_step1_setup.scr -- Step 1 ("Setup") of the elastic adjoint dot-product test.
+# Builds the model (smooth heterogeneous background + exact phase-1 patches at every P_x/P_y
+# point) and demonstrates the band-limited tapered random signal recipe, then prints the
+# key sample values needed to eyeball-verify both against the hand-derived expectations in
+# adj_params.sh / docs/adjoint_dotproduct_step0_report.md. Glue only: every computation is
+# done by makemod, fdelmodc-family utilities, or Seismic Unix programs.
+set -e
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/adj_params.sh"
+. "$HERE/adj_lib.sh"
+
+RUN="$HERE/run_step1"
+rm -rf "$RUN"
+mkdir -p "$RUN"
+
+echo "############ Step 1: building model in $RUN ############"
+adj_build_model "$RUN"
+
+echo ""
+echo "############ P_x (source) points ############"
+set -- $PX_X; xarr=("$@"); set -- $PX_Z; zarr=("$@")
+for i in "${!xarr[@]}"; do echo "  x$((i+1)) = (${xarr[$i]}, ${zarr[$i]})"; done
+
+echo "############ P_y (receiver) points ############"
+set -- $PY_X; xarr=("$@"); set -- $PY_Z; zarr=("$@")
+for i in "${!xarr[@]}"; do echo "  y$((i+1)) = (${xarr[$i]}, ${zarr[$i]})"; done
+
+cd "$RUN"
+
+echo ""
+echo "############ Model spot-checks (compare printed value to the expected= comment) ############"
+echo "-- cp(0,0), expect ${CP_LEFT}.0 --"
+suwind < model_cp.su key=tracl min=0 max=0 | suascii ftn=0 2>/dev/null | grep -E '^ *1 '
+echo "-- cp(${SIZEX},0), expect ${CP_RIGHT}.0 --"
+suwind < model_cp.su key=tracl min=$((SIZEX/DX)) max=$((SIZEX/DX)) | suascii ftn=0 2>/dev/null | grep -E '^ *1 '
+echo "-- cp(500,0), expect 3000.0 (lerp midpoint) --"
+suwind < model_cp.su key=tracl min=$((500/DX)) max=$((500/DX)) | suascii ftn=0 2>/dev/null | grep -E '^ *1 '
+echo "-- cp/cs/ro at P_x point x1's patch center (300,300), expect ${VP0}.0 / ${VS0}.0 / ${RHO0}.0 --"
+suwind < model_cp.su key=tracl min=$((300/DX)) max=$((300/DX)) | suascii ftn=0 2>/dev/null | grep -E '^ *61 '
+suwind < model_cs.su key=tracl min=$((300/DX)) max=$((300/DX)) | suascii ftn=0 2>/dev/null | grep -E '^ *61 '
+suwind < model_ro.su key=tracl min=$((300/DX)) max=$((300/DX)) | suascii ftn=0 2>/dev/null | grep -E '^ *61 '
+echo "-- cp at (310,300), 2 cells right of that patch center: expect back on the background gradient (3003.0), NOT ${VP0}.0 --"
+suwind < model_cp.su key=tracl min=$((310/DX)) max=$((310/DX)) | suascii ftn=0 2>/dev/null | grep -E '^ *61 '
+echo "-- cp/cs/ro at P_y point y9's patch center (400,600), expect ${VP0}.0 / ${VS0}.0 / ${RHO0}.0 --"
+suwind < model_cp.su key=tracl min=$((400/DX)) max=$((400/DX)) | suascii ftn=0 2>/dev/null | grep -E '^ *121 '
+suwind < model_cs.su key=tracl min=$((400/DX)) max=$((400/DX)) | suascii ftn=0 2>/dev/null | grep -E '^ *121 '
+suwind < model_ro.su key=tracl min=$((400/DX)) max=$((400/DX)) | suascii ftn=0 2>/dev/null | grep -E '^ *121 '
+
+echo ""
+echo "############ Random band-limited tapered signal demo (5 seeds) ############"
+for s in $SEEDS; do
+	adj_make_signal "$s" "sig_seed${s}.su"
+	echo "-- seed=$s: sample 1 (expect exact 0), sample $NT (expect exact 0), sample $((NT/2)) (expect nonzero) --"
+	suascii < "sig_seed${s}.su" ftn=0 2>/dev/null | grep -E "^ *1 |^ *$NT |^ *$((NT/2)) "
+done
+
+echo ""
+echo "############ Step 1 setup complete: $RUN/model_{cp,cs,ro}.su, sig_seed{101..105}.su ############"

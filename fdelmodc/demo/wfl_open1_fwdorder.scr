@@ -1,0 +1,9 @@
+#!/bin/bash
+# One-sided (open top line) reconstruction with a FREE SURFACE, forward-time-order injection (wfl_open=1 wfl_fwd=1).
+# Homogeneous model. Self-contained: model, wavelets, forward run (records the top line), reconstruction run
+# (injects the line data in the recorded order), snapshots, point traces below the line. No time reversal in the
+# comparisons. Parameters: wfl_params_open.sh.  Outputs: demo/wfl_cases_open/fwdorder/.
+# Options: VIEW=0 SNAPFIELDS="vx vz" PLOTCOMPS="vz tzz" CLIPFRAC=0.1 ./wfl_open1_fwdorder.scr
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_open.sh"
+export WFL_FWD=1
+exec "$(dirname "$0")/wfl_case.sh" fwdorder 0 0

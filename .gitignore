@@ -104,3 +104,7 @@ fdelfwi/test_wave_op_dp
 fdelfwi/test_bandpass_filter
 ._*
 fdelmodc/demo/marmousi_acoustic/*.pdf
+
+# wavefield-reconstruction run outputs (stay on each machine, never in git)
+fdelmodc/demo/wfl_cases*/
+fdelmodc/demo/adjtest/run_*/

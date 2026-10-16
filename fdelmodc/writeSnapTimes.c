@@ -142,8 +142,7 @@ int writeSnapTimes(modPar mod, snaPar sna, bndPar bnd, srcPar src, wavPar wav, i
 				ize = sna.z2;
 				ix = ixs;
 				ix2 = ix;
-				if (sna.type.vz || sna.type.txz) izs = -1;
-                else izs = 0;
+				izs = 0;
         		if ( !ISODD(bnd.lef)) hdr.gx = 1000*(mod.x0 - bnd.npml*mod.dx);
 			}
 

@@ -1,0 +1,18 @@
+#!/bin/bash
+# Same recipe as wfl_open4 (reflector, reverse-time injection, taper on the line ends, line x=10..2990)
+# but now injecting the SCATTERED field: true recording minus a second forward run's recording through
+# the background model with NO reflector (exact everywhere above z=1600, or -- with the free surface --
+# exact including the surface itself and its ghosts/multiples, which then cancel in the subtraction the
+# same way the OBN case's known seafloor did). This is the same reference-subtraction (REFSUB) used in
+# the OBN/point-diffractor migration work.
+# BND_TOP_FWD=1 (default 2) switches top=absorbing to top=free-surface, in BOTH the true and reference
+# forward runs and the reconstruction (all three read the same $BND_TOP_FWD/$BND_TOP_RECON).
+# Outputs: demo/wfl_cases_open/reflector_timereversed_{abs,fs}_taper_refsub/.
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_open_refl.sh"
+export WFL_FWD=0 BWD=1
+export BND_TOP_FWD=${BND_TOP_FWD:-2} BND_TOP_RECON=${BND_TOP_RECON:-2}
+export WFL_X1=10 WFL_X2=2990
+export REFSUB=1
+export TAPER=${TAPER:-100}
+if [ "$BND_TOP_FWD" = "1" ]; then base=reflector_timereversed_fs; else base=reflector_timereversed_abs; fi
+exec "$(dirname "$0")/wfl_case.sh" $base 1 0

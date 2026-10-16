@@ -1,3 +1,6 @@
+#ifndef _fdelmodc_h
+#define _fdelmodc_h
+
 #include<stdlib.h>
 #include<stdio.h>
 #include<math.h>
@@ -65,6 +68,25 @@ typedef struct _modelPar { /* Model Parameters */
 	int ischeme;
 	int grid_dir;
 	int sh;
+	/* Wavefield reconstruction (Aaker et al. 2020): 0=off, 1=record boundary, 2=inject/reconstruct */
+	int wfl_recon;
+	int wfl_taper; /* [TAPER] opt-in, default 0: cosine ramp (0 at the end point -> 1 after wfl_taper points) on all sources of the horizontal face(s)/line ends */
+	float wfl_edgesign; /* [EDGESIGN] opt-in, default 1: factor applied to ALL five injected sources of the first and last point of each horizontal face/line (-1 = reversed polarity) */
+	int wfl_open; /* [OPEN] opt-in, default 0: single-sided reconstruction surface = the TOP face only (z=wfl_z1, x=wfl_x1..wfl_x2); wfl_z2 ignored */
+	int wfl_fwd; /* [FWD-ORDER] opt-in, default 0, wfl_recon=2: inject the recorded data in FORWARD time order (retarded / radiating), all five fields negated at load; needed for open surfaces */
+	int wfl_tshift; /* [TSHIFT] opt-in, default 0, wfl_recon=2 only: take the traction (force-source) data from sample isam-wfl_tshift; 1 = correct injection timing */
+	int wfl_corner2; /* [CORNER2] opt-in, default 0, wfl_recon=1 and 2 (must match): corners appear on all faces (horizontal + vertical normal, weight 1/2 each) */
+	int wfl_bwd; /* [BWD-KERNEL] opt-in, default 0: with wfl_recon=2 run the update kernel with dt->-dt (native time reversal) */
+	int wfl_vectorial; /* [VECTORIAL] opt-in, default 0, wfl_recon=2 only: Ravasi & Curtis (2013) eq. 8
+	                     * "vectorial" (common-practice) wavefield extrapolation -- recorded vx,vz routed
+	                     * through the FORCE channel (-> vx,vz update) directly, in place of the traction
+	                     * that channel normally carries; NOTHING is injected into txx,tzz,txz. This is the
+	                     * reduced, non-reciprocal heuristic the paper contrasts with full TENSORIAL
+	                     * injection (both traction AND velocity, the default/existing behaviour), and
+	                     * which they show introduces bidirectional (up+down) injection and P/S mode
+	                     * mixing artifacts not present in the exact formula. */
+	float wfl_x1, wfl_x2, wfl_z1, wfl_z2; /* Omega rectangle, absolute model coordinates */
+	char *wfl_file; /* boundary wavefield file (written in record mode, read in inject mode) */
 	char *file_cp;
 	char *file_ro;
 	char *file_cs;
@@ -200,6 +222,8 @@ typedef struct _boundPar { /* Boundary Parameters */
 #if __STDC_VERSION__ >= 199901L
   /* "restrict" is a keyword */
 #else
-#define restrict 
+#define restrict
 #endif
+
+#endif /* _fdelmodc_h */
 

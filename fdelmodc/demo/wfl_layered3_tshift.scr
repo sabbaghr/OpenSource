@@ -1,0 +1,7 @@
+#!/bin/bash
+# Layered model (water + 2 elastic layers, free surface). Case 3: tshift   (wfl_tshift=1 wfl_corner2=0, traction timing shift only)
+# Self-contained: builds the model and wavelets, runs forward + reconstruction, shows snapshots and the
+# point-receiver comparison (water / layer 1 / layer 2). Outputs in demo/wfl_cases_layered/tshift/.
+# Parameters: wfl_params_layered.sh.  Options: BND_TOP_RECON=2 BWD=0 VIEW=0 SNAPFIELDS="vx vz" PLOTCOMPS="vz tzz" ./wfl_layered3_tshift.scr
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_layered.sh"
+exec "$(dirname "$0")/wfl_case.sh" tshift 1 0

@@ -1,0 +1,6 @@
+#!/bin/bash
+# Case 3: tshift   (wfl_tshift=1 wfl_corner2=0, traction timing shift only)
+# Self-contained: builds model/wavelets, runs forward + reconstruction, shows snapshots and the
+# point-receiver comparison. Outputs in demo/wfl_cases/tshift/.
+# Options: BWD=0 VIEW=0 SNAPFIELDS="vx vz txz" CLIPFRAC=0.1 ./wfl_case3_tshift.scr
+exec "$(dirname "$0")/wfl_case.sh" tshift 1 0

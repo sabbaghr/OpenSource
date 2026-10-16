@@ -1,0 +1,14 @@
+#!/bin/bash
+# Same OBN setup as wfl_obn2_timereversed.scr, but the injected line data are the SCATTERED field:
+# boundary.bin (true model) minus a second forward run's recording through a CONSTANT BACKGROUND
+# model with no reflectors (pure water everywhere, wfl_params_obn.sh:make_model_ref). This is the
+# rigorous "Born data" isolation of Ravasi & Curtis (2013), as opposed to wfl_obn3's amplitude-picked
+# taper. Reverse-time injection (backward kernel + traction timing shift) of this scattered-only data.
+# Snapshots are taken finely (SNAP_DTSNAP) for the RTM imaging condition.
+# Outputs: demo/wfl_cases_obn/timereversed_refsub/.
+# Options: SNAP_DTSNAP=0.01 VIEW=0 ./wfl_obn4_timereversed_refsub.scr
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_obn.sh"
+export WFL_FWD=0 BWD=1
+export REFSUB=1
+export SNAP_DTSNAP=${SNAP_DTSNAP:-0.01}
+exec "$(dirname "$0")/wfl_case.sh" timereversed 1 0

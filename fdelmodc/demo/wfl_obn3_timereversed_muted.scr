@@ -1,0 +1,15 @@
+#!/bin/bash
+# Same OBN setup as wfl_obn2_timereversed.scr, but the direct arrival is MUTED on the recorded line
+# data before reverse-time injection (auto-picked from the recorded vz, cosine-taper mute -- see
+# MUTE_* options in wfl_case.sh), keeping only the reflected/scattered part -- this is the "Born data"
+# precondition of Ravasi & Curtis (2013, Geophysics 78(6), S265-S284) for their exact tensorial
+# extrapolation to cleanly reconstruct the scattered field with a one-sided receiver line.
+# Snapshots are also taken much more densely (SNAP_DTSNAP) than the QC default, needed for an RTM
+# imaging condition (zero-lag crosscorrelation summed over time samples).
+# Outputs: demo/wfl_cases_obn/timereversed_mute/.
+# Options: MUTE_THRESH=0.15 MUTE_PAD=0.05 MUTE_TAPER=0.05 SNAP_DTSNAP=0.01 VIEW=0 ./wfl_obn3_timereversed_muted.scr
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_obn.sh"
+export WFL_FWD=0 BWD=1
+export MUTE=1
+export SNAP_DTSNAP=${SNAP_DTSNAP:-0.01}
+exec "$(dirname "$0")/wfl_case.sh" timereversed 1 0

@@ -1,0 +1,11 @@
+#!/bin/bash
+# Single point-diffractor OBN case, REVERSE-TIME injection of the scattered field (true model minus the
+# background model WITHOUT the diffractor -- an EXACT match everywhere except at the single point, no
+# smoothing approximation needed here, unlike the layered case). This is the clean test: the reconstructed
+# wavefield should show ONE converging/diverging circular event at the diffractor, not a layered mess.
+# Outputs: demo/wfl_cases_obn_diffr/timereversed_refsub/.
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_obn_diffr.sh"
+export WFL_FWD=0 BWD=1
+export REFSUB=1
+export SNAP_DTSNAP=${SNAP_DTSNAP:-0.02}
+exec "$(dirname "$0")/wfl_case.sh" timereversed 1 0

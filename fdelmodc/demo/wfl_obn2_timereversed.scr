@@ -1,0 +1,8 @@
+#!/bin/bash
+# Same OBN setup with REVERSE-TIME injection of the recorded OBN data (backward kernel + traction timing shift).
+# With a one-sided line only the recorded UP-going waves (reflections from below the seafloor) become down-going in
+# reversed time and are reconstructed (RTM receiver-side wavefield); the reversed down-going data cannot be.
+# Comparisons use the time-reversed forward field. Parameters: wfl_params_obn.sh.  Outputs: demo/wfl_cases_obn/timereversed/.
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_obn.sh"
+export WFL_FWD=0 BWD=1
+exec "$(dirname "$0")/wfl_case.sh" timereversed 1 0

@@ -1,0 +1,19 @@
+#!/bin/bash
+# 5-diffractor, closed-square-receiver test case for the nonlinear (eq. 9/21 Ravasi & Curtis 2013;
+# eq. 3 Ravasi/Vasconcelos/Curtis 2014) source-receiver imaging condition. Constant cp,cs everywhere,
+# density-only diffractors, source outside the closed receiver box Omega.
+#
+# This single run gives, via the standard REFSUB=1 RECON_SHARP=1 closed-box pipeline:
+#   snap_ref        = G^0  (source-side, background/reference forward field)
+#   snap_forw       = exact-model forward field -> G^S = snap_forw - snap_ref (computed by the imaging script)
+#   snap_recon_trev = the EXACT-model half of G-tilde^S (scattered data back-propagated through the exact model)
+#   boundary_ref.bin, boundary_scat.bin = direct-only / scattered-only recorded data, written to disk,
+#     reused by wfl_nonlinear2_direct_bg.scr and wfl_nonlinear3_scat_bg.scr for the remaining 2 passes
+#     needed to build G-tilde^0 and the background half of G-tilde^S.
+#
+# Outputs: demo/wfl_cases_nonlinear/<name>_refsub_sharp/.
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_nonlinear_diffr.sh"
+export WFL_FWD=0 BWD=1
+export REFSUB=1
+export RECON_SHARP=1
+exec "$(dirname "$0")/wfl_case.sh" closed 1 0

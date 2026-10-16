@@ -1,0 +1,15 @@
+#!/bin/bash
+# One-sided (open top line) + reflector at z=1600, REVERSE-TIME injection (backward kernel + traction timing shift),
+# with an ABSORBING top boundary (CPML, no free surface) in both runs: the recorded line data are injected in reversed
+# time order. Same model/recording geometry as wfl_open3_reflector.scr but without the free surface.
+# Traces and snapshots are compared with the time-reversed forward field. Parameters: wfl_params_open_refl.sh.
+# The recording line runs from x=10 to x=2990 (whole model width; WFL_X1/WFL_X2 override; the earlier x=500..2500
+# run is in reflector_timereversed_abs_x500-2500/).  Outputs: demo/wfl_cases_open/reflector_timereversed_abs/.   (the free-surface version of this run was in
+# wfl_cases_open/reflector_timereversed/;  run with BND_TOP_FWD=1 BND_TOP_RECON=1 to restore it)
+# Options: VIEW=0 SNAPFIELDS="vx vz" PLOTCOMPS="vz tzz" ./wfl_open4_reflector_timereversed.scr
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_open_refl.sh"
+export WFL_FWD=0 BWD=1
+export BND_TOP_FWD=${BND_TOP_FWD:-2} BND_TOP_RECON=${BND_TOP_RECON:-2}
+export WFL_X1=${WFL_X1:-10} WFL_X2=${WFL_X2:-2990}   # recording line across (almost) the whole model width
+if [ "$BND_TOP_FWD" = "2" ]; then name=reflector_timereversed_abs; else name=reflector_timereversed; fi
+exec "$(dirname "$0")/wfl_case.sh" $name 1 0

@@ -1,0 +1,14 @@
+#!/bin/bash
+# Water + known seafloor (z=500) + one target reflector (z=1100), free surface on top, open receiver
+# line just below the seafloor (x=10..2990), reverse-time injection of the SCATTERED field (REFSUB:
+# migration model keeps water+seafloor exact, smooths only the z=1100 contrast), taper on the line ends
+# (quintic-smoothstep window, no curvature discontinuity; default width raised 100->300 points = 750 m
+# after visible edge-diffraction artifacts remained with the old cosine window at 100 points = 250 m).
+# Outputs: demo/wfl_cases_seafloor_refl/timereversed_taper_refsub/.
+# Options: NPML=200 SMOOTH_HALFWIDTH=80 SMOOTH_NITER=4 SNAPFIELDS="vx vz txx tzz txz" SNAP_DTSNAP=0.01 ./wfl_seafloor1_refl_timereversed_refsub_taper.scr
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_seafloor_refl.sh"
+export WFL_FWD=0 BWD=1
+export WFL_X1=10 WFL_X2=2990
+export REFSUB=1
+export TAPER=${TAPER:-300}
+exec "$(dirname "$0")/wfl_case.sh" timereversed 1 0

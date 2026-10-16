@@ -1,0 +1,6 @@
+#!/bin/bash
+# Closed-box reconstruction (wfl_tshift=1 wfl_corner2=1, same "both" recipe validated in wfl_case4_both.scr)
+# with the new model: source outside Omega, reflector inside Omega. No REFSUB (closed contour reconstructs
+# the exact total field). Outputs in demo/wfl_cases_closed_refl/both/.
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_closed_refl.sh"
+exec "$(dirname "$0")/wfl_case.sh" both 1 1

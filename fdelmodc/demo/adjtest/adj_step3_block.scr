@@ -1,0 +1,107 @@
+#!/bin/bash
+# adj_step3_block.scr BASESEED BLOCK -- Step 3 diagnostic matrix, one block at a time.
+#
+# BLOCK in {vv, vt, tv, tt, all}: which components of x (v=Fx,Fz only; t=Txx,Tzz,Txz only) and
+# of y (v=vx,vz only; t=txx,tzz,txz only) are "active" -- see the task's diagnostic table.
+#
+# Reuses the PER-src_type recordings already produced by adj_step2_forward.scr and
+# adj_step2_adjoint.scr (rec_<name>_r<comp>.su, before they were summed into the "all
+# components" totals) -- no new fdelmodc runs needed, since by linearity Fx(x restricted to a
+# subset of src types) is just the sum of that subset's own already-computed recordings, and
+# M^{-1} is block-diagonal (v-block of y only ever produces Fx/Fz adjoint sources, t-block only
+# ever produces Txx/Tzz/Txz ones) so the existing adjoint recordings are already exactly what
+# each block needs, just summed over a different subset.
+set -e
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/adj_params.sh"
+. "$HERE/adj_lib.sh"
+
+BASESEED=${1:-101}
+BLOCK=${2:-vv}
+FWDDIR="$HERE/run_step2_fwd_seed${BASESEED}"
+ADJDIR="$HERE/run_step2_adj_seed${BASESEED}/adjrun"
+YDIR="$HERE/run_step2_adj_seed${BASESEED}/y"
+OUT="$HERE/run_step3_${BLOCK}_seed${BASESEED}"
+rm -rf "$OUT"; mkdir -p "$OUT/rev" "$OUT/wdag"
+
+case "$BLOCK" in
+	vv) XC="1 2"; YC="1 2" ;;
+	vt) XC="1 2"; YC="3 4 5" ;;
+	tv) XC="3 4 5"; YC="1 2" ;;
+	tt) XC="3 4 5"; YC="3 4 5" ;;
+	all) XC="1 2 3 4 5"; YC="1 2 3 4 5" ;;
+	*) echo "unknown block '$BLOCK' (want vv, vt, tv, tt, or all)" >&2; exit 1 ;;
+esac
+echo "############ Block $BLOCK: x uses src components {$XC}, y uses field components {$YC} ############"
+echo "############ (1=Fx/vx 2=Fz/vz 3=Txx/txx 4=Tzz/tzz 5=Txz/txz) ############"
+
+echo "-- a = <Fx(x|block), y|block> --"
+: > "$OUT/Fx_blk.su"; : > "$OUT/y_blk.su"
+for yc in $YC; do
+	rname=${REC_NAMES[$((yc-1))]}
+	first=1
+	for xc in $XC; do
+		cname=${COMP_NAMES[$((xc-1))]}
+		if [ "$first" = "1" ]; then
+			cp "$FWDDIR/rec_${cname}_r${rname}.su" "$OUT/sum_${rname}.su"; first=0
+		else
+			suop2 "$OUT/sum_${rname}.su" "$FWDDIR/rec_${cname}_r${rname}.su" op=sum > "$OUT/sum_${rname}.su.tmp"
+			mv "$OUT/sum_${rname}.su.tmp" "$OUT/sum_${rname}.su"
+		fi
+	done
+	cat "$OUT/sum_${rname}.su" >> "$OUT/Fx_blk.su"
+	cat "$YDIR/y_${rname}.su" >> "$OUT/y_blk.su"
+done
+A=$(adj_dotprod "$OUT/Fx_blk.su" "$OUT/y_blk.su")
+
+echo "-- b = <x|block, F^t(y|block)|block> --"
+needed_r=""
+for xc in $XC; do
+	case $xc in
+		1) needed_r="$needed_r vx" ;;
+		2) needed_r="$needed_r vz" ;;
+		3|4) needed_r="$needed_r txx tzz" ;;
+		5) needed_r="$needed_r txz" ;;
+	esac
+done
+needed_r=$(printf '%s\n' $needed_r | sort -u)
+
+for r in $needed_r; do
+	first=1
+	for yc in $YC; do
+		cname=${COMP_NAMES[$((yc-1))]}
+		if [ "$first" = "1" ]; then
+			cp "$ADJDIR/rec_${cname}_r${r}.su" "$OUT/raw_${r}.su"; first=0
+		else
+			suop2 "$OUT/raw_${r}.su" "$ADJDIR/rec_${cname}_r${r}.su" op=sum > "$OUT/raw_${r}.su.tmp"
+			mv "$OUT/raw_${r}.su.tmp" "$OUT/raw_${r}.su"
+		fi
+	done
+	suflip < "$OUT/raw_${r}.su" flip=3 > "$OUT/rev/rev_${r}.su"
+done
+
+[ -f "$OUT/rev/rev_vx.su" ] && sugain < "$OUT/rev/rev_vx.su" scale=$RHO0 > "$OUT/wdag/wdag_vx.su"
+[ -f "$OUT/rev/rev_vz.su" ] && sugain < "$OUT/rev/rev_vz.su" scale=$RHO0 > "$OUT/wdag/wdag_vz.su"
+if [ -f "$OUT/rev/rev_txx.su" ]; then
+	sugain < "$OUT/rev/rev_txx.su" scale=-$CINV_DIAG > "$OUT/a1.su"
+	sugain < "$OUT/rev/rev_tzz.su" scale=$CINV_OFFDIAG > "$OUT/a2.su"
+	suop2 "$OUT/a1.su" "$OUT/a2.su" op=sum > "$OUT/wdag/wdag_txx.su"
+	sugain < "$OUT/rev/rev_txx.su" scale=$CINV_OFFDIAG > "$OUT/b1.su"
+	sugain < "$OUT/rev/rev_tzz.su" scale=-$CINV_DIAG > "$OUT/b2.su"
+	suop2 "$OUT/b1.su" "$OUT/b2.su" op=sum > "$OUT/wdag/wdag_tzz.su"
+fi
+[ -f "$OUT/rev/rev_txz.su" ] && sugain < "$OUT/rev/rev_txz.su" scale=-$CINV_SHEAR > "$OUT/wdag/wdag_txz.su"
+
+: > "$OUT/x_blk.su"; : > "$OUT/wdag_blk.su"
+for xc in $XC; do
+	cname=${COMP_NAMES[$((xc-1))]} rname=${REC_NAMES[$((xc-1))]}
+	cat "$FWDDIR/src_${cname}.su" >> "$OUT/x_blk.su"
+	cat "$OUT/wdag/wdag_${rname}.su" >> "$OUT/wdag_blk.su"
+done
+B=$(adj_dotprod "$OUT/x_blk.su" "$OUT/wdag_blk.su")
+
+echo ""
+echo "a = $A"
+echo "b = $B"
+echo "############ block $BLOCK done: $OUT ############"

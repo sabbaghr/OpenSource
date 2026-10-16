@@ -1,0 +1,7 @@
+#!/bin/bash
+# Layered model (water + 2 elastic layers, free surface). Case 2: corner2   (wfl_tshift=0 wfl_corner2=1, corner points repeated on the vertical faces only)
+# Self-contained: builds the model and wavelets, runs forward + reconstruction, shows snapshots and the
+# point-receiver comparison (water / layer 1 / layer 2). Outputs in demo/wfl_cases_layered/corner2/.
+# Parameters: wfl_params_layered.sh.  Options: BND_TOP_RECON=2 BWD=0 VIEW=0 SNAPFIELDS="vx vz" PLOTCOMPS="vz tzz" ./wfl_layered2_corner2.scr
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_layered.sh"
+exec "$(dirname "$0")/wfl_case.sh" corner2 0 1

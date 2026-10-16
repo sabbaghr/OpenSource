@@ -1,0 +1,8 @@
+#!/bin/bash
+# Same one-sided setup, but with the time-reversed injection of the closed-box workflow (backward kernel +
+# traction timing shift). EXPECTED NOT TO RECONSTRUCT the forward field: an open line only radiates downward,
+# while the time-reversed field below it needs waves arriving from far below. For comparison with case 1.
+# Outputs: demo/wfl_cases_open/timereversed/.
+export WFL_PARAMS="$(cd "$(dirname "$0")" && pwd)/wfl_params_open.sh"
+export WFL_FWD=0 BWD=1
+exec "$(dirname "$0")/wfl_case.sh" timereversed 1 0

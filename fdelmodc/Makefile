@@ -49,6 +49,13 @@ SRCC	= $(PRG).c \
 		getModelInfo.c  \
 		applySource.c  \
 		getRecTimes.c  \
+		bndinterp.c  \
+		defineRecBoundary.c  \
+		storeBoundaryWav.c  \
+		injectBoundary.c  \
+		injectBoundaryBwd.c  \
+		writeBoundaryWav.c  \
+		readBoundaryWav.c  \
 		getBeamTimes.c  \
 		writeSnapTimes.c  \
 		writeSrcRecPos.c  \
@@ -71,6 +78,12 @@ SRCC	= $(PRG).c \
 		getpars.c
 
 OBJC	= $(SRCC:%.c=%.o)
+
+# No implicit rule here tracks header dependencies, so without this every
+# object file built before a fdelmodc.h/bndinterp.h/bndsrc.h edit goes stale
+# silently (struct layout mismatch at link time, no compile error) -- force
+# a rebuild of everything whenever these headers change.
+$(OBJC): fdelmodc.h bndinterp.h bndsrc.h
 
 $(PRG):	$(OBJC) fdelmodc.h
 	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c 
