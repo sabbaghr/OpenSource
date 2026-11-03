@@ -44,6 +44,37 @@ void vmess(char *fmt, ...);
  * Grid positions adj.xi[]/adj.zi[] already include staggered-grid
  * boundary offsets (set by readResidual).
  *
+ * ------------------------------------------------------------------
+ * RECEIVER INTERPOLATION MODE 2 (adj.int_vx / adj.int_vz == 2)
+ * ------------------------------------------------------------------
+ * With rec_int_vx=2 / rec_int_vz=2 the forward recording in
+ * getRecTimes.c is no longer a plain grid-point read.  For vz it is
+ *
+ *   d_vz = 0.5 * SUM over m in {iz, iz+1} of
+ *            ( vz[ix,m] - 0.5*roz[ix,m]*Dz(m) )
+ *   Dz(m) = c1*( tzz[ix,m]  -tzz[ix,m-1] +txz[ix+1,m]-txz[ix,m]  )
+ *         + c2*( tzz[ix,m+1]-tzz[ix,m-2] +txz[ix+2,m]-txz[ix-1,m])
+ *
+ * i.e. a 2-node mean onto the Txx/Tzz node (space) PLUS a half-step
+ * of the velocity update that advances v by +dt/2 onto the stress
+ * time level (time).  roz already carries dt/dx (readModel.c).
+ *
+ * This matters for any misfit that multiplies a velocity residual by
+ * a stress residual at the same receiver (the Kirchhoff-Helmholtz
+ * energy-flux objective), because with mode 0 the two factors sit
+ * dt/2 apart in time and dz/2 apart in space.
+ *
+ * The transpose therefore scatters into BOTH the velocity array (the
+ * v term, at the force injection point, phase 1) and the stress
+ * arrays (the Dz term, at the stress injection point, phase 2).  So
+ * under mode 2 a velocity-type trace is active in both phases, not
+ * just phase 1.
+ *
+ * c1/c2 are hardcoded to the 4th-order values here because
+ * getRecTimes.c hardcodes them too, for every iorder.  The transpose
+ * must match the operator that was actually applied, not the one the
+ * scheme order would suggest.
+ *
  *   AUTHOR:
  *           Based on applySource.c by Jan Thorbecke
  *           Adapted for FWI adjoint backpropagation.
@@ -52,12 +83,20 @@ void vmess(char *fmt, ...);
 
 #define BLEND_TRANSITION_DEPTH 5  /* grid points for blending transition */
 
+/* Under mode 2 the transpose scatters each trace over a 4th-order
+ * stencil, so neighbouring receivers write to the same nodes and the
+ * accumulation must be atomic.  (The mode-0 path writes one node per
+ * trace and is left as it was.) */
+#define ADJ_ADD(a, i, v) do { _Pragma("omp atomic") (a)[i] += (v); } while (0)
+
 int applyAdjointSource(modPar mod, adjSrcPar adj, int itime,
 	float *vx, float *vz, float *tzz, float *txx, float *txz,
-	float *mul, int rec_delay, int rec_skipdt, int phase, int verbose)
+	float *rox, float *roz, float *mul,
+	int rec_delay, int rec_skipdt, int phase, int verbose)
 {
 	int isrc, isam, n1;
 	float src_ampl;
+	const float c1 = 9.0f/8.0f, c2 = -1.0f/24.0f;
 
 	/* Check if this time step aligns with receiver sampling */
 	if (itime < rec_delay) return 0;
@@ -73,13 +112,22 @@ int applyAdjointSource(modPar mod, adjSrcPar adj, int itime,
 		int sorient = adj.orient[isrc];
 		size_t ix   = adj.xi[isrc];
 		size_t iz   = adj.zi[isrc];
+		/* Is THIS trace's component co-located by recording mode 2? */
+		int colo     = ((stype == 6 && adj.int_vx == 2) ||
+		                (stype == 7 && adj.int_vz == 2));
+		/* getRecTimes.c averages txz onto the Txx/Tzz node whenever
+		 * EITHER velocity flag is 2, so txz keys off both. */
+		int colo_txz = (stype == 2 && sorient == 1 &&
+		                (adj.int_vx == 2 || adj.int_vz == 2));
 
 		/* Phase filtering:
 		 *   phase 1 = force injection point  -> only types > 5
-		 *   phase 2 = stress injection point -> only types <= 5
+		 *   phase 2 = stress injection point -> types <= 5, plus the
+		 *             stress half of a co-located velocity trace
+		 *             (the -0.5*ro*Dsigma half-step term).
 		 */
 		if (phase == 1 && stype <= 5) continue;
-		if (phase == 2 && stype > 5)  continue;
+		if (phase == 2 && stype > 5 && !colo) continue;
 
 		src_ampl = adj.wav[isrc * adj.nt + isam];
 		if (src_ampl == 0.0f) continue;
@@ -89,12 +137,62 @@ int applyAdjointSource(modPar mod, adjSrcPar adj, int itime,
 		/* ================================================ */
 
 		if (stype == 6) {
-			/* Fx -> inject into vx */
-			vx[ix * n1 + iz] += src_ampl;
+			if (!colo) {
+				/* Fx -> inject into vx */
+				vx[ix * n1 + iz] += src_ampl;
+			}
+			else {
+				/* Transpose of the mode-2 vx recording.  readResidual
+				 * registers type 6 at the vx node ix2 = ix+1, so the two
+				 * averaged nodes are m = ix-1 (=ix_rec) and m = ix
+				 * (=ix2); iz is already the Txx/Tzz row. */
+				size_t m;
+				for (m = ix - 1; m <= ix; m++) {
+					if (phase == 1) {
+						ADJ_ADD(vx, m * n1 + iz, 0.5f * src_ampl);
+					}
+					else {
+						float g = -0.25f * rox[m * n1 + iz] * src_ampl;
+						ADJ_ADD(txx, m * n1 + iz,        c1 * g);
+						ADJ_ADD(txx, (m - 1) * n1 + iz, -c1 * g);
+						ADJ_ADD(txx, (m + 1) * n1 + iz,  c2 * g);
+						ADJ_ADD(txx, (m - 2) * n1 + iz, -c2 * g);
+						ADJ_ADD(txz, m * n1 + iz + 1,    c1 * g);
+						ADJ_ADD(txz, m * n1 + iz,       -c1 * g);
+						ADJ_ADD(txz, m * n1 + iz + 2,    c2 * g);
+						ADJ_ADD(txz, m * n1 + iz - 1,   -c2 * g);
+					}
+				}
+			}
 		}
 		else if (stype == 7) {
-			/* Fz -> inject into vz */
-			vz[ix * n1 + iz] += src_ampl;
+			if (!colo) {
+				/* Fz -> inject into vz */
+				vz[ix * n1 + iz] += src_ampl;
+			}
+			else {
+				/* Transpose of the mode-2 vz recording.  readResidual
+				 * registers type 7 at the vz node iz2 = iz+1, so the two
+				 * averaged nodes are m = iz-1 (=iz_rec) and m = iz
+				 * (=iz2); ix is already the Txx/Tzz column. */
+				size_t m;
+				for (m = iz - 1; m <= iz; m++) {
+					if (phase == 1) {
+						ADJ_ADD(vz, ix * n1 + m, 0.5f * src_ampl);
+					}
+					else {
+						float g = -0.25f * roz[ix * n1 + m] * src_ampl;
+						ADJ_ADD(tzz, ix * n1 + m,        c1 * g);
+						ADJ_ADD(tzz, ix * n1 + m - 1,   -c1 * g);
+						ADJ_ADD(tzz, ix * n1 + m + 1,    c2 * g);
+						ADJ_ADD(tzz, ix * n1 + m - 2,   -c2 * g);
+						ADJ_ADD(txz, (ix + 1) * n1 + m,  c1 * g);
+						ADJ_ADD(txz, ix * n1 + m,       -c1 * g);
+						ADJ_ADD(txz, (ix + 2) * n1 + m,  c2 * g);
+						ADJ_ADD(txz, (ix - 1) * n1 + m, -c2 * g);
+					}
+				}
+			}
 		}
 
 		/* ================================================ */
@@ -127,7 +225,14 @@ int applyAdjointSource(modPar mod, adjSrcPar adj, int itime,
 				tzz_scale = 0.5f;
 				txx_scale = 0.5f;
 
-				/* Check for nearby fluid-solid interface */
+				/* Check for nearby fluid-solid interface.
+				 *
+				 * EXPERIMENT (2026-10-23): -DDISABLE_P_BLEND removes the
+				 * blend so the injection is the exact transpose of the
+				 * 0.5*(txx+tzz) recording in getRecTimes.c.  See
+				 * tests/kh_misfit/ -- test_recop_dp FAILS by up to 126%
+				 * wherever this blend is active. */
+#ifndef DISABLE_P_BLEND
 				if (mul) {
 					int dist_from_fluid = BLEND_TRANSITION_DEPTH + 1; /* assume deep in solid */
 					int dz;
@@ -152,6 +257,7 @@ int applyAdjointSource(modPar mod, adjSrcPar adj, int itime,
 						txx_scale = 0.5f * blend;
 					}
 				}
+#endif
 			}
 			/* else acoustic: tzz_scale=1.0, txx_scale=0.0 (already set) */
 
@@ -180,7 +286,17 @@ int applyAdjointSource(modPar mod, adjSrcPar adj, int itime,
 		}
 		else if (stype == 2) {
 			/* Txz -> inject into txz */
-			if (txz) {
+			if (txz && colo_txz) {
+				/* Transpose of the mode-2 txz recording, which averages
+				 * the 4 txz nodes onto the Txx/Tzz node.  readResidual
+				 * registers type 2 at (ix2, iz2) = (ix+1, iz+1), so the
+				 * four nodes are (ix-1..ix, iz-1..iz) here. */
+				ADJ_ADD(txz, (ix - 1) * n1 + iz - 1, 0.25f * src_ampl);
+				ADJ_ADD(txz, ix * n1 + iz - 1,       0.25f * src_ampl);
+				ADJ_ADD(txz, (ix - 1) * n1 + iz,     0.25f * src_ampl);
+				ADJ_ADD(txz, ix * n1 + iz,           0.25f * src_ampl);
+			}
+			else if (txz) {
 				txz[ix * n1 + iz] += src_ampl;
 				if (sorient == 2) /* vertical dipole */
 					txz[ix * n1 + iz + 1] -= src_ampl;

@@ -27,12 +27,20 @@
  *   Types 2,7 (Txz, Fz) -> Vz grid (ioZz) for vertical
  *   All others           -> P/Txx/Tzz grid (ioPx, ioPz)
  *
+ * The receiver interpolation mode used when the data were RECORDED is copied
+ * from rec into adj here, because applyAdjointSource must apply the transpose
+ * of whatever getRecTimes.c actually did.  It is done in this one place on
+ * purpose: it was previously left to each caller and every caller forgot, so
+ * the mode-2 transpose was unreachable outside test_recop_dp.c and a
+ * rec_int_vx/vz=2 run silently backpropagated the mode-0 transpose instead.
+ *
  * AUTHOR:
  *   Based on fdacrtmc/readRcvWav.c by Max Holicki.
  *   Adapted for fdelfwi data structures.
  */
 
-int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd)
+int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd,
+	recPar *rec)
 {
 	FILE *fp;
 	segy hdr;
@@ -42,10 +50,31 @@ int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd)
 	int fldr_match;
 	int ibndx, ibndz;
 
-	if (!filename || !adj || !mod || !bnd) {
+	if (!filename || !adj || !mod || !bnd || !rec) {
 		verr("readResidual: NULL pointer argument.");
 		return -1;
 	}
+
+	/* Propagate the recording mode to the adjoint source, and refuse the
+	 * modes whose transpose is not implemented.  Mode 1 (4-node average)
+	 * and mode 3 (bilinear to an off-grid position) have no transpose in
+	 * applyAdjointSource.c; accepting them would backpropagate the mode-0
+	 * transpose of a different operator and silently corrupt the gradient,
+	 * so fail loudly instead.  Note getParameters.c forces int_vx=int_vz=3
+	 * whenever rec_int_p=3, so that route lands here too. */
+	if (rec->int_vx == 1 || rec->int_vz == 1)
+		verr("readResidual: rec_int_vx/vz=1 has no adjoint transpose. "
+		     "Use rec_int_vx=0/2 and rec_int_vz=0/2.");
+	if (rec->int_vx == 3 || rec->int_vz == 3)
+		verr("readResidual: rec_int_vx/vz=3 (and rec_int_p=3, which forces "
+		     "it) has no adjoint transpose. Use rec_int_vx=0/2, "
+		     "rec_int_vz=0/2 and rec_int_p=0.");
+	if (rec->int_vx != 0 && rec->int_vx != 2)
+		verr("readResidual: unsupported rec_int_vx=%d.", rec->int_vx);
+	if (rec->int_vz != 0 && rec->int_vz != 2)
+		verr("readResidual: unsupported rec_int_vz=%d.", rec->int_vz);
+	adj->int_vx = rec->int_vx;
+	adj->int_vz = rec->int_vz;
 
 	xmax = mod->x0 + mod->dx * mod->nx;
 	zmax = mod->z0 + mod->dz * mod->nz;

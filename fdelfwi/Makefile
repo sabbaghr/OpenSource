@@ -34,6 +34,9 @@ test_dotproduct: $(PRG6)
 test_taylor: $(PRG7)
 test_hessian_dp: $(PRG10)
 test_gradient_visual: $(PRG12)
+test_recop_dp: $(PRG14)
+test_lag_gradient: $(PRG17)
+test_lag_cone: $(PRG18)
 
 PRG3 = fwi_driver
 PRG4 = fwi_mpi_driver
@@ -44,6 +47,16 @@ PRG8 = fwi_inversion
 PRG9 = fwi_mpi_inversion
 PRG10 = test_hessian_dp
 PRG12 = test_gradient_visual
+PRG13 = fdelfwi_fwd
+PRG14 = test_recop_dp
+PRG15 = test_ei_planewave
+PRG16 = test_ei_modesep
+PRG17 = test_lag_gradient
+PRG18 = test_lag_cone
+
+# Alias must come AFTER PRG13 is defined: make expands prerequisites
+# immediately when the rule is read.
+fwd: $(PRG13)
 
 # Library sources (no test drivers -- those have main())
 SRCC	= fdfwimodc.c \
@@ -82,6 +95,15 @@ SRCC	= fdfwimodc.c \
 		elastic6_adj.c  \
 		elastic8_adj.c  \
 		computeResidual.c  \
+		energy_weights.c  \
+		energy_imaging.c  \
+		lag_gradient.c  \
+		lag_cone_filter.c  \
+		kh_misfit.c  \
+		aperture_taper.c  \
+		residual_taper.c  \
+		grad_taper_mask.c  \
+		computeHydrophone.c  \
 		born_vsrc.c  \
 		born_shot.c  \
 		hess_shot.c  \
@@ -112,6 +134,11 @@ SRCC	= fdfwimodc.c \
 		getpars.c
 
 OBJC	= $(SRCC:%.c=%.o)
+
+# fdelfwi.h defines the shared structs (modPar, recPar, adjSrcPar, ...).
+# Without this dependency an edit to the header only triggers a relink, so
+# objects keep the old struct layout and the binary segfaults silently.
+$(OBJC): fdelfwi.h
 
 # Serial FWI driver (no MPI)
 $(PRG3):	$(OBJC) fdelfwi.h
@@ -157,7 +184,10 @@ $(OPTIM_LIB):
 	$(MAKE) -C $(OPTIM_DIR)
 
 # Serial FWI inversion (optimization loop + gradient computation)
-$(PRG8):	$(OBJC) $(OPTIM_LIB) fdelfwi.h
+# fwi_inversion.c and updateModel.c are compiled by the recipe but are not in
+# $(OBJC), so they must be listed here or an edit to either leaves a STALE
+# binary that make reports as "up to date".
+$(PRG8):	$(OBJC) $(OPTIM_LIB) fdelfwi.h fwi_inversion.c updateModel.c
 	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
 	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
 	$(CC) $(OPTIM_INC) $(CFLAGS) $(OPTC) -c updateModel.c
@@ -166,7 +196,7 @@ $(PRG8):	$(OBJC) $(OPTIM_LIB) fdelfwi.h
 		$(OBJC) fileOpen.o writeRec.o $(OPTIM_LIB) $(LIBS)
 
 # MPI FWI inversion
-$(PRG9):	$(OBJC) $(OPTIM_LIB) fdelfwi.h
+$(PRG9):	$(OBJC) $(OPTIM_LIB) fdelfwi.h fwi_inversion.c updateModel.c
 	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
 	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
 	$(CC) $(OPTIM_INC) $(CFLAGS) $(OPTC) -c updateModel.c
@@ -219,13 +249,87 @@ $(PRG10):	$(OBJC) fdelfwi.h
 	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG10) test_hessian_dp.o updateModel.o \
 		$(OBJC) fileOpen.o writeRec.o $(LIBS)
 
-# Gradient visualization test (raw + Brossier scaled SU output)
-$(PRG12):	$(OBJC) fdelfwi.h
+# Gradient visualization test (raw + Brossier scaled SU output).
+# Depends on its own source so that editing test_gradient_visual.c actually
+# triggers a relink -- without it make reports "up to date" and silently
+# leaves a stale binary in place.
+$(PRG12):	$(OBJC) fdelfwi.h test_gradient_visual.c
 	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
 	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
 	$(CC) $(CFLAGS) $(OPTC) -c updateModel.c
 	$(CC) $(CFLAGS) $(OPTC) -c test_gradient_visual.c
 	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG12) test_gradient_visual.o updateModel.o \
+		$(OBJC) fileOpen.o writeRec.o $(LIBS)
+
+# Forward-only modeling with the fdelfwi engine (observed-data generation).
+# Unlike the other rules this one also depends on its own source file, so that
+# editing fdelfwi_fwd.c actually triggers a relink.
+$(PRG13):	$(OBJC) fdelfwi.h fdelfwi_fwd.c
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -c fdelfwi_fwd.c
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG13) fdelfwi_fwd.o \
+		$(OBJC) fileOpen.o writeRec.o $(LIBS)
+
+# Receiver restriction/injection dot product test (pure algebra, no
+# time stepping).  Depends on its own source so edits trigger a relink.
+$(PRG14):	$(OBJC) fdelfwi.h test_recop_dp.c
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -c test_recop_dp.c
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG14) test_recop_dp.o \
+		$(OBJC) fileOpen.o writeRec.o $(LIBS)
+
+# Analytic plane-wave calibration of the gamma=0 energy-imaging accumulators.
+# No time stepping and no I/O: it builds one plane wave, pairs it with itself
+# and checks rms(P)/rms(K) == 1, which is exact for BOTH P and S.  P exercises
+# only the div path of V_0, S only the curl path, so this is the one test that
+# can distinguish a curl mis-scaling from correct conversion-nulling.
+$(PRG15):	$(OBJC) fdelfwi.h test_ei_planewave.c
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -c test_ei_planewave.c
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG15) test_ei_planewave.o \
+		$(OBJC) fileOpen.o writeRec.o $(LIBS)
+
+# Analytic TWO-plane-wave angle calibration of the EI_MODESEP accumulators.
+# test_ei_planewave pairs one wave with itself, which is the single point
+# psi = 0 and so cannot see the angle dependence at all.  This one sweeps the
+# opening angle and checks V = cos(psi)*K pointwise and a_tomo = cos^2(psi/2),
+# both exact and both free of Vp/Vs -- the claim EI_MODESEP is built on.  It
+# also measures the P-S blind spot rather than asserting it.
+$(PRG16):	$(OBJC) fdelfwi.h test_ei_modesep.c
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -c test_ei_modesep.c
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG16) test_ei_modesep.o \
+		$(OBJC) fileOpen.o writeRec.o $(LIBS)
+
+# Standalone time-lag gradient test.  Deliberately NOT part of
+# test_gradient_visual: that driver always builds and applies the block
+# preconditioner and writes the pseudo-Hessian, none of which the lag test
+# wants.  This one accumulates in Lame and converts once to (Vp, Vs, rho), so
+# the tau=0 slice of _lagvp.su / _lagvs.su can be compared against
+# _vp_raw.su / _vs_raw.su directly.
+# Depends on its own source so edits trigger a relink.
+$(PRG17):	$(OBJC) fdelfwi.h test_lag_gradient.c
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -c updateModel.c
+	$(CC) $(CFLAGS) $(OPTC) -c test_lag_gradient.c
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG17) test_lag_gradient.o updateModel.o \
+		$(OBJC) fileOpen.o writeRec.o $(LIBS)
+
+# test_lag_cone -- cone-filter a lag cube that already exists on disk.  No
+# wave equation, so it links only the library objects; its purpose is to let
+# the C filter be compared sample by sample against the python reference
+# demo/gradient/lag_slope_filter.py before the filter is trusted inside an
+# inversion.
+$(PRG18):	$(OBJC) fdelfwi.h test_lag_cone.c
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -c test_lag_cone.c
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG18) test_lag_cone.o \
 		$(OBJC) fileOpen.o writeRec.o $(LIBS)
 
 install: $(PRG8) $(PRG9)
@@ -239,8 +343,9 @@ clean:
 			fwi_inversion_gpu.o fwi_inversion_mpi_gpu.o \
 			fdelmodc_cuda.o fdelfwi_cuda.o fdelfwi_gpu.o domain_decomp.o \
 			test_wave_op_dp.o test_dotproduct.o test_taylor.o test_hessian_dp.o \
-			test_gradient_visual.o \
-			$(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7) $(PRG8) $(PRG9) $(PRG10) $(PRG12) \
+			test_gradient_visual.o fdelfwi_fwd.o test_recop_dp.o \
+			test_ei_planewave.o test_ei_modesep.o test_lag_gradient.o \
+			$(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7) $(PRG8) $(PRG9) $(PRG10) $(PRG12) $(PRG13) $(PRG14) $(PRG15) $(PRG16) $(PRG17) \
 			fwi_gpu_inversion fwi_mpi_gpu_inversion
 
 realclean:

@@ -408,7 +408,7 @@ int main(int argc, char **argv)
 	          0,  /* no residual taper */
 	          hd1_g1, hd1_g2, hd1_g3,
 	          1,  /* always accumulate in Lame space */
-	          NULL, verbose);
+	          NULL, NULL, verbose);
 
 	/* Heap probe: after hess_shot dm1 */
 	{ void *_hp = malloc(64); if (_hp) { memset(_hp, 0, 64); free(_hp); }
@@ -455,7 +455,7 @@ int main(int argc, char **argv)
 	          0,  /* no residual taper */
 	          hd2_g1, hd2_g2, hd2_g3,
 	          1,  /* always accumulate in Lame space */
-	          NULL, verbose);
+	          NULL, NULL, verbose);
 
 	/* Heap probe: after hess_shot dm2 */
 	{ void *_hp = malloc(64); if (_hp) { memset(_hp, 0, 64); free(_hp); }
@@ -698,7 +698,7 @@ int main(int argc, char **argv)
 				          born_base, comp_str,
 				          0, shot.n, is_fileno,
 				          0, hd1_g1, hd1_g2, hd1_g3,
-				          1, NULL, verbose);
+				          1, NULL, NULL, verbose);
 
 				cleanCheckpoints(&chk_spike);
 			}

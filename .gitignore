@@ -104,3 +104,19 @@ fdelfwi/test_wave_op_dp
 fdelfwi/test_bandpass_filter
 ._*
 fdelmodc/demo/marmousi_acoustic/*.pdf
+
+# fdelfwi test drivers and the forward-only modeller
+fdelfwi/fdelfwi_fwd
+fdelfwi/test_recop_dp
+fdelfwi/test_ei_planewave
+fdelfwi/test_ei_modesep
+fdelfwi/test_lag_gradient
+fdelfwi/test_lag_cone
+
+# Local tooling and build leftovers, not part of the source tree
+.claude/
+/binary
+FFTlib/include/
+fdelfwi/demo/*/*.pdf
+fdelfwi/demo/*/*.png
+fdelfwi/demo/*/*.gif

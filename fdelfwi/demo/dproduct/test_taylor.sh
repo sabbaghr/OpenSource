@@ -72,7 +72,7 @@ echo "  Wavelet: fp=15 Hz, fmax=25 Hz, dt=1ms, nt=1024"
 # =========================================================
 echo "--- Step 3: Generating observed data from true model ---"
 
-${FDELFWI}/test_fdfwimodc \
+${FDELFWI}/fdelfwi_fwd \
     file_cp=true_model_cp.su file_cs=true_model_cs.su file_den=true_model_ro.su \
     file_src=wave.su file_rcv=obs \
     ischeme=3 iorder=4 src_type=7 \

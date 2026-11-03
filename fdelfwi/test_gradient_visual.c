@@ -67,8 +67,9 @@ int initCheckpoints(checkpointPar *chk, modPar *mod, int skipdt,
                     int delay, const char *file_base);
 int cleanCheckpoints(checkpointPar *chk);
 
-int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd);
+int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd, recPar *rec);
 void freeResidual(adjSrcPar *adj);
+void writeSnapTimesReset(void);
 
 int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
              recPar *rec, adjSrcPar *adj,
@@ -89,7 +90,8 @@ int writesufile(char *filename, float *data, size_t n1, size_t n2,
 
 float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
                       const char *res_file, misfitType mtype,
-                      const float *comp_weights, int verbose);
+                      const float *comp_weights, const energyWeight *ew,
+                      const khPar *kh, int verbose);
 float computeDataRMS(const char *filename);
 
 void scaling_compute_m0_from_bounds(const float *m_min, const float *m_max,
@@ -114,10 +116,80 @@ char *sdoc[] = {
 "   param=2       parameterization (1=Lamé, 2=velocity)",
 "   file_obs=     observed data base name (obs)",
 "   out_base=     output gradient file base (grad)",
+"   shot_grad=0   1: also write the per-shot gradient before it is summed",
+"                 into the total, as <out_base>_shotNNN_*_raw.su (the",
+"                 panels of a shot-index common-image gather)",
+"   file_snap_adj= base name for adjoint wavefield snapshots (none)",
+"                 requires file_snap/tsnap1/tsnap2/dtsnap to be set;",
+"                 reuses that same snapshot schedule",
 "   res_taper=    cosine taper on residual traces in samples (100)",
 "   grad_taper=   Gaussian taper radius around src/rcv in grid pts (0=off)",
 "   scaling=1     parameter scaling (0=none, 1=Brossier, 2=Yang)",
+"   data_weight=0 data weighting: 0=off, 2=energy norm W_r (rho, compliance)",
+"   misfit=0      objective: 0=L2, 2=Kirchhoff-Helmholtz energy flux",
+"   kh_normal=1   z component of the recording-surface normal (misfit=2 only);",
+"                 needs comp=_rvx,_rvz,_rtxz,_rtzz and data_weight=0",
 "   precond_eps=  epsilon damping for pseudo-Hessian preconditioner (1e-3)",
+"   energy_ic=0   energy-norm scattering-angle filter on the gradient",
+"                 (Rocha et al. 2016, elastic form -- see energy_imaging.c)",
+"                 0=off, 1=tomographic (keep transmission),",
+"                 2=migration (keep specular reflections),",
+"                 3=write the diagnostics but leave the gradient alone.",
+"                 Elastic only. Non-zero modes change the gradient and so",
+"                 break the Taylor test, as grad_taper/smooth_grad do.",
+"                 Writes <out_base>_shotNNN_ei_{kin,pot,tomo,migr}.su, plus",
+"                 {kin_s,pot_s,tomo_p,migr_p,tomo_s,migr_s} at energy_gamma=-1.",
+"   energy_gamma=2 which potential-energy pairing energy_ic uses:",
+"                 2 = eps:C:eps~ strain energy (historical behaviour), or",
+"                 0 = (lam+2mu) div.div~ + mu curl.curl~ (Navier form), or",
+"                -1 = per-mode acoustic energy norm (mode-separated).",
+"                 gamma=0 gives mode-INDEPENDENT 2sin^2/2cos^2 angle weights",
+"                 (no (lam -+ 2mu cos2theta) modulation, no 59/121 deg sign",
+"                 change) and makes V vanish identically for a P-S pair.",
+"                 gamma=-1 applies Rocha's ACOUSTIC norm separately to",
+"                 D=div v (a scalar wave at Vp) and C=curl v (at Vs), each",
+"                 with its own velocity, giving an EXACT (1 +- cos psi) with",
+"                 no modulation at all.  g_lam takes the P-channel weight",
+"                 (sigma_kk is blind to S), g_mu and g_rho the energy mix.",
+"                 Converted P-S pairs contribute to NEITHER channel.",
+"   energy_alpha=0 0 = linear weight a = |k+p|/(|k+p|+|k-p|), a partition of",
+"                 unity.  >0 selects Rocha's exponential mask (eq 45),",
+"                 a_tomo = exp(-alpha*c2), a_migr = exp(-alpha*(1-c2)), which",
+"                 is NOT a partition of unity.  Needed to REJECT rather than",
+"                 half-pass converted modes, which sit at c2 = 1/2 when",
+"                 energy_gamma=0.  Rocha uses alpha ~ 100.",
+" ",
+"   lag_nfreq=0   time-lag extended imaging condition (lag_gradient.c).",
+"                 Number of frequencies used to form the lag correlation;",
+"                 0 = off.  Evaluates the gradient kernels at non-zero",
+"                 time lag, g(x,tau) = dt sum_t A(x,t) B(x,t+tau) with A the",
+"                 forward strain and B the adjoint stress.  Accumulated in",
+"                 lambda/mu and converted per lag to g_Vp, g_Vs by the usual",
+"                 pointwise chain rule; there is no g_rho cube.",
+"                 The adjoint source is the data residual,",
+"                 so tau=0 is the ordinary gradient (band limited to the",
+"                 frequencies below) and lag ASYMMETRY measures the time",
+"                 shift between modelled and observed arrivals.  Elastic only.",
+"                 Writes <out_base>_shotNNN_lag{vp,vs}.su as nz x (nx*nlag)",
+"                 with the lag SLOWEST (trace = ilag*nx + ix), plus",
+"                 <out_base>_shotNNN_lagaxis.txt describing the axes.",
+"   lag_fmin=     lowest frequency in Hz, > 0.  Required when lag_nfreq>0.",
+"   lag_fmax=     highest frequency in Hz (default lag_fmin, i.e. one line).",
+"                 Frequencies are uniform on [lag_fmin, lag_fmax]; the lag",
+"                 reconstruction is periodic with period 1/df in the RELATIVE",
+"                 lag, which the symmetric convention makes 1/(2 df) on the",
+"                 tau axis.  Cover the source band densely enough that",
+"                 1/(2 df) exceeds the lag range.",
+"   lag_nt=21     number of lags, forced odd so tau=0 is sampled exactly.",
+"                 The lag is applied SYMMETRICALLY: the forward wavefield is",
+"                 shifted by -tau and the adjoint by +tau, so tau is the",
+"                 one-way shift and 2*tau the relative one.",
+"   lag_dt=       lag increment in seconds (default 10*dt).  Need not be a",
+"                 multiple of dt: the shift is a phase rotation, so",
+"                 sub-sample lags are exact.  The run aborts if the implied",
+"                 |tau| range reaches 1/(4 df), half the aliasing period on",
+"                 the tau axis, since wrap-around is indistinguishable from",
+"                 genuine lag moveout.",
 " ",
 NULL};
 
@@ -340,7 +412,7 @@ int main(int argc, char **argv)
 	int    verbose;
 
 	/* Test parameters */
-	char  *chk_base_str, *comp_str, *file_obs, *out_base;
+	char  *chk_base_str, *comp_str, *file_obs, *out_base, *file_snap_adj;
 	int    chk_skipdt, param, res_taper, grad_taper, scaling;
 
 	/* Gradient arrays (padded grid) */
@@ -369,6 +441,9 @@ int main(int argc, char **argv)
 	float  m0[3], m_shift[3];
 	float  total_misfit;
 	int    ishot;
+	int    shot_grad;
+	float *shot_vec = NULL;   /* scratch for the per-shot gradient write */
+	float *shot_c1 = NULL, *shot_c2 = NULL, *shot_c3 = NULL;
 
 	t0 = wallclock_time();
 
@@ -382,6 +457,13 @@ int main(int argc, char **argv)
 	if (!getparint("param", &param)) param = 2;
 	if (!getparstring("file_obs", &file_obs)) file_obs = "obs";
 	if (!getparstring("out_base", &out_base)) out_base = "grad";
+	/* Adjoint-wavefield snapshots: reuse the forward snapshot schedule
+	 * (tsnap1/tsnap2/dtsnap/sna_type_*) but write to a different base name
+	 * so the forward snapshots are not overwritten. NULL = disabled. */
+	if (!getparstring("file_snap_adj", &file_snap_adj)) file_snap_adj = NULL;
+	/* Per-shot gradients, written before they are summed into the total.
+	 * These are the panels of a shot-index common-image gather. */
+	if (!getparint("shot_grad", &shot_grad)) shot_grad = 0;
 	if (!getparint("res_taper", &res_taper)) res_taper = 100;
 	if (!getparint("grad_taper", &grad_taper)) grad_taper = 0;
 	if (!getparint("scaling", &scaling)) scaling = 1;
@@ -512,9 +594,119 @@ int main(int argc, char **argv)
 		                       band_flo, band_fhi, 0, 0);
 	}
 
+	/* Energy-norm data weighting W_r (data_weight=2).  Built once from the
+	 * starting model so that Q is a constant metric. */
+	energyWeight *ew = NULL;
+	int data_weight;
+	{
+		if (!getparint("data_weight", &data_weight)) data_weight = 0;
+		if (data_weight == 2)
+			ew = energyWeightsBuild(&mod, &bnd, &rec, 1);
+		else if (data_weight != 0)
+			verr("test_gradient_visual: data_weight=%d not supported here "
+			     "(0=off, 2=energy norm).", data_weight);
+	}
+
+	/* Objective function.  misfit=2 selects the Kirchhoff-Helmholtz
+	 * energy flux, whose adjoint source is the tensorial (traction +
+	 * deformation-rate) injection of Ravasi & Curtis -- see kh_misfit.c. */
+	misfitType mtype;
+	khPar *kh = NULL;
+	{
+		int misfit_int;
+		float kh_normal;
+
+		if (!getparint("misfit", &misfit_int)) misfit_int = 0;
+		if (misfit_int != 0 && misfit_int != 2)
+			verr("test_gradient_visual: misfit=%d not supported here "
+			     "(0=L2, 2=Kirchhoff-Helmholtz energy flux).", misfit_int);
+		mtype = (misfitType)misfit_int;
+
+		if (mtype == MISFIT_KH) {
+			if (data_weight != 0)
+				verr("test_gradient_visual: misfit=2 requires data_weight=0; "
+				     "the energy flux pairs a traction with a velocity, so "
+				     "rescaling the velocity channels relative to the stress "
+				     "channels destroys the flux interpretation.");
+			/* Sign of n_z decides which side of the recording line the
+			 * traction and velocity terms cancel on, and that is measured
+			 * rather than assumed -- hence a parameter, not a constant. */
+			if (!getparfloat("kh_normal", &kh_normal)) kh_normal = 1.0f;
+			kh = khWeightsBuild(&rec, kh_normal, 1);
+		}
+	}
+
+	/* Energy-norm scattering-angle filter (energy_imaging.c). */
+	int energy_ic = EI_OFF;
+	if (!getparint("energy_ic", &energy_ic)) energy_ic = EI_OFF;
+	if (energy_ic < EI_OFF || energy_ic > EI_QC)
+		verr("test_gradient_visual: energy_ic=%d is out of range "
+		     "(0=off, 1=tomographic, 2=migration, 3=diagnostics only).",
+		     energy_ic);
+	if (energy_ic != EI_OFF && mod.ischeme <= 2)
+		verr("test_gradient_visual: energy_ic=%d needs the elastic scheme "
+		     "(ischeme=3); got ischeme=%d.", energy_ic, mod.ischeme);
+
+	int energy_gamma = EI_GAMMA2;
+	if (!getparint("energy_gamma", &energy_gamma)) energy_gamma = EI_GAMMA2;
+	if (energy_gamma != EI_GAMMA0 && energy_gamma != EI_GAMMA2 &&
+	    energy_gamma != EI_MODESEP)
+		verr("test_gradient_visual: energy_gamma=%d is not implemented. "
+		     "Use 2 (eps:C:eps~), 0 (Navier div/curl form) or -1 "
+		     "(per-mode acoustic norm).", energy_gamma);
+
+	float energy_alpha = 0.0f;
+	if (!getparfloat("energy_alpha", &energy_alpha)) energy_alpha = 0.0f;
+	if (energy_alpha < 0.0f)
+		verr("test_gradient_visual: energy_alpha=%g must be >= 0.",
+		     energy_alpha);
+
+	/* Time-lag extended imaging condition (lag_gradient.c).
+	 * lag_nfreq=0 disables it and leaves adj_shot untouched. */
+	int lag_nfreq = 0, lag_nt = 21;
+	float lag_fmin = 0.0f, lag_fmax = 0.0f, lag_dt = 0.0f;
+	if (!getparint("lag_nfreq", &lag_nfreq)) lag_nfreq = 0;
+	if (lag_nfreq < 0)
+		verr("test_gradient_visual: lag_nfreq=%d must be >= 0.", lag_nfreq);
+	if (lag_nfreq > 0) {
+		if (mod.ischeme <= 2)
+			verr("test_gradient_visual: lag_nfreq=%d needs the elastic scheme "
+			     "(ischeme=3); got ischeme=%d.", lag_nfreq, mod.ischeme);
+		if (!getparfloat("lag_fmin", &lag_fmin))
+			verr("test_gradient_visual: lag_nfreq>0 requires lag_fmin= "
+			     "(lowest frequency in Hz, > 0).");
+		if (!getparfloat("lag_fmax", &lag_fmax)) lag_fmax = lag_fmin;
+		if (!getparint("lag_nt", &lag_nt)) lag_nt = 21;
+		if (!getparfloat("lag_dt", &lag_dt)) lag_dt = 10.0f * mod.dt;
+		if (lag_dt <= 0.0f)
+			verr("test_gradient_visual: lag_dt=%g must be > 0 s.", lag_dt);
+	}
+
+	/* grad_taper is applied far below, to g*_int/g*_sc, long after the lag
+	 * cubes have been written from lag_gradient's own accumulators -- so the
+	 * lag cubes need the mask handed to them explicitly.  Building it here
+	 * (same function, same radius, same shot/rec lists) keeps the two in
+	 * step, which is what keeps the tau=0 check meaningful: both sides of
+	 * that comparison are then tapered identically. */
+	float *lag_mask = NULL;
+	if (lag_nfreq > 0 && grad_taper > 0) {
+		lag_mask = buildGradTaperMask(mod.nx, mod.nz, &shot, &rec, grad_taper);
+		if (verbose) vmess("Lag cubes share the gradient taper (radius=%d)",
+			grad_taper);
+	}
+
 	/* ============================================================ */
 	/* Multi-shot loop: forward + residual + adjoint                 */
 	/* ============================================================ */
+	/* Snapshot files are named <base><ext> with no shot index, and the
+	 * truncate-vs-append flag is a single global that only adj_shot resets.
+	 * Multi-shot therefore needs a per-shot base name, otherwise every
+	 * forward shot APPENDS into one file and every adjoint shot TRUNCATES
+	 * the previous one, leaving only the last.  Single-shot naming is left
+	 * exactly as it was so existing scripts keep working. */
+	char *snap_base_fwd = sna.file_snap;
+	char  snap_fwd_name[1024];
+
 	for (ishot = 0; ishot < shot.n; ishot++) {
 
 		ixsrc  = shot.x[ishot];
@@ -525,6 +717,15 @@ int main(int argc, char **argv)
 
 		/* ----- Forward modeling ----- */
 		initCheckpoints(&chk, &mod, chk_skipdt, 0, chk_base_str);
+
+		if (sna.nsnap > 0 && snap_base_fwd != NULL) {
+			if (shot.n > 1) {
+				snprintf(snap_fwd_name, sizeof(snap_fwd_name), "%s_s%03d",
+					snap_base_fwd, ishot);
+				sna.file_snap = snap_fwd_name;
+			}
+			writeSnapTimesReset();
+		}
 
 		fdfwimodc(&mod, &src, &wav, &bnd, &rec, &sna,
 			ixsrc, izsrc, src_nwav, ishot, shot.n, fileno,
@@ -578,7 +779,7 @@ int main(int argc, char **argv)
 			snprintf(res_fname, sizeof(res_fname), "res_%03d.su", ishot);
 
 			shot_misfit = computeResidual(ncomp, obs_arr, syn_arr,
-				res_fname, MISFIT_L2, NULL, verbose);
+				res_fname, mtype, NULL, ew, kh, verbose);
 
 			total_misfit += shot_misfit;
 			vmess("  Shot %d misfit: %.6e (cumulative: %.6e)",
@@ -586,8 +787,9 @@ int main(int argc, char **argv)
 
 			/* ----- Read residual and run adjoint ----- */
 			memset(&adj, 0, sizeof(adjSrcPar));
-			readResidual(res_fname, &adj, &mod, &bnd);
+			readResidual(res_fname, &adj, &mod, &bnd, &rec);
 			applyCosineTaper(&adj, res_taper);
+			applyApertureTaper(&adj, mod.dx, rec.aper_taper, verbose);
 
 			/* Zero per-shot gradient */
 			memset(g1_shot, 0, sizem * sizeof(float));
@@ -609,7 +811,33 @@ int main(int argc, char **argv)
 
 			{
 				snaPar sna_adj;
+				char   snap_adj_name[1024];
 				memset(&sna_adj, 0, sizeof(snaPar));
+
+				/* Enable adjoint snapshots only when the user supplied a
+				 * separate base name AND forward snapshots are configured
+				 * (that is where the timing schedule comes from). */
+				if (file_snap_adj != NULL && sna.nsnap > 0) {
+					sna_adj = sna;
+					if (shot.n > 1) {
+						snprintf(snap_adj_name, sizeof(snap_adj_name),
+							"%s_s%03d", file_snap_adj, ishot);
+						sna_adj.file_snap = snap_adj_name;
+					} else {
+						sna_adj.file_snap = file_snap_adj;
+					}
+					if (verbose) vmess("  Adjoint snapshots -> %s_s*.su (%d snaps)",
+						sna_adj.file_snap, sna_adj.nsnap);
+				}
+
+				/* Zeroes the two energy accumulators for this shot; a no-op
+				 * at energy_ic=0, which leaves adj_shot bit-identical. */
+				energyImagingInit(&mod, energy_ic, energy_gamma,
+				                  energy_alpha, verbose);
+
+				/* Zeroes this shot's time-lag DFT accumulators; a no-op at
+				 * lag_nfreq=0, which leaves adj_shot untouched. */
+				lagGradientInit(&mod, lag_nfreq, lag_fmin, lag_fmax, verbose);
 
 				adj_shot(&mod, &src, &wav, &bnd, &rec, &adj,
 					ixsrc, izsrc, src_nwav, &chk, &sna_adj,
@@ -622,6 +850,57 @@ int main(int argc, char **argv)
 					sh_mr  ? sh_mr  : hess_muu_rho,
 					1, verbose,
 					sh_wfld);
+			}
+
+			/* Time-lag gradient: reconstruct g_vp(x,tau) and g_vs(x,tau)
+			 * from this shot's DFT accumulators and write the cubes.  Reads
+			 * only its own accumulators, so it is independent of anything
+			 * done to g*_shot below. */
+			if (lag_nfreq > 0)
+				lagGradientWrite(&mod, &bnd, out_base, ishot,
+					lag_nt, lag_dt, lag_mask, verbose);
+
+			/* Energy-norm angle filter: build the weight from the two
+			 * accumulators and apply it to this shot's gradient, which is
+			 * still in Lame space (adj_shot was called with param=1).  The
+			 * weight is one scalar per point and the Lame -> velocity chain
+			 * rule is pointwise linear, so the order does not matter. */
+			if (energy_ic != EI_OFF) {
+				float *ei_buf = (float *)malloc(sizem * sizeof(float));
+				float *ei_int = (float *)malloc((size_t)nmodel * sizeof(float));
+				static const char *ei_name[EI_GET_N] = {
+					"kin",    "pot",    "tomo",   "migr",   "kin_s",
+					"pot_s",  "tomo_p", "migr_p", "tomo_s", "migr_s"};
+				int iw;
+				char fname[1024];
+
+				if (!ei_buf || !ei_int)
+					verr("test_gradient_visual: energy_ic diagnostic "
+					     "allocation failed.");
+
+				/* energyImagingGet returns 0 for the six mode-separated codes
+				 * at the gamma-family settings, so this loop writes 4 files at
+				 * gamma=0/2 and all 10 at gamma=-1. */
+				for (iw = 0; iw < EI_GET_N; iw++) {
+					if (!energyImagingGet(&mod, &bnd, iw, ei_buf)) continue;
+					stripBoundary(ei_int, ei_buf, &mod, &bnd);
+					snprintf(fname, sizeof(fname), "%s_shot%03d_ei_%s.su",
+						out_base, ishot, ei_name[iw]);
+					writesufile(fname, ei_int, (size_t)mod.nz, (size_t)mod.nx,
+						mod.z0, mod.x0, mod.dz, mod.dx);
+				}
+				free(ei_buf);
+				free(ei_int);
+
+				energyImagingApply(&mod, &bnd, g1_shot, g2_shot, g3_shot,
+					verbose);
+				energyImagingFree();
+
+				if (verbose)
+					vmess("  Wrote %s_shot%03d_ei_{kin,pot,tomo,migr%s}.su",
+						out_base, ishot,
+						(energy_gamma == EI_MODESEP)
+						  ? ",kin_s,pot_s,tomo_p,migr_p,tomo_s,migr_s" : "");
 			}
 
 			/* For precond=4,5: overwrite per-shot Hessian with P4 cross-correlation */
@@ -687,6 +966,53 @@ int main(int argc, char **argv)
 			freeResidual(&adj);
 		}
 
+		/* Per-shot gradient, written BEFORE the sum so it is the raw
+		 * contribution of this shot alone -- no smoothing, no scaling, no
+		 * preconditioner (those are all applied to the total further down).
+		 * g*_shot are in Lame because adj_shot is called with param=1 above;
+		 * extractGradientVector applies the chain rule to velocity exactly
+		 * once, the same way it does for the total.
+		 *
+		 * The chain rule (convertGradientToVelocity, fwi_gradient.c:574) runs
+		 * IN PLACE on its three input arrays, so g*_shot must be copied first.
+		 * Converting them directly would leave velocity-space values in the
+		 * per-shot buffers, the accumulation below would add those into the
+		 * Lame totals, and the final extractGradientVector would apply the
+		 * chain rule a SECOND time -- inflating the total by ~2*rho*Vp (1e7
+		 * here). Measured on a 2-shot run before this copy was added:
+		 * |total| = 1.0e-08 against |per-shot| = 8e-16, with cos = 0.94,
+		 * i.e. the right shape at a hopelessly wrong scale. This is the same
+		 * double-conversion that was fixed in fwi_inversion.c. */
+		if (shot_grad) {
+			char fname[1024];
+			if (shot_vec == NULL) {
+				shot_vec = (float *)calloc((size_t)nparam * nmodel, sizeof(float));
+				shot_c1  = (float *)calloc(sizem, sizeof(float));
+				shot_c2  = (float *)calloc(sizem, sizeof(float));
+				shot_c3  = (float *)calloc(sizem, sizeof(float));
+			}
+			memcpy(shot_c1, g1_shot, sizem * sizeof(float));
+			memcpy(shot_c2, g2_shot, sizem * sizeof(float));
+			memcpy(shot_c3, g3_shot, sizem * sizeof(float));
+			extractGradientVector(shot_vec, shot_c1, shot_c2, shot_c3,
+			                      &mod, &bnd, param);
+			snprintf(fname, sizeof(fname), "%s_shot%03d_%s_raw.su",
+				out_base, ishot, (param == 1) ? "lam" : "vp");
+			writesufile(fname, shot_vec, (size_t)mod.nz, (size_t)mod.nx,
+				mod.z0, mod.x0, mod.dz, mod.dx);
+			snprintf(fname, sizeof(fname), "%s_shot%03d_%s_raw.su",
+				out_base, ishot, (param == 1) ? "mu" : "vs");
+			writesufile(fname, shot_vec + nmodel, (size_t)mod.nz, (size_t)mod.nx,
+				mod.z0, mod.x0, mod.dz, mod.dx);
+			snprintf(fname, sizeof(fname), "%s_shot%03d_rho_raw.su",
+				out_base, ishot);
+			writesufile(fname, shot_vec + 2 * nmodel, (size_t)mod.nz, (size_t)mod.nx,
+				mod.z0, mod.x0, mod.dz, mod.dx);
+			if (verbose)
+				vmess("  Wrote per-shot gradient %s_shot%03d_*_raw.su",
+					out_base, ishot);
+		}
+
 		/* Accumulate into global gradient */
 		for (i = 0; i < (int)sizem; i++) {
 			grad1[i] += g1_shot[i];
@@ -696,6 +1022,17 @@ int main(int argc, char **argv)
 
 		cleanCheckpoints(&chk);
 	}
+
+	/* The lag cube that corresponds to <out_base>_{vp,vs}_raw.su is the sum
+	 * over shots, exactly as grad1..3 above are. */
+	if (lag_nfreq > 0) {
+		lagGradientWriteStack(&mod, out_base, verbose);
+		lagGradientFree();
+		if (lag_mask) free(lag_mask);
+	}
+
+	if (ew) energyWeightsFree(ew);
+	if (kh) khWeightsFree(kh);
 
 	vmess("=== Total misfit: %.6e ===", total_misfit);
 
@@ -1123,6 +1460,8 @@ int main(int argc, char **argv)
 	free(g1_shot);
 	free(g2_shot);
 	free(g3_shot);
+	if (shot_vec) free(shot_vec);
+	if (shot_c1) { free(shot_c1); free(shot_c2); free(shot_c3); }
 	free(grad_vec);       /* g1_int, g2_int, g3_int are views into this */
 	free(g1_sc);
 	free(g2_sc);

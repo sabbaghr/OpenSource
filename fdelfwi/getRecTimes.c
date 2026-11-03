@@ -326,7 +326,7 @@ int getRecTimes(modPar mod, recPar rec, bndPar bnd, int itime, int isam, float *
                                 txz[ix*n1+iz+1]   - txz[ix*n1+iz])    +
                             c2*(txx[(ix+1)*n1+iz] - txx[(ix-2)*n1+iz] +
                                 txz[ix*n1+iz+2]   - txz[ix*n1+iz-1])  );
-                        field = vx[ix2*n1+iz] - 0.5*rox[ix2*n1+iz]*(
+                        field += vx[ix2*n1+iz] - 0.5*rox[ix2*n1+iz]*(
                             c1*(txx[ix2*n1+iz]     - txx[(ix2-1)*n1+iz] +
                                 txz[ix2*n1+iz+1]   - txz[ix2*n1+iz])    +
                             c2*(txx[(ix2+1)*n1+iz] - txx[(ix2-2)*n1+iz] +

@@ -58,9 +58,10 @@ int cleanCheckpoints(checkpointPar *chk);
 
 float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
                       const char *res_file, misfitType mtype,
-                      const float *comp_weights, int verbose);
+                      const float *comp_weights, const energyWeight *ew,
+                      const khPar *kh, int verbose);
 
-int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd);
+int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd, recPar *rec);
 void freeResidual(adjSrcPar *adj);
 
 int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
@@ -113,6 +114,8 @@ int main(int argc, char **argv)
 	float  sinkvel;
 	double t0, t1;
 	size_t nsamp, sizew, sizem;
+	misfitType mtype;
+	khPar *kh = NULL;
 	int    n1, ix, iz, ir, i, k;
 	int    ioPx, ioPz;
 	int    ixsrc, izsrc, fileno;
@@ -178,6 +181,28 @@ int main(int argc, char **argv)
 	/* ============================================================ */
 	getParameters(&mod, &rec, &sna, &wav, &src, &shot, &bnd, verbose);
 	n1 = mod.naz;
+
+	/* Objective function.  The Taylor test is agnostic to WHICH objective
+	 * it checks -- it only needs phi(m) and <g,dm> to come from the same
+	 * one -- so misfit=2 (Kirchhoff-Helmholtz energy flux) drops straight
+	 * in.  Its J is signed, which the test tolerates: it fits
+	 * dphi = a*eps + b*eps^2 and compares a against <g,dm>, and neither
+	 * is assumed positive. */
+	{
+		int misfit_int;
+		float kh_normal;
+
+		if (!getparint("misfit", &misfit_int)) misfit_int = 0;
+		if (misfit_int != 0 && misfit_int != 2)
+			verr("test_taylor: misfit=%d not supported "
+			     "(0=L2, 2=Kirchhoff-Helmholtz energy flux).", misfit_int);
+		mtype = (misfitType)misfit_int;
+
+		if (mtype == MISFIT_KH) {
+			if (!getparfloat("kh_normal", &kh_normal)) kh_normal = 1.0f;
+			kh = khWeightsBuild(&rec, kh_normal, 1);
+		}
+	}
 
 	allocStoreSourceOnSurface(src);
 	readModel(&mod, &bnd);
@@ -286,7 +311,7 @@ int main(int argc, char **argv)
 	}
 
 	float phi0 = computeResidual(ncomp, obs_arr, syn_arr,
-		"residual_taylor.su", MISFIT_L2, NULL, verbose);
+		"residual_taylor.su", mtype, NULL, NULL, kh, verbose);
 
 	vmess("phi(m0) = %.10e", phi0);
 
@@ -296,7 +321,7 @@ int main(int argc, char **argv)
 	vmess("--- Step 3: Adjoint backpropagation -> gradient ---");
 
 	memset(&adj, 0, sizeof(adjSrcPar));
-	readResidual("residual_taylor.su", &adj, &mod, &bnd);
+	readResidual("residual_taylor.su", &adj, &mod, &bnd, &rec);
 	vmess("Loaded %d adjoint source traces, nt=%d", adj.nsrc, adj.nt);
 
 	grad_vp  = (float *)calloc(sizem, sizeof(float));
@@ -612,7 +637,7 @@ int main(int argc, char **argv)
 			}
 
 			float phi_p = computeResidual(ncomp, obs_arr, syn_pert_arr,
-				"residual_taylor_pert.su", MISFIT_L2, NULL, 0);
+				"residual_taylor_pert.su", mtype, NULL, NULL, kh, 0);
 
 			phi_pert[ieps] = (double)phi_p;
 		}

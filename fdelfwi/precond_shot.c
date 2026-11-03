@@ -47,7 +47,7 @@ void accumHessianP4(modPar *mod, bndPar *bnd,
                     float *hess_lam_muu, float *hess_lam_rho, float *hess_muu_rho);
 
 /* From readResidual.c — reuse to read synthetic data in adjSrcPar format */
-void readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd);
+int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd, recPar *rec);
 void freeResidual(adjSrcPar *adj);
 
 
@@ -136,13 +136,13 @@ int precond_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 
 			if (total_traces == 0) {
 				/* First component: read normally */
-				readResidual(syn_file, &syn_adj, mod, bnd);
+				readResidual(syn_file, &syn_adj, mod, bnd, rec);
 				total_traces = syn_adj.nsrc;
 			} else {
 				/* Additional components: read into temp and append */
 				adjSrcPar tmp;
 				memset(&tmp, 0, sizeof(adjSrcPar));
-				readResidual(syn_file, &tmp, mod, bnd);
+				readResidual(syn_file, &tmp, mod, bnd, rec);
 
 				/* Reallocate and append */
 				int new_total = total_traces + tmp.nsrc;

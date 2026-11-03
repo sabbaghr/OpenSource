@@ -71,9 +71,10 @@ int cleanCheckpoints(checkpointPar *chk);
 
 float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
                       const char *res_file, misfitType mtype,
-                      const float *comp_weights, int verbose);
+                      const float *comp_weights, const energyWeight *ew,
+                      const khPar *kh, int verbose);
 
-int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd);
+int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd, recPar *rec);
 void freeResidual(adjSrcPar *adj);
 
 int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
@@ -491,7 +492,8 @@ int main(int argc, char **argv)
 			}
 
 			snprintf(res_file, sizeof(res_file), "%s/residual.su", work_dir);
-			misfit = computeResidual(ncomp, obs_arr, syn_arr, res_file, MISFIT_L2, NULL, 0);
+			misfit = computeResidual(ncomp, obs_arr, syn_arr, res_file, MISFIT_L2,
+			                         NULL, NULL, NULL, 0);
 			total_misfit += misfit;
 
 			/* Save residual for the snapshot shot */
@@ -515,8 +517,9 @@ int main(int argc, char **argv)
 			/* Step 3: Read residuals and apply taper                   */
 			/* -------------------------------------------------------- */
 			memset(&adj, 0, sizeof(adjSrcPar));
-			readResidual(res_file, &adj, &mod, &bnd);
+			readResidual(res_file, &adj, &mod, &bnd, &rec);
 			applyCosineTaper(&adj, res_taper);
+			applyApertureTaper(&adj, mod.dx, rec.aper_taper, verbose);
 
 			/* -------------------------------------------------------- */
 			/* Step 4: Adjoint backpropagation                          */

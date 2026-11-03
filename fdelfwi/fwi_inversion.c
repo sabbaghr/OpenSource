@@ -80,9 +80,10 @@ int cleanCheckpoints(checkpointPar *chk);
 float computeDataRMS(const char *filename);
 float computeResidual(int ncomp, const char **obs_files, const char **syn_files,
                       const char *res_file, misfitType mtype,
-                      const float *comp_weights, int verbose);
+                      const float *comp_weights, const energyWeight *ew,
+                      const khPar *kh, int verbose);
 
-int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd);
+int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd, recPar *rec);
 void freeResidual(adjSrcPar *adj);
 
 int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
@@ -98,6 +99,10 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 int writesufile(char *filename, float *data, size_t n1, size_t n2,
                 float f1, float f2, float d1, float d2);
 
+/* grad_taper_mask.c -- prototyped locally, see the NOTE in fdelfwi.h. */
+float *buildGradTaperMask(int nx, int nz,
+                          shotPar *shot, recPar *rec, int radius);
+
 void writeSnapTimesReset(void);
 void vmess(char *fmt, ...);
 void verr(char *fmt, ...);
@@ -110,6 +115,70 @@ void extractGradientVector(float *g, float *grad1, float *grad2, float *grad3,
                            modPar *mod, bndPar *bnd, int param);
 void convertGradientToVelocity(float *grad1, float *grad2, float *grad3,
                                float *cp, float *cs, float *rho, size_t sizem);
+
+
+/*--------------------------------------------------------------------
+ * Time-lag tomographic gradient (lag_tomo=1).
+ *
+ * Instead of the zero-lag kernel, each shot's gradient is built at a
+ * range of time lags (lag_gradient.c), cone-filtered in the 3D
+ * (tau, x, z) Fourier domain to keep the small-slope -- i.e. WIDE
+ * opening angle -- part (lag_cone_filter.c), and the tau=0 slice of
+ * that filtered cube is the shot's contribution.  The result is the
+ * transmission/tomographic update with the specular migration imprint
+ * removed.
+ *
+ * Two consequences drive the whole design, and both are enforced below:
+ *
+ *  1. The cone filter is a spatial convolution and the Lame->velocity
+ *     chain rule multiplies by a spatially VARYING factor, so they do
+ *     NOT commute.  lag_gradient.c converts to (Vp, Vs) BEFORE
+ *     filtering, which matches the validated python reference, so the
+ *     result is already in velocity and must not be converted again:
+ *     extractGradientVector is called with param=1 (strip only).
+ *
+ *  2. The accumulators carry only the lambda and mu kernels, so there
+ *     is no g_rho.  rho must be frozen (active_params without rho).
+ *--------------------------------------------------------------------*/
+typedef struct {
+	int        on;        /* 0 = off, and then every hook below is a no-op */
+	int        nfreq;     /* DFT bins; df <= 1/T is enforced in lagGradientInit */
+	float      fmin, fmax;
+	int        nt;        /* lags, forced odd so tau=0 is sampled          */
+	float      dt;        /* lag increment, s                              */
+	lagConePar cone;
+	float     *mask;      /* grad_taper mask [nx*nz], or NULL              */
+	float     *gvp;       /* [nx*nz] accumulated over this rank's shots    */
+	float     *gvs;
+} lagTomoPar;
+
+/* Scatter the (already velocity-space) interior-grid lag gradient back onto
+ * the padded arrays the rest of the driver works with, and zero rho. */
+static void lagTomoInject(const lagTomoPar *lt, modPar *mod, bndPar *bnd,
+                          float *grad1, float *grad2, float *grad3)
+{
+	int ix, iz, n1 = mod->naz;
+	int ibx = mod->ioPx, ibz = mod->ioPz;
+	size_t sizem = (size_t)mod->nax * mod->naz;
+
+	if (!lt->on) return;
+	if (bnd->lef == 4 || bnd->lef == 2) ibx += bnd->ntap;
+	if (bnd->top == 4 || bnd->top == 2) ibz += bnd->ntap;
+
+	memset(grad1, 0, sizem * sizeof(float));
+	if (grad2) memset(grad2, 0, sizem * sizeof(float));
+	/* No g_rho exists at non-zero lag; rho is frozen, so say so explicitly
+	 * rather than leaving the unfiltered zero-lag rho kernel behind. */
+	memset(grad3, 0, sizem * sizeof(float));
+
+	for (ix = 0; ix < mod->nx; ix++) {
+		for (iz = 0; iz < mod->nz; iz++) {
+			grad1[(ix + ibx) * n1 + iz + ibz] = lt->gvp[ix * mod->nz + iz];
+			if (grad2)
+				grad2[(ix + ibx) * n1 + iz + ibz] = lt->gvs[ix * mod->nz + iz];
+		}
+	}
+}
 
 
 char *sdoc[] = {
@@ -149,7 +218,8 @@ char *sdoc[] = {
 "   smooth_grad=0     2D Gaussian smoothing half-width for gradient (grid pts, 0=off)",
 "   smooth_hess=0     2D Gaussian smoothing half-width for pseudo-Hessian (grid pts, 0=off)",
 "                       removes source/receiver singularities before preconditioner build",
-"   data_weight=auto    Brossier W_d data weighting: 0=off, 1=on (auto=1 when scaling>0)",
+"   data_weight=auto    data weighting: 0=off, 1=Brossier W_d RMS (auto=1 when scaling>0),",
+"                              2=energy norm W_r=diag(rho^1/2,S^1/2), J in J/m^3",
 "   active_params=      selectable parameter updates: comma-separated list of active params",
 "                        param=1: lam,mu,rho (default: all)  param=2: vp,vs,rho (default: all)",
 "                        frozen params keep initial values; their gradients are zeroed",
@@ -167,6 +237,40 @@ char *sdoc[] = {
 "   prior_lambda=0     prior model regularization strength (0=off)",
 "   shin_precond=0     Shin diagonal preconditioner for acoustic (0=off, 1=on)",
 "   shin_eps=1e-4      Shin preconditioner threshold parameter",
+" ",
+" Time-lag tomographic gradient (lag_gradient.c + lag_cone_filter.c):",
+"   lag_tomo=0         1: drive the inversion with the CONE-FILTERED time-lag",
+"                      gradient instead of the zero-lag kernel.  Keeps the",
+"                      small-slope (wide opening angle) transmission kernel and",
+"                      discards the specular migration imprint.",
+"                      Requires ischeme=3, param=2, precond=0, algorithm=0 or 1,",
+"                      and rho frozen (active_params=vp,vs) -- there is no g_rho",
+"                      at non-zero lag.",
+"   lag_nfreq=         number of DFT bins.  Required.  df=(fmax-fmin)/(nfreq-1)",
+"                      must satisfy df <= 1/T with T the record length, or the",
+"                      lag reconstruction aliases and is not a gradient;",
+"                      lagGradientInit errors out and prints the minimum.",
+"   lag_fmin=          lowest frequency, Hz, > 0.  Required.",
+"   lag_fmax=          highest frequency, Hz (default lag_fmin).",
+"   lag_nt=21          number of lags, forced odd so tau=0 is sampled exactly.",
+"   lag_dt=            lag increment, s (default 10*dt).",
+"   lag_s_pass=0.20    cone: slope [ms/m] passed in full.  SMALL slope = WIDE",
+"                      angle = tomographic, so this is an upper bound.",
+"   lag_s_stop=0.30    cone: slope [ms/m] fully rejected.",
+"   lag_theta_pass=    ... or give the cone as a full opening angle 2theta [deg];",
+"   lag_theta_stop=    needs lag_v= and OVERRIDES lag_s_pass/lag_s_stop.",
+"   lag_v=             velocity for the angle->slope map |p|=cos(theta)/v.",
+"   lag_tap_tau=0.10   raised-cosine edge fraction on the lag axis",
+"   lag_tap_x=0.10     ... on x   NOTE: these attenuate the gradient near the",
+"   lag_tap_z=0.10     ... on z         model edges.  Not cosmetic.",
+"   lag_pad=2          minimum zero-pad factor per axis",
+"   lag_nu0_keep=0     the nu=0 plane is the tau-INDEPENDENT part of the cube,",
+"                      where the slope is k/0.  0 takes the limit and keeps only",
+"                      k=0; 1 passes the whole plane.  Set 1 to make a wide-open",
+"                      cone a true identity -- the limit rule fires at any",
+"                      lag_s_pass.",
+"   NOTE memory: 6 complex fields x lag_nfreq x (nax*naz) floats PER RANK,",
+"   plus 3 cubes of lag_nt x nx x nz.  Printed by lagGradientInit.",
 " ",
 NULL};
 
@@ -433,15 +537,18 @@ static float compute_fwi_gradient(
 	int mpi_rank, int mpi_size,
 	int keep_checkpoints,
 	const float *comp_weights,
+	const energyWeight *ew,
 	misfitType mtype,
 	float band_flo, float band_fhi,
 	int verbose,
 	float srt_radius, int srt_filtsize,
 	float *wfld_energy,
-	int use_precond)
+	int use_precond,
+	lagTomoPar *lt)
 {
 	int ishot, k, i;
 	int n1 = mod->naz;
+	int nmodel = mod->nx * mod->nz;
 	size_t sizem = (size_t)mod->nax * mod->naz;
 	float misfit, total_misfit = 0.0f, global_misfit;
 	char work_dir[256], chk_path[512];
@@ -459,6 +566,12 @@ static float compute_fwi_gradient(
 	if (hess_lam_rho) memset(hess_lam_rho, 0, sizem * sizeof(float));
 	if (hess_muu_rho) memset(hess_muu_rho, 0, sizem * sizeof(float));
 	if (wfld_energy) memset(wfld_energy, 0, sizem * sizeof(float));
+
+	/* lagGradientTomo ADDS into these, so they must start clean. */
+	if (lt->on) {
+		memset(lt->gvp, 0, (size_t)nmodel * sizeof(float));
+		memset(lt->gvs, 0, (size_t)nmodel * sizeof(float));
+	}
 
 	/* Determine shots for this rank */
 	int my_nshots = 0;
@@ -580,19 +693,26 @@ static float compute_fwi_gradient(
 
 			snprintf(res_file, sizeof(res_file), "%s/residual.su", work_dir);
 			misfit = computeResidual(ncomp, obs_arr, syn_arr, res_file,
-			                         mtype, comp_weights, 0);
+			                         mtype, comp_weights, ew, NULL, 0);
 			total_misfit += misfit;
 
 			/* Step 3: Read residuals and apply taper */
 			memset(&adj, 0, sizeof(adjSrcPar));
-			readResidual(res_file, &adj, mod, bnd);
+			readResidual(res_file, &adj, mod, bnd, rec);
 			applyCosineTaper(&adj, res_taper);
+			applyApertureTaper(&adj, mod->dx, rec->aper_taper, verbose);
 
 			/* Step 4: Adjoint backpropagation.
 			 * Always accumulate in Lamé space (param=1) for multi-shot.
 			 * The chain rule conversion to velocity (if param=2) is done
 			 * once at the end by extractGradientVector, avoiding double
 			 * conversion. See NOTE in adj_shot.c lines 213-215. */
+
+			/* Zeroes this shot's time-lag DFT accumulators.  A no-op at
+			 * nfreq=0, which leaves adj_shot bit-identical. */
+			lagGradientInit(mod, lt->on ? lt->nfreq : 0,
+			                lt->fmin, lt->fmax, verbose);
+
 #ifdef USE_CUDA
 			if (s_ndom_fwi > 1 && s_dom_fwi)
 				adj_shot_gpu_domain(mod, src, wav, bnd, rec, &adj,
@@ -622,6 +742,15 @@ static float compute_fwi_gradient(
 #endif
 
 			freeResidual(&adj);
+
+			/* Time-lag tomographic gradient: build this shot's (Vp, Vs) lag
+			 * cubes from the DFT accumulators, cone-filter them, and add the
+			 * tau=0 slice of the passed part in.  Reads only its own
+			 * accumulators, so it is independent of shot_grad* above -- which
+			 * are discarded when lag_tomo is on. */
+			if (lt->on)
+				lagGradientTomo(mod, bnd, lt->nt, lt->dt, lt->mask, &lt->cone,
+				                lt->gvp, lt->gvs, verbose);
 		}
 
 		/* For precond=4,5: overwrite Hessian with P4 cross-correlation.
@@ -780,6 +909,18 @@ static float compute_fwi_gradient(
 			free(tmp_h);
 		}
 
+		/* The cone filter is rank-local (each rank filters its own shots'
+		 * cubes), so the only new communication is this sum of the tau=0
+		 * slices -- the same shot sum the conventional gradient does. */
+		if (lt->on) {
+			float *tmp_l = (float *)calloc(nmodel, sizeof(float));
+			MPI_Allreduce(lt->gvp, tmp_l, nmodel, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+			memcpy(lt->gvp, tmp_l, (size_t)nmodel * sizeof(float));
+			MPI_Allreduce(lt->gvs, tmp_l, nmodel, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+			memcpy(lt->gvs, tmp_l, (size_t)nmodel * sizeof(float));
+			free(tmp_l);
+		}
+
 		MPI_Allreduce(&total_misfit, &global_misfit, 1, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
 
 		if (verbose > 0 && mpi_rank == 0) {
@@ -794,6 +935,12 @@ static float compute_fwi_gradient(
 #else
 	global_misfit = total_misfit;
 #endif
+
+	/* Replace the zero-lag gradient with the filtered one.  Done here, on
+	 * every rank, so that everything downstream (smoothing, extraction,
+	 * diagnostics) sees one consistent grad1/grad2 and only has to know not
+	 * to apply the chain rule again. */
+	lagTomoInject(lt, mod, bnd, grad1, grad2, grad3);
 
 	free(my_shots);
 	return global_misfit;
@@ -853,6 +1000,7 @@ static void compute_hessian_vector_product(
 	float *dpert, float *Hd_flat, int nvec,
 	int grad_taper,
 	const float *comp_weights,
+	const energyWeight *ew,
 	int verbose)
 {
 	int ishot, k, i;
@@ -925,7 +1073,7 @@ static void compute_hessian_vector_product(
 		          res_taper,
 		          shot_hd1, shot_hd2, shot_hd3,
 		          1,  /* always Lame internally */
-		          comp_weights, verbose);
+		          comp_weights, ew, verbose);
 
 		/* Accumulate into local Hd sum */
 		for (i = 0; i < (int)sizem; i++) {
@@ -1619,6 +1767,96 @@ int main(int argc, char **argv)
 	}
 
 	/* ============================================================ */
+	/* Time-lag tomographic gradient (lag_tomo=)                     */
+	/* ============================================================ */
+	lagTomoPar lt;
+	memset(&lt, 0, sizeof(lt));
+	lagConeDefaults(&lt.cone);
+	if (!getparint("lag_tomo", &lt.on)) lt.on = 0;
+	if (lt.on) {
+		float theta_pass, theta_stop, vcone;
+
+		/* Each of these would silently produce something that is not the
+		 * filtered gradient, so none of them is a warning. */
+		if (!elastic)
+			verr("lag_tomo=1 needs the elastic scheme (ischeme=3).");
+		if (param != 2)
+			verr("lag_tomo=1 requires param=2: the lag cubes are built in "
+			     "(Vp, Vs) because the cone filter does not commute with the "
+			     "Lame->velocity chain rule.  There is no Lame output.");
+		if (pmask.update_p3)
+			verr("lag_tomo=1 requires rho to be FROZEN: the lag accumulators "
+			     "carry only the lambda and mu kernels, so no g_rho exists at "
+			     "non-zero lag.  Use active_params=vp,vs.");
+		if (use_precond)
+			verr("lag_tomo=1 requires precond=0: the pseudo-Hessian is the "
+			     "zero-lag, Lame-space one and does not match the filtered "
+			     "velocity gradient.");
+		if (algorithm > 1)
+			verr("lag_tomo=1 supports algorithm=0 (SD) or 1 (L-BFGS); "
+			     "algorithm=%d needs a Hessian-vector product, which is not "
+			     "lag-filtered and would be inconsistent with the gradient.",
+			     algorithm);
+
+		if (!getparint("lag_nfreq", &lt.nfreq))
+			verr("lag_tomo=1 requires lag_nfreq=.");
+		if (lt.nfreq < 1)
+			verr("lag_nfreq=%d must be >= 1.", lt.nfreq);
+		if (!getparfloat("lag_fmin", &lt.fmin))
+			verr("lag_tomo=1 requires lag_fmin= (Hz, > 0).");
+		if (!getparfloat("lag_fmax", &lt.fmax)) lt.fmax = lt.fmin;
+		if (!getparint("lag_nt", &lt.nt)) lt.nt = 21;
+		if (!getparfloat("lag_dt", &lt.dt)) lt.dt = 10.0f * mod.dt;
+		if (lt.dt <= 0.0f) verr("lag_dt=%g must be > 0 s.", lt.dt);
+
+		getparfloat("lag_s_pass",  &lt.cone.s_pass);
+		getparfloat("lag_s_stop",  &lt.cone.s_stop);
+		getparfloat("lag_tap_tau", &lt.cone.tap_tau);
+		getparfloat("lag_tap_x",   &lt.cone.tap_x);
+		getparfloat("lag_tap_z",   &lt.cone.tap_z);
+		getparint  ("lag_pad",     &lt.cone.pad);
+		getparint  ("lag_nu0_keep", &lt.cone.nu0_keep);
+
+		/* An opening angle, if given, overrides the slopes. */
+		if (getparfloat("lag_theta_pass", &theta_pass) &&
+		    getparfloat("lag_theta_stop", &theta_stop)) {
+			if (!getparfloat("lag_v", &vcone))
+				verr("lag_theta_pass/lag_theta_stop need lag_v= (the velocity "
+				     "that turns an angle into a slope).");
+			if (!(theta_stop < theta_pass))
+				verr("need lag_theta_stop < lag_theta_pass (a WIDER angle is a "
+				     "SMALLER slope), got %g and %g deg.", theta_pass, theta_stop);
+			lt.cone.s_pass = lagConeAngleToSlope(theta_pass, vcone);
+			lt.cone.s_stop = lagConeAngleToSlope(theta_stop, vcone);
+		}
+
+		/* The SAME mask the driver's taperGradientSrcRcv would have applied.
+		 * It has to go in before the filter: untapered, the source
+		 * singularity holds almost all of |g|^2 and dictates the local slope
+		 * the cone is measuring.  Because of that the driver's taper is
+		 * skipped for grad1/grad2 below -- applying both would square it. */
+		lt.mask = buildGradTaperMask(mod.nx, mod.nz, &shot, &rec, grad_taper);
+		lt.gvp  = (float *)calloc(nmodel, sizeof(float));
+		lt.gvs  = (float *)calloc(nmodel, sizeof(float));
+		if (!lt.gvp || !lt.gvs)
+			verr("lag_tomo: cannot allocate two %d point gradients.", nmodel);
+
+		if (mpi_rank == 0) {
+			vmess("*** Time-lag TOMOGRAPHIC gradient (lag_tomo=1) ***");
+			vmess("  %d frequencies, %.3f - %.3f Hz", lt.nfreq, lt.fmin, lt.fmax);
+			vmess("  %d lags, dtau=%.5f s  ->  |tau| <= %.5f s",
+			      lt.nt | 1, lt.dt, 0.5f * (float)((lt.nt | 1) - 1) * lt.dt);
+			vmess("  cone: pass |p| <= %.4f ms/m, stop |p| >= %.4f ms/m "
+			      "(small slope = wide angle = tomographic)",
+			      lt.cone.s_pass, lt.cone.s_stop);
+			vmess("  edge tapers tau/x/z = %.2f/%.2f/%.2f, pad=%d",
+			      lt.cone.tap_tau, lt.cone.tap_x, lt.cone.tap_z, lt.cone.pad);
+			vmess("  grad_taper=%d applied to the cubes BEFORE filtering",
+			      grad_taper);
+		}
+	}
+
+	/* ============================================================ */
 	/* Parse frequency band schedule (multiscale FWI)                */
 	/* ============================================================ */
 	bandPar bands;
@@ -1676,6 +1914,7 @@ int main(int argc, char **argv)
 	optFlag flag = OPT_INIT;
 	float fcost = 0.0f;
 	float *comp_weights = NULL;
+	energyWeight *ew = NULL;
 
 	for (iband = 0; iband < bands.nbands; iband++) {
 
@@ -1770,6 +2009,19 @@ int main(int argc, char **argv)
 	int data_weight;
 	if (!getparint("data_weight", &data_weight))
 		data_weight = (scaling > 0) ? 1 : 0;
+	if (data_weight < 0 || data_weight > 2)
+		verr("data_weight=%d invalid (0=off, 1=RMS, 2=energy norm).", data_weight);
+
+	/* data_weight=2: energy norm W_r = diag(rho^1/2 I, S^1/2), so that
+	 * J = 0.5*|W_r dd|^2 is an energy density and velocity, pressure and
+	 * stress channels are commensurate.  Q is sampled from the model at the
+	 * receivers once, before any model update, and then held fixed: rho, Vp
+	 * and Vs at the receivers are inversion parameters, so recomputing Q per
+	 * iteration would make J a moving target (breaking the Wolfe tests) and
+	 * would drop the dQ/dm term from the gradient.  Unlike the RMS weights,
+	 * Q does not depend on the data, so it is NOT recomputed per band. */
+	if (data_weight == 2 && ew == NULL)
+		ew = energyWeightsBuild(&mod, &bnd, &rec, (mpi_rank == 0) ? 1 : 0);
 
 	comp_weights = NULL;
 	int ncomp_w = 0;
@@ -1785,7 +2037,7 @@ int main(int argc, char **argv)
 			token_w = strtok(NULL, ",");
 		}
 
-		if (data_weight > 0) {
+		if (data_weight == 1) {
 			comp_weights = (float *)malloc(ncomp_w * sizeof(float));
 			for (i = 0; i < ncomp_w; i++) {
 				char obs_w[512];
@@ -1807,12 +2059,15 @@ int main(int argc, char **argv)
 		hess_lam, hess_muu, hess_rho,
 		hess_lam_muu, hess_lam_rho, hess_muu_rho,
 		chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk,
-		comp_weights, mtype, current_flo, current_fhi,
+		comp_weights, ew, mtype, current_flo, current_fhi,
 		verbose, srt_radius, srt_filtsize,
-		wfld_energy, use_precond);
+		wfld_energy, use_precond, &lt);
 
-	/* Taper gradient near source and receiver positions */
-	{
+	/* Taper gradient near source and receiver positions.
+	 * Skipped under lag_tomo: lagGradientTomo already applied the SAME mask
+	 * to every lag before filtering (it has to, or the source singularity
+	 * sets the slope the cone measures), and doing it twice squares it. */
+	if (!lt.on) {
 		int ibx = mod.ioPx, ibz = mod.ioPz;
 		if (bnd.lef == 4 || bnd.lef == 2) ibx += bnd.ntap;
 		if (bnd.top == 4 || bnd.top == 2) ibz += bnd.ntap;
@@ -1871,8 +2126,11 @@ int main(int argc, char **argv)
 	 * For SD/LBFGS/TRN/Enriched: grad_vec is pre-divided by H. */
 
 	if (mpi_rank == 0) {
+		/* param=1 means "strip the boundary, do not apply the chain rule".
+		 * With lag_tomo the cubes were already converted to (Vp, Vs) before
+		 * filtering -- converting again is the double-chain-rule bug. */
 		extractGradientVector(grad_vec, grad1, grad2, grad3,
-		                      &mod, &bnd, param);
+		                      &mod, &bnd, lt.on ? 1 : param);
 
 		/* Write initial raw gradient (before scaling/preconditioner)
 		 * for diagnostic comparison with test_gradient_visual.
@@ -2300,12 +2558,13 @@ int main(int argc, char **argv)
 				hess_lam, hess_muu, hess_rho,
 				hess_lam_muu, hess_lam_rho, hess_muu_rho,
 				chk_base, chk_skipdt, mpi_rank, mpi_size, keep_chk,
-				comp_weights, mtype, current_flo, current_fhi,
+				comp_weights, ew, mtype, current_flo, current_fhi,
 				verbose, srt_radius, srt_filtsize,
-				wfld_energy, use_precond);
+				wfld_energy, use_precond, &lt);
 
-			/* Taper gradient near source and receiver positions */
-			{
+			/* Taper gradient near source and receiver positions.
+			 * Skipped under lag_tomo -- see the first call. */
+			if (!lt.on) {
 				int ibx = mod.ioPx, ibz = mod.ioPz;
 				if (bnd.lef == 4 || bnd.lef == 2) ibx += bnd.ntap;
 				if (bnd.top == 4 || bnd.top == 2) ibz += bnd.ntap;
@@ -2356,7 +2615,7 @@ int main(int argc, char **argv)
 			/* Rank 0: extract gradient and apply preconditioner */
 			if (mpi_rank == 0) {
 				extractGradientVector(grad_vec, grad1, grad2, grad3,
-				                      &mod, &bnd, param);
+				                      &mod, &bnd, lt.on ? 1 : param);
 
 				/* Zero gradient for frozen parameters and water layer */
 				applyParamMask(grad_vec, nmodel, nparam, &pmask);
@@ -2512,7 +2771,7 @@ int main(int argc, char **argv)
 				chk_base, chk_skipdt, mpi_rank, mpi_size,
 				opt.d, opt.Hd, nvec,
 				grad_taper,
-				comp_weights, verbose);
+				comp_weights, ew, verbose);
 
 			/* Zero Hessian output for frozen parameters and water layer */
 			applyParamMask(opt.Hd, nmodel, nparam, &pmask);
@@ -2709,10 +2968,13 @@ int main(int argc, char **argv)
 		if (opt.ub) { free(opt.ub); opt.ub = NULL; }
 	}
 
-	/* Free comp_weights — will be recomputed for next band */
+	/* Free comp_weights — will be recomputed for next band.
+	 * ew is model-derived, not data-derived, so it persists across bands. */
 	if (comp_weights) { free(comp_weights); comp_weights = NULL; }
 
 	} /* end band loop */
+
+	if (ew) { energyWeightsFree(ew); ew = NULL; }
 
 	/* Clean up observed data backups from multiscale filtering */
 	if (bands.nbands > 1 && (bands.flo[0] > 0.0f || bands.fhi[0] > 0.0f)) {
@@ -2818,6 +3080,11 @@ int main(int argc, char **argv)
 	if (P22) free(P22);
 	if (P23) free(P23);
 	if (P33) free(P33);
+	if (lt.on) {
+		lagGradientFree();
+		if (lt.mask) free(lt.mask);
+		free(lt.gvp); free(lt.gvs);
+	}
 
 	for (i = 0; i < wav.nx; i++)
 		free(src_nwav[i]);

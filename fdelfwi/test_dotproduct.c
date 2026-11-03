@@ -54,7 +54,7 @@ int initCheckpoints(checkpointPar *chk, modPar *mod, int skipdt,
                     int delay, const char *file_base);
 int cleanCheckpoints(checkpointPar *chk);
 
-int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd);
+int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd, recPar *rec);
 void freeResidual(adjSrcPar *adj);
 
 int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
@@ -787,7 +787,7 @@ int main(int argc, char **argv)
 
 	/* Read residual into adjSrcPar */
 	memset(&adj, 0, sizeof(adjSrcPar));
-	readResidual("residual_dp.su", &adj, &mod, &bnd);
+	readResidual("residual_dp.su", &adj, &mod, &bnd, &rec);
 	vmess("Loaded %d adjoint source traces, nt=%d", adj.nsrc, adj.nt);
 
 	/* Allocate gradient arrays (velocity parameterization via param=2) */

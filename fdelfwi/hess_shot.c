@@ -46,7 +46,7 @@ int born_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
               int verbose);
 
 /* From readResidual.c */
-int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd);
+int readResidual(const char *filename, adjSrcPar *adj, modPar *mod, bndPar *bnd, recPar *rec);
 void freeResidual(adjSrcPar *adj);
 
 /* From adj_shot.c */
@@ -300,7 +300,8 @@ int hess_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
               int ishot, int nshots, int fileno,
               int res_taper,
               float *hd1, float *hd2, float *hd3,
-              int param, const float *comp_weights, int verbose)
+              int param, const float *comp_weights,
+              const energyWeight *ew, int verbose)
 {
 	adjSrcPar adj;
 	double t0_wall;
@@ -383,7 +384,7 @@ int hess_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 		/* 3. Read combined Born data into adjoint source structure  */
 		/* ======================================================== */
 		memset(&adj, 0, sizeof(adjSrcPar));
-		readResidual(combined_file, &adj, mod, bnd);
+		readResidual(combined_file, &adj, mod, bnd, rec);
 
 		if (verbose)
 			vmess("hess_shot: Born data loaded: %d traces, %d samples",
@@ -406,10 +407,53 @@ int hess_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			}
 		}
 
+		/* Apply the energy norm Q = W_r^T W_r to the Born data, so that
+		 * H*d = J^T Q J d stays consistent with the weighted gradient.
+		 * Unlike the RMS weights this couples components (Txx/Tzz), so the
+		 * cross-component vector is assembled per receiver and time sample.
+		 * combineBornFiles concatenates component-major, hence the
+		 * (ic*ntr_per_comp + itr2) indexing; the physical channel comes
+		 * from adj.typ, which readResidual already decoded from TRID. */
+		if (ew && adj.nsrc > 0 && ncomp > 0) {
+			int ntr_per_comp = adj.nsrc / ncomp;
+			int ic, itr2, is2;
+			int chan[MAX_COMP];
+			int idx_txx = -1, idx_tzz = -1;
+			float r_rec[MAX_COMP], psi_rec[MAX_COMP];
+
+			if (ntr_per_comp * ncomp != adj.nsrc)
+				verr("hess_shot: Born data has %d traces, not divisible by "
+				     "ncomp=%d.", adj.nsrc, ncomp);
+			if (ew->nrec != ntr_per_comp)
+				verr("hess_shot: energy weights were built for %d receivers "
+				     "but Born data holds %d traces per component.",
+				     ew->nrec, ntr_per_comp);
+
+			for (ic = 0; ic < ncomp; ic++) {
+				chan[ic] = adj.typ[ic * ntr_per_comp];
+				if (chan[ic] == 4) idx_txx = ic;
+				if (chan[ic] == 3) idx_tzz = ic;
+			}
+
+			for (itr2 = 0; itr2 < ntr_per_comp; itr2++) {
+				for (is2 = 0; is2 < adj.nt; is2++) {
+					for (ic = 0; ic < ncomp; ic++)
+						r_rec[ic] = adj.wav[(ic * ntr_per_comp + itr2) * adj.nt + is2];
+
+					energyWeightApply(ncomp, chan, r_rec, psi_rec, ew, itr2,
+					                  idx_txx, idx_tzz);
+
+					for (ic = 0; ic < ncomp; ic++)
+						adj.wav[(ic * ntr_per_comp + itr2) * adj.nt + is2] = psi_rec[ic];
+				}
+			}
+		}
+
 		/* Apply cosine taper to Born data (same as gradient residual
 		 * to suppress edge effects at trace ends) */
 		if (res_taper > 0)
 			applyCosineTaper(&adj, res_taper);
+		applyApertureTaper(&adj, mod->dx, rec->aper_taper, verbose);
 	}
 
 	/* ============================================================ */

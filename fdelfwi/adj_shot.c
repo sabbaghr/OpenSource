@@ -457,6 +457,30 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 					hess_lam_muu, hess_lam_rho, hess_muu_rho,
 					K_lam_tmp, K_muu_tmp, K_rho_tmp,
 					wfld_energy);
+
+				/* The half of the energy inner product that needs psi_sigma:
+				 * potential at energy_gamma=2, kinetic at energy_gamma=0.
+				 * Shares this call site with accumGradient because it needs
+				 * the same psi_sigma.  No-op unless energyImagingInit was
+				 * called with energy_ic != 0. */
+				energyImagingAccumAtSigma(mod, bnd,
+					buf_txx ? buf_txx + (size_t)j * sizem : NULL,
+					buf_tzz ? buf_tzz + (size_t)j * sizem : NULL,
+					buf_txz ? buf_txz + (size_t)j * sizem : NULL,
+					&wfl_adj, dt);
+
+				/* Time-lag extended imaging condition.  Folds the forward
+				 * strain and psi_sigma of THIS time index into running
+				 * DFTs; the lag correlation is formed later as a product
+				 * of transforms, so no state from any other time step is
+				 * needed here.  Belongs at this call site for the same
+				 * reason as accumGradient: psi_sigma before callAdjKernel
+				 * is the correct multiplier for the stress update.
+				 * No-op unless lagGradientInit was called with nfreq > 0. */
+				lagGradientAccum(mod, bnd,
+					buf_vx + (size_t)j * sizem,
+					buf_vz + (size_t)j * sizem,
+					&wfl_adj, it, dt);
 			}
 
 			/* Advance adjoint wavefield with multicomponent source injection.
@@ -501,6 +525,17 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 						&wfl_adj, dt,
 						grad_rho);
 				}
+
+				/* The half of the energy inner product that needs psi_v:
+				 * kinetic at energy_gamma=2, potential at energy_gamma=0.
+				 * It belongs here and not at the accumGradient call above.
+				 * Unlike the density gradient it uses the forward VELOCITY
+				 * at step j, which always exists, so it is not gated on
+				 * j > 0. */
+				energyImagingAccumAtVel(mod, bnd,
+					buf_vx + (size_t)j * sizem,
+					buf_vz + (size_t)j * sizem,
+					&wfl_adj, dt);
 			}
 
 			/* Write adjoint wavefield snapshot if requested. */

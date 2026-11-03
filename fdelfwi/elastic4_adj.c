@@ -41,7 +41,8 @@
 
 int applyAdjointSource(modPar mod, adjSrcPar adj, int itime,
 	float *vx, float *vz, float *tzz, float *txx, float *txz,
-	float *mul, int rec_delay, int rec_skipdt, int phase, int verbose);
+	float *rox, float *roz, float *mul,
+	int rec_delay, int rec_skipdt, int phase, int verbose);
 
 int boundariesP_adj(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz,
 	float *txx, float *txz, float *rox, float *roz, float *l2m,
@@ -75,7 +76,7 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 	/*  Step 5^T: Inject adjoint stress sources                     */
 	/* ============================================================ */
 	applyAdjointSource(mod, adj, itime, vx, vz, tzz, txx, txz,
-		mul, rec_delay, rec_skipdt, /*phase=*/2, verbose);
+		rox, roz, mul, rec_delay, rec_skipdt, /*phase=*/2, verbose);
 
 	/* ============================================================ */
 	/*  Step 4^T / Phase A1 = (F2)^T: Adjoint velocity update      */
@@ -122,7 +123,7 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 	/*  Step 2^T: Inject adjoint force sources                      */
 	/* ============================================================ */
 	applyAdjointSource(mod, adj, itime, vx, vz, tzz, txx, txz,
-		mul, rec_delay, rec_skipdt, /*phase=*/1, verbose);
+		rox, roz, mul, rec_delay, rec_skipdt, /*phase=*/1, verbose);
 
 	/* ============================================================ */
 	/*  Step 1^T / Phase A2 = (F1)^T: Adjoint stress update        */

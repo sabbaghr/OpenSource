@@ -1205,6 +1205,10 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
 	if (!getparint("rec_int_p",&rec->int_p)) rec->int_p=0;
 	if (!getparint("rec_int_vx",&rec->int_vx)) rec->int_vx=0;
 	if (!getparint("rec_int_vz",&rec->int_vz)) rec->int_vz=0;
+	/* FWI only: width of the geometric taper applied to the adjoint source
+	 * injection at the ends of the receiver array, in grid points.
+	 * 0 = off, which reproduces the previous behaviour exactly. */
+	if (!getparint("aper_taper",&rec->aper_taper)) rec->aper_taper=0;
 	if (!getparint("max_nrec",&rec->max_nrec)) rec->max_nrec=15000;
 	if (!getparint("scale",&rec->scale)) rec->scale=0;
 	if (!getparfloat("dxspread",&dxspread)) dxspread=0;

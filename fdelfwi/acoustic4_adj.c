@@ -42,7 +42,8 @@
 
 int applyAdjointSource(modPar mod, adjSrcPar adj, int itime,
 	float *vx, float *vz, float *tzz, float *txx, float *txz,
-	float *mul, int rec_delay, int rec_skipdt, int phase, int verbose);
+	float *rox, float *roz, float *mul,
+	int rec_delay, int rec_skipdt, int phase, int verbose);
 
 int boundariesP_adj(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz,
 	float *txx, float *txz, float *rox, float *roz, float *l2m,
@@ -80,7 +81,7 @@ int acoustic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 	/*  Phase 2: pressure residuals injected into p (=tzz slot).    */
 	/* ============================================================ */
 	applyAdjointSource(mod, adj, itime, vx, vz, p, NULL, NULL,
-		NULL, rec_delay, rec_skipdt, /*phase=*/2, verbose);
+		rox, roz, NULL, rec_delay, rec_skipdt, /*phase=*/2, verbose);
 
 	/* ============================================================ */
 	/*  Phase (F2)^T: Adjoint velocity update                       */
@@ -125,7 +126,7 @@ int acoustic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 	/*  Phase 1: Fx/Fz residuals injected into vx/vz.              */
 	/* ============================================================ */
 	applyAdjointSource(mod, adj, itime, vx, vz, p, NULL, NULL,
-		NULL, rec_delay, rec_skipdt, /*phase=*/1, verbose);
+		rox, roz, NULL, rec_delay, rec_skipdt, /*phase=*/1, verbose);
 
 	/* ============================================================ */
 	/*  Phase (F1)^T: Adjoint pressure update                       */
