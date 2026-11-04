@@ -92,10 +92,16 @@
 
 set -e
 set -o pipefail
-ROOT=/rcp3/software/codes/OpenSource_SL10
+# FDELFWI_ROOT lets this script drive a DIFFERENT checkout without being
+# edited.  The MIO build lives in its own tree, and pointing ROOT at it is the
+# whole basis of the cross-machine reproducibility check -- leave ROOT
+# hardcoded and the MIO job would silently run the Seislab10 binaries, i.e.
+# compare a build against itself.  Unset, the behaviour is exactly as before.
+ROOT=${FDELFWI_ROOT:-/rcp3/software/codes/OpenSource_SL10}
 FDELFWI=${ROOT}/fdelfwi
 export PATH=${ROOT}/bin:/rcp3/software/codes/cwp/bin:${PATH}
-export OMP_NUM_THREADS=16
+# Respect a value set by the batch system (SLURM_CPUS_PER_TASK), else 16.
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-16}
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=${HERE}/lag_reflector
