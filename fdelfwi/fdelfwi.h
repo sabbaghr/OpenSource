@@ -680,6 +680,58 @@ void lagGradientWriteStack(modPar *mod, const char *base, int verbose);
 void lagGradientFree(void);
 
 
+/* --- space_lag_gradient.c: space-lag extended imaging condition ---
+ * The same lambda/mu kernels with the two wavefields separated by a space
+ * lag VECTOR h = (hx, hz) instead of a time lag,
+ *   g(x,h) = dt sum_t A(x-h,t) B(x+h,t),
+ * symmetric, so the relative separation is 2h.  Output is g_Vp and g_Vs per
+ * lag, same pointwise chain rule, same absence of a g_rho cube.
+ *
+ * The OPPOSITE implementation choice from lag_gradient.c, for the reason
+ * stated there: both fields ARE co-resident at the same time index, so a
+ * space lag needs no transform pair and is accumulated directly in the time
+ * domain.  Hence no band limiting and no aliasing -- the h=0 slice is
+ * accumGradient's arithmetic over accumGradient's bounds in accumGradient's
+ * order, so it reproduces the conventional gradient to float rounding.  The
+ * costs invert: memory is 2*nhx*nhz*sizem, the lag axis must be fixed before
+ * the run, and lags are integer multiples of the grid spacing (the shift is
+ * an index offset, not a phase rotation).
+ *
+ * The conjugate variable of h is k_A + k_B = (2 w cos(theta)/v) N: the
+ * migration wavenumber, whose DIRECTION is the reflector normal and needs no
+ * velocity.  That is why the lag has to be a vector.
+ *
+ * nhx/nhz are forced odd so h=0 is sampled; dhx/dhz are strides in GRID
+ * POINTS.  (nhx,1) and (1,nhz) give both components of k_A+k_B at cost
+ * nhx+nhz rather than nhx*nhz, which is enough wherever one normal dominates
+ * per image point.  shiftx/shiftz are the CALIBRATION of the h axis: an extra
+ * grid shift D on the adjoint field must translate the cube by D/2 in BOTH x
+ * and h; use even D.  See the file header. */
+void slagGradientInit(modPar *mod, int nhx, int nhz, int dhx, int dhz,
+    int shiftx, int shiftz, int verbose);
+/* Add one time step into every lag accumulator.  Same call site as
+ * lagGradientAccum (psi_sigma before callAdjKernel), but with no `it`:
+ * nothing here depends on absolute time.  A no-op unless slagGradientInit
+ * was called with nhx*nhz > 0. */
+void slagGradientAccum(modPar *mod, bndPar *bnd,
+    float *fwd_vx, float *fwd_vz,
+    wflPar *wfl_adj, float dt);
+/* Write <base>_shotNNN_slag{vp,vs}.su plus a slagaxis.txt description, and
+ * add into the shot stack.  Cubes are nz samples by (nx*nhx*nhz) traces,
+ * trace = (ihz*nhx + ihx)*nx + ix.  mask as for lagGradientWrite. */
+void slagGradientWrite(modPar *mod, bndPar *bnd, const char *base, int ishot,
+    float *mask, int verbose);
+/* Write the shot sum as <base>_slag{vp,vs}.su -- the cube the conventional
+ * gradient corresponds to. */
+void slagGradientWriteStack(modPar *mod, const char *base, int verbose);
+/* Pointer to the h=0 plane of the shot stack (ivar 0 = Vp, 1 = Vs), or NULL.
+ * Lets the driver make the h=0 check numerically in the same run rather than
+ * reading its own output back. */
+float *slagGradientStackZeroLag(int ivar);
+/* Release everything including the stack; call after the shot loop. */
+void slagGradientFree(void);
+
+
 /* ------------------------------------------------------------------ *
  * lag_cone_filter.c -- 3D slope (cone) filter on a lag cube.
  *

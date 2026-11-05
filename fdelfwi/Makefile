@@ -37,6 +37,7 @@ test_gradient_visual: $(PRG12)
 test_recop_dp: $(PRG14)
 test_lag_gradient: $(PRG17)
 test_lag_cone: $(PRG18)
+test_space_lag_gradient: $(PRG19)
 
 PRG3 = fwi_driver
 PRG4 = fwi_mpi_driver
@@ -53,6 +54,7 @@ PRG15 = test_ei_planewave
 PRG16 = test_ei_modesep
 PRG17 = test_lag_gradient
 PRG18 = test_lag_cone
+PRG19 = test_space_lag_gradient
 
 # Alias must come AFTER PRG13 is defined: make expands prerequisites
 # immediately when the rule is read.
@@ -98,6 +100,7 @@ SRCC	= fdfwimodc.c \
 		energy_weights.c  \
 		energy_imaging.c  \
 		lag_gradient.c  \
+		space_lag_gradient.c  \
 		lag_cone_filter.c  \
 		kh_misfit.c  \
 		aperture_taper.c  \
@@ -332,6 +335,21 @@ $(PRG18):	$(OBJC) fdelfwi.h test_lag_cone.c
 	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG18) test_lag_cone.o \
 		$(OBJC) fileOpen.o writeRec.o $(LIBS)
 
+# Standalone space-lag gradient test, the sibling of $(PRG17).  Separate
+# program for the same reason: the lag cubes are read straight out of
+# space_lag_gradient.c's own accumulators and must not be perturbed by the
+# preconditioner, scaling or smoothing that test_gradient_visual builds.  Its
+# h=0 check is EXACT (no band limiting, unlike the time-lag tau=0 check), and
+# the driver makes it numerically and returns non-zero on failure, so this
+# target is usable as a regression test.
+$(PRG19):	$(OBJC) fdelfwi.h test_space_lag_gradient.c
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -c updateModel.c
+	$(CC) $(CFLAGS) $(OPTC) -c test_space_lag_gradient.c
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG19) test_space_lag_gradient.o updateModel.o \
+		$(OBJC) fileOpen.o writeRec.o $(LIBS)
+
 install: $(PRG8) $(PRG9)
 	cp $(PRG8) $B
 	cp $(PRG9) $B
@@ -345,7 +363,8 @@ clean:
 			test_wave_op_dp.o test_dotproduct.o test_taylor.o test_hessian_dp.o \
 			test_gradient_visual.o fdelfwi_fwd.o test_recop_dp.o \
 			test_ei_planewave.o test_ei_modesep.o test_lag_gradient.o \
-			$(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7) $(PRG8) $(PRG9) $(PRG10) $(PRG12) $(PRG13) $(PRG14) $(PRG15) $(PRG16) $(PRG17) \
+			test_space_lag_gradient.o \
+			$(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7) $(PRG8) $(PRG9) $(PRG10) $(PRG12) $(PRG13) $(PRG14) $(PRG15) $(PRG16) $(PRG17) $(PRG19) \
 			fwi_gpu_inversion fwi_mpi_gpu_inversion
 
 realclean:

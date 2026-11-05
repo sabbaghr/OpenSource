@@ -481,6 +481,18 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 					buf_vx + (size_t)j * sizem,
 					buf_vz + (size_t)j * sizem,
 					&wfl_adj, it, dt);
+
+				/* Space-lag extended imaging condition.  Same call site and
+				 * same reason -- psi_sigma before callAdjKernel -- but the
+				 * correlation is formed HERE, in place, for every lag: a
+				 * space lag only needs the two fields at the same time
+				 * index, which is exactly what this loop has, and that is
+				 * why it needs no transform pair and no `it`.
+				 * No-op unless slagGradientInit was called. */
+				slagGradientAccum(mod, bnd,
+					buf_vx + (size_t)j * sizem,
+					buf_vz + (size_t)j * sizem,
+					&wfl_adj, dt);
 			}
 
 			/* Advance adjoint wavefield with multicomponent source injection.
