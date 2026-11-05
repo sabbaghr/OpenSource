@@ -124,6 +124,8 @@ char *sdoc[] = {
 "                 reuses that same snapshot schedule",
 "   res_taper=    cosine taper on residual traces in samples (100)",
 "   grad_taper=   Gaussian taper radius around src/rcv in grid pts (0=off)",
+"   grad_taper_core=0  grid points HARD ZEROED around every source and",
+"                 receiver inside that radius (0 = plain r^2/R^2 ramp)",
 "   scaling=1     parameter scaling (0=none, 1=Brossier, 2=Yang)",
 "   data_weight=0 data weighting: 0=off, 2=energy norm W_r (rho, compliance)",
 "   misfit=0      objective: 0=L2, 2=Kirchhoff-Helmholtz energy flux",
@@ -314,71 +316,16 @@ static void applyCosineTaper(adjSrcPar *adj, int taper_len)
 
 
 /*====================================================================
- * buildGradTaperMask -- Build parabolic taper mask on interior grid.
+ * buildGradTaperMask -- source/receiver hole on the interior grid.
  *
- * Returns a [nx * nz] mask that is 0 at each source/receiver position
- * and smoothly ramps to 1 at a distance of `radius` grid points
- * (w = r²/R²). The caller must free the returned pointer.
- *
- * Source/receiver positions are in interior (non-padded) grid indices.
+ * Defined in grad_taper_mask.c (already in $(OBJC), so it was linked in
+ * all along).  This driver used to carry a byte-for-byte copy of the
+ * pre-`core` version; the copy is gone because the two cannot be allowed
+ * to drift -- the whole point of the shared mask is that the conventional
+ * gradient and the lag cubes are tapered identically.
  *====================================================================*/
-static float *buildGradTaperMask(int nx, int nz,
-	shotPar *shot, recPar *rec, int radius)
-{
-	if (radius <= 0) return NULL;
-
-	int ix, iz, k;
-	int nmodel = nx * nz;
-	float r2max = (float)radius * (float)radius;
-	float *mask = (float *)malloc(nmodel * sizeof(float));
-	for (k = 0; k < nmodel; k++) mask[k] = 1.0f;
-
-	/* Parabolic hole around each source (interior coordinates) */
-	for (k = 0; k < shot->n; k++) {
-		int sx = shot->x[k];
-		int sz = shot->z[k];
-		int x0 = sx - radius; if (x0 < 0) x0 = 0;
-		int x1 = sx + radius; if (x1 >= nx) x1 = nx - 1;
-		int z0 = sz - radius; if (z0 < 0) z0 = 0;
-		int z1 = sz + radius; if (z1 >= nz) z1 = nz - 1;
-		for (ix = x0; ix <= x1; ix++) {
-			for (iz = z0; iz <= z1; iz++) {
-				float ddx = (float)(ix - sx);
-				float ddz = (float)(iz - sz);
-				float r2 = ddx * ddx + ddz * ddz;
-				if (r2 < r2max) {
-					float w = r2 / r2max;
-					if (w < mask[ix * nz + iz])
-						mask[ix * nz + iz] = w;
-				}
-			}
-		}
-	}
-
-	/* Parabolic hole around each receiver (interior coordinates) */
-	for (k = 0; k < rec->n; k++) {
-		int rx = rec->x[k];
-		int rz = rec->z[k];
-		int x0 = rx - radius; if (x0 < 0) x0 = 0;
-		int x1 = rx + radius; if (x1 >= nx) x1 = nx - 1;
-		int z0 = rz - radius; if (z0 < 0) z0 = 0;
-		int z1 = rz + radius; if (z1 >= nz) z1 = nz - 1;
-		for (ix = x0; ix <= x1; ix++) {
-			for (iz = z0; iz <= z1; iz++) {
-				float ddx = (float)(ix - rx);
-				float ddz = (float)(iz - rz);
-				float r2 = ddx * ddx + ddz * ddz;
-				if (r2 < r2max) {
-					float w = r2 / r2max;
-					if (w < mask[ix * nz + iz])
-						mask[ix * nz + iz] = w;
-				}
-			}
-		}
-	}
-
-	return mask;
-}
+float *buildGradTaperMask(int nx, int nz,
+	shotPar *shot, recPar *rec, int radius, int core);
 
 /*====================================================================
  * applyMask -- Multiply a flat [nmodel] array by the mask.
@@ -413,7 +360,7 @@ int main(int argc, char **argv)
 
 	/* Test parameters */
 	char  *chk_base_str, *comp_str, *file_obs, *out_base, *file_snap_adj;
-	int    chk_skipdt, param, res_taper, grad_taper, scaling;
+	int    chk_skipdt, param, res_taper, grad_taper, grad_taper_core, scaling;
 
 	/* Gradient arrays (padded grid) */
 	float *grad1, *grad2, *grad3;
@@ -466,6 +413,7 @@ int main(int argc, char **argv)
 	if (!getparint("shot_grad", &shot_grad)) shot_grad = 0;
 	if (!getparint("res_taper", &res_taper)) res_taper = 100;
 	if (!getparint("grad_taper", &grad_taper)) grad_taper = 0;
+	if (!getparint("grad_taper_core", &grad_taper_core)) grad_taper_core = 0;
 	if (!getparint("scaling", &scaling)) scaling = 1;
 	if (!getparfloat("precond_eps", &precond_eps)) precond_eps = 1e-2f;
 	int precond_mode = 1;  /* 1-5, see preconditioner modes */
@@ -690,7 +638,8 @@ int main(int argc, char **argv)
 	 * that comparison are then tapered identically. */
 	float *lag_mask = NULL;
 	if (lag_nfreq > 0 && grad_taper > 0) {
-		lag_mask = buildGradTaperMask(mod.nx, mod.nz, &shot, &rec, grad_taper);
+		lag_mask = buildGradTaperMask(mod.nx, mod.nz, &shot, &rec,
+			grad_taper, grad_taper_core);
 		if (verbose) vmess("Lag cubes share the gradient taper (radius=%d)",
 			grad_taper);
 	}
@@ -1216,7 +1165,8 @@ int main(int argc, char **argv)
 
 		vmess("Applying gradient taper (radius=%d) around %d sources and %d receivers",
 			grad_taper, shot.n, rec.n);
-		taper_mask = buildGradTaperMask(mod.nx, mod.nz, &shot, &rec, grad_taper);
+		taper_mask = buildGradTaperMask(mod.nx, mod.nz, &shot, &rec,
+			grad_taper, grad_taper_core);
 
 		/* Taper raw gradient */
 		applyMask(g1_int, taper_mask, nmodel);

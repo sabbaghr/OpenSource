@@ -101,7 +101,7 @@ int writesufile(char *filename, float *data, size_t n1, size_t n2,
 
 /* grad_taper_mask.c -- prototyped locally, see the NOTE in fdelfwi.h. */
 float *buildGradTaperMask(int nx, int nz,
-                          shotPar *shot, recPar *rec, int radius);
+                          shotPar *shot, recPar *rec, int radius, int core);
 
 void writeSnapTimesReset(void);
 void vmess(char *fmt, ...);
@@ -358,9 +358,19 @@ static void applyCosineTaper(adjSrcPar *adj, int taper_len)
  *
  * The FWI gradient (cross-correlation of forward and adjoint wavefields)
  * has artificially large values near sources and receivers where the
- * wavefield amplitudes are highest.  This applies a Gaussian taper that
- * smoothly ramps from 0 at each source/receiver position to 1 at a
- * distance of `radius` grid points.
+ * wavefield amplitudes are highest.  The mask is 0 inside `core` grid
+ * points, then ramps parabolically to 1 at `radius`:
+ *
+ *     w = 0                             r <= core
+ *     w = (r^2 - core^2)/(R^2 - core^2) core < r < R
+ *     w = 1                             r >= R
+ *
+ * This MUST stay identical to buildGradTaperMask() in grad_taper_mask.c:
+ * that one masks the time-lag cubes, this one the conventional gradient,
+ * and a lag_tomo=1 vs lag_tomo=0 comparison is only meaningful if the two
+ * see the same mask.  See the header of grad_taper_mask.c for why the pure
+ * r^2/R^2 ramp (core=0) does not remove the source singularity and why a
+ * larger `radius` is not a substitute.
  *
  * grad: padded 2D array [nax * naz], indexed as grad[ix*n1 + iz]
  * n1:   fast dimension (naz)
@@ -369,22 +379,30 @@ static void applyCosineTaper(adjSrcPar *adj, int taper_len)
  * rec:  receiver positions (grid indices, interior-relative)
  * ibndx, ibndz: boundary offsets to convert to padded indices
  * radius: taper radius in grid points (0 = no taper)
+ * core:   radius of the hard-zero core, clamped to [0, radius-1]
  *--------------------------------------------------------------------*/
 static void taperGradientSrcRcv(float *grad, int n1, int nax,
 	shotPar *shot, recPar *rec,
-	int ibndx, int ibndz, int radius)
+	int ibndx, int ibndz, int radius, int core)
 {
 	if (radius <= 0) return;
 
 	int ix, iz, k;
-	float r2max = (float)radius * (float)radius;
+	float r2max, r2core, span;
+
+	if (core < 0) core = 0;
+	if (core > radius - 1) core = radius - 1;
+
+	r2max  = (float)radius * (float)radius;
+	r2core = (float)core * (float)core;
+	span   = r2max - r2core;
 
 	/* Build a 1D taper mask (initially all ones) */
 	size_t sizem = (size_t)nax * n1;
 	float *mask = (float *)malloc(sizem * sizeof(float));
 	for (k = 0; k < (int)sizem; k++) mask[k] = 1.0f;
 
-	/* Apply Gaussian hole around each source */
+	/* Zero core + parabolic ramp around each source */
 	for (k = 0; k < shot->n; k++) {
 		int sx = shot->x[k] + ibndx;
 		int sz = shot->z[k] + ibndz;
@@ -398,7 +416,8 @@ static void taperGradientSrcRcv(float *grad, int n1, int nax,
 				float dz = (float)(iz - sz);
 				float r2 = dx * dx + dz * dz;
 				if (r2 < r2max) {
-					float w = r2 / r2max; /* 0 at center, 1 at edge */
+					/* 0 inside the core, 1 at the edge */
+					float w = (r2 <= r2core) ? 0.0f : (r2 - r2core) / span;
 					if (w < mask[ix * n1 + iz])
 						mask[ix * n1 + iz] = w;
 				}
@@ -406,7 +425,7 @@ static void taperGradientSrcRcv(float *grad, int n1, int nax,
 		}
 	}
 
-	/* Apply Gaussian hole around each receiver */
+	/* Zero core + parabolic ramp around each receiver */
 	for (k = 0; k < rec->n; k++) {
 		int rx = rec->x[k] + ibndx;
 		int rz = rec->z[k] + ibndz;
@@ -420,7 +439,7 @@ static void taperGradientSrcRcv(float *grad, int n1, int nax,
 				float dz = (float)(iz - rz);
 				float r2 = dx * dx + dz * dz;
 				if (r2 < r2max) {
-					float w = r2 / r2max;
+					float w = (r2 <= r2core) ? 0.0f : (r2 - r2core) / span;
 					if (w < mask[ix * n1 + iz])
 						mask[ix * n1 + iz] = w;
 				}
@@ -853,10 +872,11 @@ static float compute_fwi_gradient(
 	{
 		/* Diagnostic: local gradient norm before reduction */
 		if (verbose > 0) {
-			float local_gnorm = 0.0f;
+			/* double: g*g underflows float32 for unweighted velocity data */
+			double lg2 = 0.0;
 			for (i = 0; i < (int)sizem; i++)
-				local_gnorm += grad1[i] * grad1[i];
-			local_gnorm = sqrtf(local_gnorm);
+				lg2 += (double)grad1[i] * (double)grad1[i];
+			float local_gnorm = (float)sqrt(lg2);
 			fprintf(stderr, "  rank %d: local ||g1||=%.4e  local misfit=%.4e\n",
 			        mpi_rank, local_gnorm, total_misfit);
 		}
@@ -924,10 +944,10 @@ static float compute_fwi_gradient(
 		MPI_Allreduce(&total_misfit, &global_misfit, 1, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
 
 		if (verbose > 0 && mpi_rank == 0) {
-			float global_gnorm = 0.0f;
+			double gg2 = 0.0;
 			for (i = 0; i < (int)sizem; i++)
-				global_gnorm += grad1[i] * grad1[i];
-			global_gnorm = sqrtf(global_gnorm);
+				gg2 += (double)grad1[i] * (double)grad1[i];
+			float global_gnorm = (float)sqrt(gg2);
 			vmess("  MPI reduction: global ||g1||=%.4e  global misfit=%.4e",
 			      global_gnorm, global_misfit);
 		}
@@ -986,6 +1006,7 @@ static void clean_shot_checkpoints(
  *   dpert      - perturbation vector (opt->d, flat, length nvec)
  *   Hd_flat    - OUTPUT: H*d result (flat, length nvec, on rank 0)
  *   grad_taper - gradient taper radius
+ *   grad_taper_core - radius of the hard-zero core inside the ramp
  *
  * Other parameters same as compute_fwi_gradient.
  *--------------------------------------------------------------------*/
@@ -998,7 +1019,7 @@ static void compute_hessian_vector_product(
 	const char *chk_base, int chk_skipdt,
 	int mpi_rank, int mpi_size,
 	float *dpert, float *Hd_flat, int nvec,
-	int grad_taper,
+	int grad_taper, int grad_taper_core,
 	const float *comp_weights,
 	const energyWeight *ew,
 	int verbose)
@@ -1124,10 +1145,10 @@ static void compute_hessian_vector_product(
 		int ibx = mod->ioPx, ibz = mod->ioPz;
 		if (bnd->lef == 4 || bnd->lef == 2) ibx += bnd->ntap;
 		if (bnd->top == 4 || bnd->top == 2) ibz += bnd->ntap;
-		taperGradientSrcRcv(hd1, n1, mod->nax, shot, rec, ibx, ibz, grad_taper);
+		taperGradientSrcRcv(hd1, n1, mod->nax, shot, rec, ibx, ibz, grad_taper, grad_taper_core);
 		if (elastic)
-			taperGradientSrcRcv(hd2, n1, mod->nax, shot, rec, ibx, ibz, grad_taper);
-		taperGradientSrcRcv(hd3, n1, mod->nax, shot, rec, ibx, ibz, grad_taper);
+			taperGradientSrcRcv(hd2, n1, mod->nax, shot, rec, ibx, ibz, grad_taper, grad_taper_core);
+		taperGradientSrcRcv(hd3, n1, mod->nax, shot, rec, ibx, ibz, grad_taper, grad_taper_core);
 	}
 
 	/* Extract to flat vector (raw, no scaling — matching SEISCOPE
@@ -1309,7 +1330,7 @@ int main(int argc, char **argv)
 
 	/* FWI parameters (same as fwi_driver) */
 	char  *file_obs, *file_grad, *chk_base, *comp_str;
-	int    chk_skipdt, res_taper, grad_taper, param;
+	int    chk_skipdt, res_taper, grad_taper, grad_taper_core, param;
 
 	/* Optimization parameters */
 	int    niter, algorithm, lbfgs_mem, nls_max, write_iter, niter_cg;
@@ -1343,6 +1364,15 @@ int main(int argc, char **argv)
 	if (!getparint("res_taper", &res_taper)) res_taper = 100;
 	int grad_taper_set = getparint("grad_taper", &grad_taper);
 	if (!grad_taper_set) grad_taper = 5;
+	/* Radius of the hard-zero core inside the taper ramp.  0 keeps the
+	 * historical pure w = r^2/R^2 ramp, which is exactly zero only AT the
+	 * source/receiver cell and therefore does not remove the imaging-
+	 * condition singularity -- see the header of grad_taper_mask.c. */
+	if (!getparint("grad_taper_core", &grad_taper_core)) grad_taper_core = 0;
+	if (grad_taper_core < 0) grad_taper_core = 0;
+	if (grad_taper > 0 && grad_taper_core > grad_taper - 1)
+		verr("grad_taper_core=%d must be smaller than grad_taper=%d",
+		     grad_taper_core, grad_taper);
 	if (!getparint("param", &param)) param = 1;
 	if (param < 1 || param > 2)
 		verr("param must be 1 (Lame) or 2 (velocity)");
@@ -1577,6 +1607,9 @@ int main(int argc, char **argv)
 		} else {
 			vmess("Gradient taper: %d grid points", grad_taper);
 		}
+		if (grad_taper > 0 && grad_taper_core > 0)
+			vmess("Gradient taper core: %d grid points zeroed around every "
+			      "source AND receiver", grad_taper_core);
 		{
 			char *active_str_tmp;
 			if (getparstring("active_params", &active_str_tmp))
@@ -1835,7 +1868,8 @@ int main(int argc, char **argv)
 		 * singularity holds almost all of |g|^2 and dictates the local slope
 		 * the cone is measuring.  Because of that the driver's taper is
 		 * skipped for grad1/grad2 below -- applying both would square it. */
-		lt.mask = buildGradTaperMask(mod.nx, mod.nz, &shot, &rec, grad_taper);
+		lt.mask = buildGradTaperMask(mod.nx, mod.nz, &shot, &rec,
+		                             grad_taper, grad_taper_core);
 		lt.gvp  = (float *)calloc(nmodel, sizeof(float));
 		lt.gvs  = (float *)calloc(nmodel, sizeof(float));
 		if (!lt.gvp || !lt.gvs)
@@ -1851,8 +1885,8 @@ int main(int argc, char **argv)
 			      lt.cone.s_pass, lt.cone.s_stop);
 			vmess("  edge tapers tau/x/z = %.2f/%.2f/%.2f, pad=%d",
 			      lt.cone.tap_tau, lt.cone.tap_x, lt.cone.tap_z, lt.cone.pad);
-			vmess("  grad_taper=%d applied to the cubes BEFORE filtering",
-			      grad_taper);
+			vmess("  grad_taper=%d (core=%d) applied to the cubes BEFORE "
+			      "filtering", grad_taper, grad_taper_core);
 		}
 	}
 
@@ -2071,10 +2105,10 @@ int main(int argc, char **argv)
 		int ibx = mod.ioPx, ibz = mod.ioPz;
 		if (bnd.lef == 4 || bnd.lef == 2) ibx += bnd.ntap;
 		if (bnd.top == 4 || bnd.top == 2) ibz += bnd.ntap;
-		taperGradientSrcRcv(grad1, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper);
+		taperGradientSrcRcv(grad1, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper, grad_taper_core);
 		if (mod.ischeme > 2)
-			taperGradientSrcRcv(grad2, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper);
-		taperGradientSrcRcv(grad3, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper);
+			taperGradientSrcRcv(grad2, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper, grad_taper_core);
+		taperGradientSrcRcv(grad3, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper, grad_taper_core);
 	}
 
 	/* 2D Gaussian smoothing of gradient and pseudo-Hessian (Liu et al. 2022).
@@ -2332,10 +2366,18 @@ int main(int argc, char **argv)
 		}
 		vmess("Initial misfit: %.6e", fcost);
 
-		float gnorm = 0.0f;
+		/* Accumulate in DOUBLE.  g can be ~1e-25 (velocity data in m/s with
+		 * data_weight=0), so g*g ~ 1e-50 is below float32's smallest
+		 * subnormal (1.4e-45) and the whole sum returns exactly 0.0f.  That
+		 * then fails the `gnorm > 0.0f` guard below, alpha is never set from
+		 * 1/||g||, and the first step length stays at its default 1.0 --
+		 * which makes the update m + alpha*d bit-identical to m, so every
+		 * Wolfe test passes by equality and the inversion silently does
+		 * nothing.  The preconditioned branch below was already in double. */
+		double g2 = 0.0;
 		for (i = 0; i < nvec; i++)
-			gnorm += grad_vec[i] * grad_vec[i];
-		gnorm = sqrtf(gnorm);
+			g2 += (double)grad_vec[i] * (double)grad_vec[i];
+		float gnorm = (float)sqrt(g2);
 
 		float gnorm_preco = 0.0f;
 		if (grad_preco_vec) {
@@ -2568,10 +2610,10 @@ int main(int argc, char **argv)
 				int ibx = mod.ioPx, ibz = mod.ioPz;
 				if (bnd.lef == 4 || bnd.lef == 2) ibx += bnd.ntap;
 				if (bnd.top == 4 || bnd.top == 2) ibz += bnd.ntap;
-				taperGradientSrcRcv(grad1, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper);
+				taperGradientSrcRcv(grad1, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper, grad_taper_core);
 				if (mod.ischeme > 2)
-					taperGradientSrcRcv(grad2, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper);
-				taperGradientSrcRcv(grad3, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper);
+					taperGradientSrcRcv(grad2, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper, grad_taper_core);
+				taperGradientSrcRcv(grad3, n1, mod.nax, &shot, &rec, ibx, ibz, grad_taper, grad_taper_core);
 			}
 
 			/* 2D Gaussian smoothing of gradient and pseudo-Hessian */
@@ -2715,10 +2757,10 @@ int main(int argc, char **argv)
 				}
 
 				if (verbose > 0) {
-					float gnorm = 0.0f;
+					double gi2 = 0.0;
 					for (i = 0; i < nvec; i++)
-						gnorm += grad_vec[i] * grad_vec[i];
-					vmess("  gradient ||g||=%.4e", sqrtf(gnorm));
+						gi2 += (double)grad_vec[i] * (double)grad_vec[i];
+					vmess("  gradient ||g||=%.4e", sqrt(gi2));
 				}
 
 				/* Verbose linesearch trial diagnostics */
@@ -2770,7 +2812,7 @@ int main(int argc, char **argv)
 				comp_str, res_taper, param,
 				chk_base, chk_skipdt, mpi_rank, mpi_size,
 				opt.d, opt.Hd, nvec,
-				grad_taper,
+				grad_taper, grad_taper_core,
 				comp_weights, ew, verbose);
 
 			/* Zero Hessian output for frozen parameters and water layer */

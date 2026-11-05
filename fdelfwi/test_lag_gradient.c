@@ -119,7 +119,7 @@ int computeHydrophone(const char *file_tzz, const char *file_txx,
                       const char *file_p, int verbose);
 void applyCosineTaper(adjSrcPar *adj, int taper_len);
 float *buildGradTaperMask(int nx, int nz,
-                          shotPar *shot, recPar *rec, int radius);
+                          shotPar *shot, recPar *rec, int radius, int core);
 void applyGradTaperMask(float *data, const float *mask, int nmodel);
 
 
@@ -160,6 +160,10 @@ char *sdoc[] = {
 "   res_taper=0   cosine ramp (samples) on each end of the residual trace",
 "   grad_taper=0  source/receiver taper radius in grid points.  Applied to",
 "                 the raw gradient AND to every lag, with the same mask.",
+"   grad_taper_core=0  grid points HARD ZEROED around every source and",
+"                 receiver inside that radius.  The default pure r^2/R^2",
+"                 ramp is zero only AT the point, so it rescales the",
+"                 imaging-condition singularity instead of removing it.",
 "   lag_shift=0   CALIBRATION TEST.  Delay the adjoint source by this many",
 "                 samples.  The entire lag cube must then translate by",
 "                 +lag_shift*dtrcv/2 in tau -- HALF, because the lag is",
@@ -242,7 +246,7 @@ int main(int argc, char **argv)
 	int     nmodel, verbose;
 
 	char   *chk_base, *comp_str, *file_obs, *out_base;
-	int     chk_skipdt, res_taper, grad_taper, lag_shift;
+	int     chk_skipdt, res_taper, grad_taper, grad_taper_core, lag_shift;
 	int     lag_nfreq, lag_nt, nfreq_dense;
 	float   lag_fmin, lag_fmax, lag_dt, trec;
 
@@ -265,6 +269,7 @@ int main(int argc, char **argv)
 	if (!getparstring("out_base", &out_base)) out_base = "lag";
 	if (!getparint("res_taper", &res_taper)) res_taper = 0;
 	if (!getparint("grad_taper", &grad_taper)) grad_taper = 0;
+	if (!getparint("grad_taper_core", &grad_taper_core)) grad_taper_core = 0;
 
 	/* ---- Standard model / source / receiver setup ---- */
 	getParameters(&mod, &rec, &sna, &wav, &src, &shot, &bnd, verbose);
@@ -388,7 +393,8 @@ int main(int argc, char **argv)
 	 * lagGradientWrite, per lag) and for the raw gradient below, so the
 	 * tau=0 comparison is between two identically tapered fields. */
 	if (grad_taper > 0) {
-		taper_mask = buildGradTaperMask(mod.nx, mod.nz, &shot, &rec, grad_taper);
+		taper_mask = buildGradTaperMask(mod.nx, mod.nz, &shot, &rec,
+			grad_taper, grad_taper_core);
 		vmess("Gradient taper mask shared with the lag cubes (radius=%d)",
 			grad_taper);
 	}
