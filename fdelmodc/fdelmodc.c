@@ -20,9 +20,9 @@ double wallclock_time(void);
 
 void threadAffinity(void);
 
-int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *src, shotPar *shot, bndPar *bnd, int verbose);
+int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *src, shotPar *shot, bndPar *bnd, surfPar *surf, int verbose);
 
-int readModel(modPar mod, bndPar bnd, float *rox, float *roz, float *l2m, float *lam, float *muu, float *tss, float *tes, float *tep);
+int readModel(modPar mod, bndPar bnd, float *rox, float *roz, float *l2m, float *lam, float *muu, float *tss, float *tes, float *tep, int verbose);
 
 int defineSource(wavPar wav, srcPar src, modPar mod, recPar rec, shotPar shot, float **src_nwav, int reverse, int verbose);
 
@@ -45,7 +45,11 @@ int acoustic2(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixs
 int acoustic4Block(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx,
 float *vz, float *p, float *rox, float *roz, float *l2m, int verbose);
 
-int acousticALE4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz, float *p, float *rox, float *roz, float *l2m, int verbose);
+int acousticALE4(modPar mod, srcPar src, wavPar wav, bndPar bnd, recPar rec, surfPar surf, snaPar sna, int itime, float **src_nwav, float *rec_vx, float *rec_vz, float *rec_p, float *vx, float *vz, float *p, float *rox, float *roz, float *l2m, int verbose);
+
+int acousticALE4_intp(modPar mod, srcPar src, wavPar wav, bndPar bnd, recPar rec, surfPar surf, snaPar sna, int itime, float **src_nwav, float *rec_vx, float *rec_vz, float *rec_p, float *vx, float *vz, float *p, float *rox, float *roz, float *l2m, int verbose);
+
+int acousticALE4_alt3(modPar mod, srcPar src, wavPar wav, bndPar bnd, recPar rec, surfPar surf, snaPar sna, int itime, float **src_nwav, float *rec_vx, float *rec_vz, float *rec_p, float *vx, float *vz, float *p, float *rox, float *roz, float *l2m, int verbose);
 
 int viscoacoustic4(modPar mod, srcPar src, wavPar wav, bndPar bnd, int itime, int ixsrc, int izsrc, float **src_nwav, float *vx, float *vz, float *p, float *rox, float *roz, float *l2m, float *tss, float *tep, float *q, int verbose);
 
@@ -110,12 +114,20 @@ char *sdoc[] = {
 "   dt= ............... read from file_src: if dt is set it will interpolate file_src to dt sampling",
 "" ,
 " OPTIONAL PARAMETERS:",
-"   ischeme=3 ......... 1=acoustic, 2=visco-acoustic 3=elastic, 4=visco-elastic, 5=double-couple, -2=ALE-moving-free-surface",
+"   ischeme=1 ......... 1=acoustic, 2=visco-acoustic 3=elastic, 4=visco-elastic, 5=double-couple, -2=moving-surface FV, -3=RK4-ALE -4=intp-ALE",
+"                     -2: collocated FV, impedance Riemann fluxes, SSPRK3, radiation/sponge boundaries",
+//"   ale_order=2 ....... -2: limited second-order reconstruction; 1=first-order Godunov",
+"   ale_limiter=1 ..... -2, ale_order=2: 0=minmod, 1=MC, 2=van Leer (less diffusion)",
+"   ale_cfl=0.45 ...... -2: internal CFL substeps (0 < ale_cfl <= 0.45); output dt unchanged",
+"                     -2: one monopole source, full-gather rec_ntsam; see demo/moving_surface_fv.txt",
+"                     -3: coupled pressure/velocity/CPML RK4; one monopole source; P/Vx/Vz output",
 "   tmod=(nt-1)*dt .... total modeling time (nt from file_src)",
 "   ntaper=0 .......... length of taper in points at edges of model (old: use npml)",
 "   npml=20 ........... length of PML layer in points at edges of model",
-"   R=1e-5 ............ the theoretical reflection coefficient at PML boundary",
-"   m=2.0 ............. scaling order of the PML sigma function ",
+"   R=1e-5 ............ the theoretical reflection coefficient at CFS-CPML boundary",
+"   m=2.0 ............. polynimal order of the CFS-CPML sigma function ",
+"   amax=0.0 .......... max complex frequency shift of CFS-CPML for low frequency attenuation in rad/s",
+"   kmax=5.0 .......... max coordinate stretching of CFS-CPML ",
 "   tapfact=0.30 ...... taper strength: larger value gets stronger taper",
 "   For the 4 boundaries the options are:  1=free 2=pml 3=rigid 4=taper",
 "   top=1 ............. type of boundary on top edge of model",
@@ -171,6 +183,16 @@ char *sdoc[] = {
 "   src_at_rcv=1 ...... inject wavefield at receiver coordinates (1), inject at source (0)",
 "   src_injectionrate=0 set to 1 to use injection rate source",
 "" ,
+" FREE SURFACE MOVING IN TIME:",
+"   surf_type=1 ....... type of topology: 1=sinus-wave",
+"                       1: surface = z0 + amp*sin((2*PI/lambda)*(x-hrate*t)-om*t) + vrate*t",
+"   surf_z0=500 ....... mean surface depth of topology [m]",
+"   surf_amp=50 ....... sinusoidal amplitude of topology [m]",
+"   surf_lambda=800 ... spatial wavelength of sinus topology [rad/s]",
+"   surf_om=0.5 ....... angular frequency of sinus topology [rad/s]",
+"   surf_vrate=80 ..... vertical velocity drift of topology in [m/s]",
+"   surf_hrate=0 ...... horizontal velocity drift of topology in [m/s]",
+"" ,
 " PLANE WAVE SOURCE DEFINITION:",
 "   plane_wave=0 ...... model plane wave with nsrc= sources",
 "   nsrc=1 ............ number of sources per (plane-wave) shot ",
@@ -215,27 +237,6 @@ char *sdoc[] = {
 "   sna_type_ss=0 ..... S (curl) registration _sS",
 "   sna_type_dzvz=0 ... dzVz registration _sdzvz",
 "   sna_type_dxvx=0 ... dxVx registration _sdxvx",
-"   rec_type_pp=0 ..... P (divergence) registration _rP",
-"   rec_type_ss=0 ..... S (curl) registration _rS",
-"   rec_type_q=0 ...... memory-variable of visco-acoustic modeling",
-"   rec_type_ud=0 ..... 1:pressure normalized decomposition in up and downgoing waves _ru, _rd",
-"   ................... 2:particle velocity normalized decomposition in up and downgoing waves _ru, _rd",
-"   ................... 3:flux normalized decomposition in up and downgoing waves _flup, _flip",
-"   kangle= ........... maximum wavenumber angle for decomposition",
-"   rec_int_vx=0  ..... interpolation of Vx receivers",
-"                     - 0=Vx->Vx (no interpolation)",
-"                     - 1=Vx->Vz",
-"                     - 2=Vx->Txx/Tzz(P)",
-"                     - 3=Vx->receiver position",
-"   rec_int_vz=0 ...... interpolation of Vz receivers",
-"                     - 0=Vz->Vz (no interpolation)",
-"                     - 1=Vz->Vx",
-"                     - 2=Vz->Txx/Tzz(P)",
-"                     - 3=Vz->receiver position",
-"   rec_int_p=0  ...... interpolation of P/Tzz receivers",
-"                     - 0=P->P (no interpolation)",
-"                     - 1=P->Vz",
-"                     - 2=P->Vx",
 "   sna_vxvztime=0 .... registration of vx/vx times",
 "                       The fd scheme is also staggered in time.",
 "                       Time at which vx/vz snapshots are written:",
@@ -315,6 +316,7 @@ int main(int argc, char **argv)
 	srcPar src;
 	bndPar bnd;
 	shotPar shot;
+	surfPar surf;
 	float **src_nwav;
 	float *rox, *roz, *l2m, *lam, *mul;
 	float *tss, *tes, *tep, *p, *q, *r;
@@ -329,7 +331,7 @@ int main(int argc, char **argv)
 	float *beam_pp, *beam_ss;	
 	float sinkvel, npeshot;
 	double t0, t1, t2, t3, tt, tinit;
-	size_t size, sizem, nsamp, perc, sizew;
+	size_t size, sizem, nsamp, perc, sizew, wave_size;
 	int n1, ix, iz, ir, ishot, i;
 	int ioPx, ioPz;
 	int it0, it1, its, it, fileno, isam;
@@ -352,12 +354,15 @@ int main(int argc, char **argv)
 	requestdoc(0);
 
 	if (!getparint("verbose",&verbose)) verbose=0;
-	getParameters(&mod, &rec, &sna, &wav, &src, &shot, &bnd, verbose);
+	getParameters(&mod, &rec, &sna, &wav, &src, &shot, &bnd, &surf, verbose);
+	if ((mod.ischeme<=-2) && shot.n!=1)
+		verr("ischeme=-2/-3/-4 currently supports a single shot");
 
 	/* allocate arrays for model parameters: the different schemes use different arrays */
 
 	n1 = mod.naz;
 	sizem=mod.nax*mod.naz;
+	wave_size = (mod.ischeme<=-2) ? (size_t)(mod.nax+1)*(mod.naz+1) : sizem;
 
 	rox = (float *)calloc(sizem,sizeof(float));
 	roz = (float *)calloc(sizem,sizeof(float));
@@ -383,7 +388,7 @@ int main(int argc, char **argv)
 
 	/* read velocity and density files */
 
-	readModel(mod, bnd, rox, roz, l2m, lam, mul, tss, tes, tep);
+	readModel(mod, bnd, rox, roz, l2m, lam, mul, tss, tes, tep, verbose);
 
 	/* read and/or define source wavelet(s) */
 
@@ -416,9 +421,9 @@ int main(int argc, char **argv)
 
 	/* allocate arrays for wavefield and receiver arrays */
 
-	vx  = (float *)calloc(sizem,sizeof(float));
-	vz  = (float *)calloc(sizem,sizeof(float));
-	tzz = (float *)calloc(sizem,sizeof(float)); /* =P field for acoustic */
+	vx  = (float *)calloc(wave_size,sizeof(float));
+	vz  = (float *)calloc(wave_size,sizeof(float));
+	tzz = (float *)calloc(wave_size,sizeof(float)); /* =P field for acoustic */
 	if (mod.ischeme>2) {
 		txz = (float *)calloc(sizem,sizeof(float));
 		txx = (float *)calloc(sizem,sizeof(float));
@@ -441,9 +446,10 @@ int main(int argc, char **argv)
 		rec_udp   = (float *)calloc(mod.nax*rec.nt,sizeof(float));
 	}
 	/* get velcity and density at first receiver location */
-	ir = mod.ioZz + rec.z[0]+(rec.x[0]+mod.ioZx)*n1;
-	rec.rho = mod.dt/(mod.dx*roz[ir]);
-	rec.cp  = sqrt(l2m[ir]*(roz[ir]))*mod.dx/mod.dt;
+	ir = mod.ischeme==-2 ? mod.ioPz+rec.z[0]+(rec.x[0]+mod.ioPx)*n1
+	                    : mod.ioZz+rec.z[0]+(rec.x[0]+mod.ioZx)*n1;
+	rec.rho = (mod.ischeme==-2 || mod.ischeme==-3 ? 1.0f : mod.dt/mod.dx)/roz[ir];
+	rec.cp  = sqrt(l2m[ir]*roz[ir])*(mod.ischeme==-2 || mod.ischeme==-3 ? 1.0f : mod.dx/mod.dt);
 	
 	if(sna.beam) {
 		size = sna.nz*sna.nx;
@@ -539,9 +545,9 @@ int main(int argc, char **argv)
 		ixsrc = shot.x[ishot];
 		fileno= 0;
 
-		memset(vx,0,sizem*sizeof(float));
-		memset(vz,0,sizem*sizeof(float));
-		memset(tzz,0,sizem*sizeof(float));
+		memset(vx,0,wave_size*sizeof(float));
+		memset(vz,0,wave_size*sizeof(float));
+		memset(tzz,0,wave_size*sizeof(float));
 		if (mod.ischeme==2) {
 			memset(q,0,sizem*sizeof(float));
 		}
@@ -675,20 +681,43 @@ shared (shot, bnd, mod, src, wav, rec, ixsrc, izsrc, it, src_nwav, verbose)
                      elastic4dc(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav, 
                             vx, vz, tzz, txx, txz, rox, roz, l2m, lam, mul, verbose);
 					break;
-				case -2 : /* ALE coordinate-transform acoustic with moving free surface */
+				case -2 : /* Moving-surface finite-volume acoustics */
+#pragma omp single
+                {
                     if (it==it0) {
-					acousticALE4(mod, src, wav, bnd, 0, ixsrc, izsrc, src_nwav,
-						vx, vz, tzz, rox, roz, l2m, verbose);
+					    acousticALE4(mod, src, wav, bnd, rec, surf, sna, 0, src_nwav,
+						    rec_vx, rec_vz, rec_p, vx, vz, tzz, rox, roz, l2m, verbose);
                     it=it1;
                     }
+                }
 					break;
+				case -3 : /* Full-depth ALE with coupled RK4 time integration */
+#pragma omp single
+                {
+                    if (it==it0) {
+                        acousticALE4_alt3(mod, src, wav, bnd, rec, surf, sna, 0, src_nwav,
+                            rec_vx, rec_vz, rec_p, vx, vz, tzz, rox, roz, l2m, verbose);
+                        it=it1;
+                    }
+                }
+                    break;
+				case -4 : /* ALE with interpolation of Cartesian grid to ALE */
+#pragma omp single
+                {
+                    if (it==it0) {
+                        acousticALE4_intp(mod, src, wav, bnd, rec, surf, sna, 0, src_nwav,
+                            rec_vx, rec_vz, rec_p, vx, vz, tzz, rox, roz, l2m, verbose);
+                        it=it1;
+                    }
+                }
+                    break;
 			}
 
 			/* write samples to file if rec.nt samples are calculated */
 
 #pragma omp master
 {
-			if ( (((it-rec.delay) % rec.skipdt)==0) && (it >= rec.delay) ) {
+			if ( (((it-rec.delay) % rec.skipdt)==0) && (it >= rec.delay) && (mod.ischeme>-2) ) {
 				int writeToFile, itwritten;
 
 				if ((((it-rec.delay+NINT(mod.t0/mod.dt))/rec.skipdt)+1)!=0) {
@@ -718,7 +747,7 @@ shared (shot, bnd, mod, src, wav, rec, ixsrc, izsrc, it, src_nwav, verbose)
 			}
 
 			/* write snapshots to output file(s) */
-			if (sna.nsnap) {
+			if (sna.nsnap && mod.ischeme>-2) {
 				writeSnapTimes(mod, sna, bnd, src, wav, ixsrc, izsrc, it, vx, vz, tzz, txx, txz, verbose);
 			}
 
@@ -740,21 +769,12 @@ shared (shot, bnd, mod, src, wav, rec, ixsrc, izsrc, it, src_nwav, verbose)
                     t3=(wallclock_time()-t3)*((it1-it0)/400.0);
                     fprintf(stderr,"\r    %s: Estimated total compute time for this shot = %.2fs.\n    %s: Progress: %3d%%",xargv[0],t3,xargv[0],it/((it1-it0)/100));
                 }
-
-/*
-				if (it==(it0+100*its)) t2=wallclock_time();
-				if (it==(it0+500*its)) {
-					t3=wallclock_time();
-					tt=(t3-t2)*(((it1-it0)*its)/400.0);
-					vmess("Estimated compute time = %.2f s. per shot.",tt);
-					vmess("Estimated total compute time = %.2f s.",tinit+shot.n*tt);
-				}
-*/
 			}
 }
+#pragma omp barrier
 } /* end of OpenMP parallel section */
 
-		} /* end of loop over time steps it */
+	} /* end of loop over time steps it */
 
 #ifdef USE_CUDA
 gpu_post_shot:
@@ -777,6 +797,7 @@ gpu_post_shot:
 				}
 			}
 		}
+        if (mod.ischeme<=-2) isam = rec.nt-1;
 		writeRec(rec, mod, bnd, wav, ixsrc, izsrc, isam+1, ishot, shot.n, fileno,
 			rec_vx, rec_vz, rec_txx, rec_tzz, rec_txz, 
 			rec_p, rec_pp, rec_ss, rec_q, rec_udp, rec_udvz, rec_dxvx, rec_dzvz, verbose);

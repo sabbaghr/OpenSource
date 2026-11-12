@@ -7,10 +7,12 @@ include ../Make_include
 ALLINC  = -I.
 #LIBS    += -L$L -lgenfft $(LIBSM)
 #OPTC = -g -Wall -fsignaling-nans -O0 -fopenmp
-#OPTC += -fopenmp -Waddress
-#OPTC +=  -qopt-report -save-temps
-#OPTC +=  -O1 -g
-#OPTC +=  -O1 -g -fsanitize=address -fsanitize=bounds-strict -fsanitize=object-size
+#OPTC += -fopenmp -Waddress 
+#OPTC += -g -finstrument-functions 
+#OPTC +=  -qopt-report -save-temps -g
+#OPTC +=  -g
+#OPTC +=  -fno-fast-math
+#OPTC +=  -O0 -g -fsanitize=address -fsanitize=bounds-strict -fsanitize=object-size -fno-omit-frame-pointer
 #OPTC =  -fp-trap=invalid,overflow -traceback -g -O1 -qopenmp
 #OPTC := $(subst -O3 -ffast-math, -O1 -g ,$(OPTC))
 #PGI options for compiler feedback
@@ -18,6 +20,7 @@ ALLINC  = -I.
 #OPTC += -qopt-report
 #LDFLAGS += -Mprof=lines
 #LDFLAGS += -Wl,-z,muldefs
+#LDFLAGS += -fopenmp
 
 ifdef USE_CUDA
 all: fdelmodc fdelmodc_gpu
@@ -37,6 +40,8 @@ SRCC	= $(PRG).c \
 		acoustic6.c \
 		acoustic16.c \
 		acousticALE4.c \
+		acousticALE4_alt3.c \
+		acousticALE4_intp.c \
 		viscoacoustic4.c \
 		elastic4.c \
 		elastic4dc.c \
@@ -127,6 +132,5 @@ count:
 
 tar:
 	@tar cf $(PRG).tar Makefile $(SRC) && compress $(PRG).tar
-
 
 

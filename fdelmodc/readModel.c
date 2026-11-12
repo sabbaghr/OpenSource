@@ -28,7 +28,7 @@ int writesufile(char *filename, float *data, size_t n1, size_t n2, float f1, flo
 **/
 
 
-int readModel(modPar mod, bndPar bnd, float *rox, float *roz, float *l2m, float *lam, float *muu, float *tss, float *tes, float *tep)
+int readModel(modPar mod, bndPar bnd, float *rox, float *roz, float *l2m, float *lam, float *muu, float *tss, float *tes, float *tep, int verbose)
 {
     FILE    *fpcp, *fpcs, *fpro;
 	FILE    *fpqp=NULL, *fpqs=NULL;
@@ -48,7 +48,7 @@ int readModel(modPar mod, bndPar bnd, float *rox, float *roz, float *l2m, float 
 	nz = mod.nz;
 	nx = mod.nx;
 	n1 = mod.naz;
-	fac = mod.dt/mod.dx;
+	fac = (mod.ischeme == -2 || mod.ischeme == -3) ? 1.0f : mod.dt/mod.dx;
     sizem = mod.nax*mod.naz;
     nfw  = mod.nfw;
 
@@ -79,8 +79,8 @@ int readModel(modPar mod, bndPar bnd, float *rox, float *roz, float *l2m, float 
    	nread = fread(&hdr, 1, TRCBYTES, fpro);
    	assert(nread == TRCBYTES);
 
-	cs = (float *)calloc(nz*nx,sizeof(float));
 	if (mod.ischeme>2 && mod.ischeme!=5) {
+	    cs = (float *)calloc(nz*nx,sizeof(float));
 		fpcs = fopen( mod.file_cs, "r" );
    		assert( fpcs != NULL);
    		nread = fread(&hdr, 1, TRCBYTES, fpcs);
@@ -641,9 +641,27 @@ Robbert van Vossen, Johan O. A. Robertsson, and Chris H. Chapman
 
     }
  
+    /* The finite-volume solver integrates the original Cartesian cells.
+     * Do not pre-average density onto staggered faces for this scheme. */
+    if (mod.ischeme == -2) {
+        for (ix=0; ix<mod.nax; ix++) {
+            int mx = MAX(0,MIN(nx-1,ix-mod.ioPx));
+            for (iz=0; iz<mod.naz; iz++) {
+                int mz = MAX(0,MIN(nz-1,iz-mod.ioPz));
+                float density = ro[mx*nz+mz];
+                float velocity = cp[mx*nz+mz];
+                if (!(density > 0 && velocity > 0))
+                    verr("ischeme=-2 requires positive rho/cp; surface is defined by surf_*");
+                rox[ix*n1+iz] = roz[ix*n1+iz] = 1.0f/density;
+                l2m[ix*n1+iz] = density*velocity*velocity;
+            }
+        }
+    }
+
 //writesufile("read_rox.su", rox, mod.naz, mod.nax, 0.0, 0.0, mod.dz, mod.dx);
 //writesufile("read_l2m.su", l2m, mod.naz, mod.nax, 0.0, 0.0, mod.dz, mod.dx);
 
+    if (verbose > 4) {
         for (ix=0; ix<mod.nax; ix++) {
             for (iz=0; iz<mod.naz; iz++) {
                 if (rox[(ix)*mod.naz+iz] == 0.0) {
@@ -655,19 +673,23 @@ Robbert van Vossen, Johan O. A. Robertsson, and Chris H. Chapman
                 if (l2m[(ix)*mod.naz+iz] == 0.0) {
                     fprintf(stderr,"ix=%d iz=%d l2m=%e \n",ix, iz,l2m[ix*mod.naz+iz]);
                 }
-    if (mod.ischeme>2) { /* Elastic Scheme */
-                if (muu[(ix)*mod.naz+iz] == 0.0) {
-                    fprintf(stderr,"ix=%d iz=%d muu=%e \n",ix, iz,muu[ix*mod.naz+iz]);
+                if (mod.ischeme>2) { /* Elastic Scheme */
+                    if (muu[(ix)*mod.naz+iz] == 0.0) {
+                        fprintf(stderr,"ix=%d iz=%d muu=%e \n",ix, iz,muu[ix*mod.naz+iz]);
+                    }
+                    if (lam[(ix)*mod.naz+iz] == 0.0) {
+                        fprintf(stderr,"ix=%d iz=%d lam=%e \n",ix, iz,lam[ix*mod.naz+iz]);
+                    }
                 }
-                if (lam[(ix)*mod.naz+iz] == 0.0) {
-                    fprintf(stderr,"ix=%d iz=%d lam=%e \n",ix, iz,lam[ix*mod.naz+iz]);
-                }
-    }
             }
         }
+    }
 
+    free(cp);
+    free(ro);
+	if (mod.ischeme>2) free(cs);
+	if (mod.file_qp != NULL && (mod.ischeme==2 || mod.ischeme==4)) free(qp);
+	if (mod.file_qs != NULL && mod.ischeme==4) free(qs);
 
     return 0;
 }
-
-

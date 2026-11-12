@@ -37,7 +37,7 @@ int recvPar(recPar *rec, float sub_x0, float sub_z0, float dx, float dz, int nx,
 
 int writesufile(char *filename, float *data, size_t n1, size_t n2, float f1, float f2, float d1, float d2);
 
-int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *src, shotPar *shot, bndPar *bnd, int verbose)
+int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *src, shotPar *shot, bndPar *bnd, surfPar *surf, int verbose)
 {
     int isnapmax1, isnapmax2, isnapmax, sna_nrsna;
     int n1, n2, nx, nz, nsrc, ix, axis, ioPz, is0, optn;
@@ -259,6 +259,9 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
         if (mod->ischeme == 3) vmess("Elastic staggered grid, stress/velocity");
         if (mod->ischeme == 4) vmess("Visco-Elastic staggered grid, stress/velocity");
         if (mod->ischeme == 5) vmess("Acoustic staggered grid, Txx/Tzz/velocity");
+        if (mod->ischeme == -2) vmess("Moving-surface finite-volume acoustics (SSPRK3)");
+        if (mod->ischeme == -3) vmess("Acoustic full-depth ALE with coupled RK4");
+        if (mod->ischeme == -4) vmess("Acoustic ALE with interpolation");
         if (mod->grid_dir) vmess("Time reversed modelling");
         else vmess("Forward modelling");
         vmess("*******************************************");
@@ -290,7 +293,7 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
     }
     else {
         cmin = cs_min; 
-        if ( (cmin<1e-20) || (cp_min<cs_min) ) cmin=cp_min;
+        if ( (cmin<1e-20) || (cp_min<cs_min && cp_min != 0.0) ) cmin=cp_min;
     }
 
     if (verbose && pe==0) {
@@ -303,23 +306,30 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
 //        vmess("Hence, for acceptable grid-dispersion the maximum");
         vmess("The maximum frequency in source wavelet must be:");
         vmess(" ====> frequency < %f Hz. [Cmin/dx*disp]", cmin/(dx*dispfactor));
-        vmess("Stability criterion for current settings: ");
-        vmess(" ====> Cp < %f m/s [dx*disp/dt]", dx*stabfactor/dt);
+        if (mod->ischeme == -2) {
+            vmess("FV stability uses internal multidimensional CFL substeps, not output dt.");
+            vmess("The FD dispersion estimate above is only indicative for limited finite volumes;");
+            vmess("use spatial refinement to assess finite-volume numerical diffusion.");
+        } else {
+            vmess("Stability criterion for current settings: ");
+            vmess(" ====> Cp < %f m/s [dx*disp/dt]", dx*stabfactor/dt);
+        }
 //        vmess("With dt = %f  maximum velocity = %f",dt, dx*stabfactor/dt);
         if (wav->file_src != NULL) vmess(" For wavelet(s) in file_src fmax = %f", fmax);
         vmess("Optimal discretisation for current model:");
-        vmess(" With maximum velocity  = %f dt <= %e", cp_max,dx*stabfactor/cp_max);
-        vmess(" With maximum frequency = %f dx <= %e", wav->fmax, cmin/(wav->fmax*dispfactor));
+        if (mod->ischeme != -2)
+            vmess(" With maximum velocity  = %f dt <= %e", cp_max,(double)dx*stabfactor/cp_max);
+        vmess(" With maximum frequency = %f dx <= %e", wav->fmax, (double)cmin/(wav->fmax*dispfactor));
     }
 
     /* Check stability and dispersion setting */
 
-    if (cp_max > (dx*stabfactor)/dt) {
+    if (mod->ischeme != -2 && cp_max > (dx*stabfactor)/dt) {
         vwarn("************ ! Stability ! ****************");
         vwarn("From the input file maximum P-wave velocity");
         vwarn("in the current model is %f !!", cp_max);
-        vwarn("Hence, adjust dx >= %.4f,",cp_max*dt/stabfactor);
-        vwarn("    or adjust dt <= %f,",dx*stabfactor/cp_max);
+        vwarn("Hence, adjust dx >= %e,",cp_max*dt/stabfactor);
+        vwarn("    or adjust dt <= %e,",dx*stabfactor/cp_max);
         vwarn("    or lower the maximum velocity below %.3f m/s.",dx*stabfactor/dt);
         vwarn("***************** !!! *********************");
         if (!disable_check) verr("********* leaving program *********");
@@ -335,46 +345,34 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
         if (!disable_check) verr("********* leaving program *********");
     }
 
-    /* Extra (heuristic) stability check for the moving-free-surface ALE scheme
-     * (ischeme=-2). Besides the normal wave-propagation Courant number, the
-     * ALE formulation adds a mesh-advection term to the vx/vz/p updates that
-     * transports data along the (stretching) z-grid at the local mesh
-     * velocity
-     *   w(i,j) = dzsdt_col[i] * (nz-j)/nz ,  dzsdt_col = surf_vrate - surf_amp*surf_om*cos(phi)
-     * which is largest at the free surface (j=0) and zero at the fixed
-     * bottom. Because this advective term shares the same z-stencils as the
-     * physical wave term, the two characteristic speeds add up and the
-     * effective Courant number is estimated with (cp_max + max|mesh
-     * velocity|) over the smallest effective grid spacing reached anywhere
-     * during the run (the ALE mesh compresses as the free surface rises).
-     * NOTE: this bound is a heuristic (sum-of-characteristic-speeds)
-     * estimate, not an exact analytic limit for this scheme: the
-     * Kreiss-Oliger dissipation filter provides some extra margin, so a
-     * mild excess above the classic stabfactor may still run without
-     * visible artefacts, but growing excess increases the risk of grid-scale
-     * noise near the free surface (as observed empirically for large
-     * surf_vrate). This check therefore only warns; it never aborts the run. */
-    if (mod->ischeme == -2) {
-        float surf_z0, surf_amp, surf_om, surf_vrate;
+    /* Surface parameters are shared; the FV solver (-2) enforces its own
+     * multidimensional CFL bound with internal substeps. */
+    if (mod->ischeme <= -2) {
+        if (!getparint("surf_type",&surf->type)) surf->type=1;
+        if (!getparfloat("surf_z0",&surf->z0))     surf->z0=500.0;
+        if (!getparfloat("surf_amp",&surf->amp))   surf->amp=50.0;
+        if (!getparfloat("surf_lambda",&surf->lambda)) surf->lambda=800.0;
+        if (!getparfloat("surf_om",&surf->om) &&
+            !getparfloat("surf_omega",&surf->om)) surf->om=0.5;
+        if (!getparfloat("surf_vrate",&surf->vrate)) surf->vrate=80.0;
+        if (!getparfloat("surf_hrate",&surf->hrate)) surf->hrate=0.0;
+    }
+
+    if (mod->ischeme <= -3) {
+        /* Legacy RK4 heuristic, not an exact stability bound. */
         float w_max, z_top_worst, H_min, dz_eff_min, courant_ale;
-
-        if (!getparfloat("surf_z0",&surf_z0))     surf_z0=500.0;
-        if (!getparfloat("surf_amp",&surf_amp))   surf_amp=50.0;
-        if (!getparfloat("surf_om",&surf_om))     surf_om=0.5;
-        if (!getparfloat("surf_vrate",&surf_vrate)) surf_vrate=80.0;
-
-        /* worst-case mesh (surface) velocity magnitude over the whole run */
-        w_max = fabsf(surf_vrate) + fabsf(surf_amp*surf_om);
+        w_max = fabsf(surf->vrate) + fabsf(surf->amp)
+              * fabsf(surf->om + (2.0f * (float)M_PI * surf->hrate / surf->lambda));
 
         /* worst-case (highest) elevation the free surface reaches during
          * the run, hence the smallest column height / effective dz */
-        z_top_worst = surf_z0 + fabsf(surf_amp) + MAX(surf_vrate,0.0) * mod->tmod;
+        z_top_worst = surf->z0 + fabsf(surf->amp) + MAX(surf->vrate,0.0f) * mod->tmod;
         H_min = ((float)nz * dz) - z_top_worst;
 
         if (H_min <= 0.0) {
             vwarn("*********** ! ALE mesh collapse ! **********");
             vwarn("The free surface (surf_z0=%.3f, surf_amp=%.3f, surf_vrate=%.3f)",
-                  surf_z0, surf_amp, surf_vrate);
+                  surf->z0, surf->amp, surf->vrate);
             vwarn("is predicted to reach or pass the fixed bottom (z=%.3f) within tmod=%.3f s.",
                   (float)nz*dz, mod->tmod);
             vwarn("***************** !!! *********************");
@@ -396,13 +394,12 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
                 vwarn("*********** ! ALE Stability (heuristic) ! **");
                 vwarn("Moving free-surface mesh-advection term combined with");
                 vwarn("wave propagation gives Courant number %.4f > indicative limit %.4f.", courant_ale, stabfactor);
-                vwarn("This does not necessarily blow up (Kreiss-Oliger filtering");
-                vwarn("adds margin), but grid-scale noise near the free surface");
-                vwarn("becomes more likely as this number grows (inspect snapshots!).");
-                vwarn("Hence, consider lowering surf_vrate/surf_amp*surf_om below %.3f m/s,",
+                vwarn("This estimate is not a stability guarantee for the complete");
+                vwarn("ALE operator. Inspect wavefield amplitudes and snapshots.");
+                vwarn("Hence, consider lowering the surface mesh velocity below %.3f m/s,",
                       MAX(0.0f, stabfactor*dz_eff_min/dt - cp_max));
                 vwarn("    or adjust dt <= %e,", stabfactor*dz_eff_min/(cp_max+w_max));
-                vwarn("    or use a finer grid (smaller dz, larger nz) so dz_eff >= %.5f m.",
+                vwarn("    or increase the minimum physical spacing so dz_eff >= %.5f m.",
                       dt*(cp_max+w_max)/stabfactor);
                 vwarn("***************** !!! *********************");
             }
@@ -447,13 +444,15 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
             if (bnd->bot==2) bnd->bot=4;
     }
 
-    if (!getparfloat("movingspeed",&bnd->speed)) bnd->speed=250;
+    //if (!getparfloat("movingspeed",&bnd->speed)) bnd->speed=250;
 
     /* calculate default taper length to be three wavelenghts */
     if (!getparint("ntaper",&bnd->npml)) bnd->npml=20; // bnd->npml=3*NINT((cp_max/wav->fmax)/dx);
     if (!getparint("npml",&bnd->npml)) bnd->npml=20;
     if (!getparfloat("R",&bnd->R)) bnd->R=1e-5;
     if (!getparfloat("m",&bnd->m)) bnd->m=2.0;
+    if (!getparfloat("amax",&bnd->amax)) bnd->amax=M_PI*fmax*0.2;
+    if (!getparfloat("kmax",&bnd->kmax)) bnd->kmax=5.0;
     if (bnd->npml < 5) {
         bnd->npml = 20;
     }
@@ -558,9 +557,6 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
     */
     if (bnd->bot==4 || bnd->bot==2) {
         mod->naz += bnd->npml;
-        /* For P/Tzz, Txx and Txz fields the tapered boundaries are calculated in the main kernels */
-//        mod->iePz += bnd->npml;
-//        mod->ieTz += bnd->npml;
     }
     if (bnd->lef==4 || bnd->lef==2) {
         mod->nax += bnd->npml;
@@ -569,7 +565,6 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
         mod->ieXx += bnd->npml;
         mod->ieZx += bnd->npml;
 
-        /* For Tzz, Txx and Txz fields the tapered boundaries are calculated in the main kernels */
         mod->ioPx += bnd->npml;
         mod->ioTx += bnd->npml;
         mod->iePx += bnd->npml;
@@ -577,11 +572,9 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
     }
     if (bnd->rig==4 || bnd->rig==2) {
         mod->nax += bnd->npml;
-        /* For P/Tzz, Txx and Txz fields the tapered boundaries are calculated in the main kernels */
-//        mod->iePx += bnd->npml;
-//        mod->ieTx += bnd->npml;
     }    
 
+/*
      fprintf(stderr,"Vx x-range: ioXx=%d ieXx=%d\n", mod->ioXx, mod->ieXx);
      fprintf(stderr,"Vx z-range: ioXz=%d ieXz=%d\n", mod->ioXz, mod->ieXz);
 
@@ -593,7 +586,6 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
 
      fprintf(stderr,"T x-range: ioTx=%d ieTx=%d\n", mod->ioTx, mod->ieTx);
      fprintf(stderr,"T z-range: ioTz=%d ieTz=%d\n", mod->ioTz, mod->ieTz);
-/*
 */
 
     /* Intialize the array which contains the topography surface */
@@ -1070,6 +1062,16 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
         if (src->type==9) vmess("strike %.2f rake %.2f dip %.2f",180.0*strike/M_PI,180.0*rake/M_PI,180.0*dip/M_PI);
         if (src->type==9 || src->type==11) vmess("Mxx %.2f Mzz %.2f Mxz %.2f",src->Mxx,src->Mzz,src->Mxz);
         if (wav->random) vmess("Wavelet has a random signature with fmax=%.2f", wav->fmax);
+        vmess("*******************************************");
+        vmess("************** source info ****************");
+        vmess("*******************************************");
+        for (int ishot=is0; ishot<shot->n; ishot++) {
+            if (!src->random) {
+                vmess("Modeling source %d at gridpoints ix=%d iz=%d", ishot, shot->x[ishot], shot->z[ishot]);
+                vmess(" which are actual positions x=%.2f z=%.2f", mod->x0+mod->dx*shot->x[ishot], mod->z0+mod->dz*shot->z[ishot]);
+            }
+        }
+
         if (src->n>1) {
             vmess("*******************************************");
             vmess("*********** source array info *************");
@@ -1377,4 +1379,3 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
 
     return 0;
 }
-
