@@ -214,6 +214,10 @@ int precond_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 	 * Segment loop (backward through checkpoints)
 	 * Same structure as adj_shot.
 	 * ================================================================ */
+	/* Zero the adjoint CFS-CPML memory before the whole backward sweep --
+	 * not per segment; the psi recursion is continuous in adjoint time. */
+	cpmlAdjReset();
+
 	for (k = chk->nsnap - 1; k >= 0; k--) {
 		seg_start = chk->delay + k * chk->skipdt;
 		seg_end = (k == chk->nsnap - 1) ? it1 : chk->delay + (k + 1) * chk->skipdt;

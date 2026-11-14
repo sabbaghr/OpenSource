@@ -19,8 +19,22 @@
  * Checkpoint format:  raw float arrays, nax*naz per snapshot, concatenated.
  *   Acoustic  (ischeme <= 2): vx, vz, tzz          (3 files)
  *   Elastic   (ischeme >  2): vx, vz, tzz, txx, txz (5 files)
+ *   CFS-CPML active:          + psi                 (1 extra file)
  *
  * Each snapshot = nax * naz * sizeof(float) bytes per component.
+ *
+ * WHY psi IS HERE.  Under a CFS-CPML the five wavefield arrays do NOT
+ * determine the continuation of the simulation: the memory variables obey
+ * psi^{n+1} = b*psi^n + c*D(u^n) and so depend on the whole history inside
+ * the absorbing band.  Restarting a segment with psi = 0 -- which is what
+ * happened before this was added -- leaves the RECONSTRUCTED forward field
+ * wrong in and near the PML, and therefore the gradient wrong anywhere the
+ * PML has any influence.  cpml_state.c owns the arrays; this file only
+ * serialises them, as one blob of CPML_NPSI*nax*naz floats per checkpoint.
+ *
+ * The psi blob is written only when a PML is actually running.  chk->npsi is
+ * discovered at the first write, because the psi arrays do not exist until
+ * the first PML time step has executed, and is then held fixed.
  */
 
 #define NINT(x) ((int)((x)>0.0?(x)+0.5:(x)-0.5))
@@ -54,6 +68,7 @@ int initCheckpoints(checkpointPar *chk, modPar *mod, int skipdt, int delay, cons
 	chk->nax     = mod->nax;
 	chk->ischeme = mod->ischeme;
 	chk->it      = 0;
+	chk->npsi    = 0;
 
 	/* Calculate number of snapshots */
 	if (it1 <= delay || skipdt < 1) {
@@ -68,6 +83,7 @@ int initCheckpoints(checkpointPar *chk, modPar *mod, int skipdt, int delay, cons
 	snprintf(chk->file_tzz, sizeof(chk->file_tzz), "%s_chk_tzz.bin", file_base);
 	snprintf(chk->file_txx, sizeof(chk->file_txx), "%s_chk_txx.bin", file_base);
 	snprintf(chk->file_txz, sizeof(chk->file_txz), "%s_chk_txz.bin", file_base);
+	snprintf(chk->file_psi, sizeof(chk->file_psi), "%s_chk_psi.bin", file_base);
 
 	if (chk->nsnap > 0) {
 		ncomp = (mod->ischeme > 2) ? 5 : 3;
@@ -116,7 +132,8 @@ static int writeOneComponent(const char *path, int isnap, float *data, size_t n)
  ***********************************************************************/
 int writeCheckpoint(checkpointPar *chk, int isnap, wflPar *wfl)
 {
-	size_t n;
+	size_t n, npsi;
+	float *psibuf;
 
 	n = (size_t)chk->nax * chk->naz;
 
@@ -128,6 +145,24 @@ int writeCheckpoint(checkpointPar *chk, int isnap, wflPar *wfl)
 		if (writeOneComponent(chk->file_txx, isnap, wfl->txx, n)) return -1;
 		if (writeOneComponent(chk->file_txz, isnap, wfl->txz, n)) return -1;
 	}
+
+	/* CFS-CPML memory variables.  cpmlStateFloats() is 0 until the first PML
+	 * time step has run, so the size is latched on the first write; after
+	 * that it must not change. */
+	npsi = cpmlStateFloats();
+	if (isnap == 0) chk->npsi = npsi;
+	if (chk->npsi == 0) return 0;
+	if (npsi != chk->npsi) {
+		verr("writeCheckpoint: psi size changed (%zu -> %zu) between checkpoints.",
+			chk->npsi, npsi);
+		return -1;
+	}
+
+	psibuf = (float *)malloc(npsi * sizeof(float));
+	if (!psibuf) { verr("writeCheckpoint: cannot allocate psi buffer"); return -1; }
+	if (cpmlStateSave(psibuf, n)) { free(psibuf); return -1; }
+	if (writeOneComponent(chk->file_psi, isnap, psibuf, npsi)) { free(psibuf); return -1; }
+	free(psibuf);
 
 	return 0;
 }
@@ -189,6 +224,16 @@ int readCheckpoint(checkpointPar *chk, int isnap, wflPar *wfl)
 		if (readOneComponent(chk->file_txz, isnap, wfl->txz, n)) return -1;
 	}
 
+	/* Restore the CFS-CPML memory variables.  Without this the segment
+	 * restarts with psi = 0 and the reconstruction is wrong inside the PML. */
+	if (chk->npsi > 0) {
+		float *psibuf = (float *)malloc(chk->npsi * sizeof(float));
+		if (!psibuf) { verr("readCheckpoint: cannot allocate psi buffer"); return -1; }
+		if (readOneComponent(chk->file_psi, isnap, psibuf, chk->npsi)) { free(psibuf); return -1; }
+		if (cpmlStateLoad(psibuf, n)) { free(psibuf); return -1; }
+		free(psibuf);
+	}
+
 	return 0;
 }
 
@@ -208,8 +253,10 @@ int cleanCheckpoints(checkpointPar *chk)
 			remove(chk->file_txx);
 			remove(chk->file_txz);
 		}
+		remove(chk->file_psi);
 	}
 
 	chk->nsnap = 0;
+	chk->npsi  = 0;
 	return 0;
 }

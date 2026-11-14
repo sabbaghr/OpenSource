@@ -536,6 +536,11 @@ int main(int argc, char **argv)
 	 * Stress RECORDING injection is now handled correctly by applyAdjointSource
 	 * inside the adjoint kernel (phase=2, before Phase A1, with += sign). */
 
+	/* Zero the adjoint CFS-CPML memory ONCE, before the whole sweep: the
+	 * adjoint psi recursion runs continuously backwards in time and must not
+	 * be restarted inside the loop. No-op when no side is PML. */
+	cpmlAdjReset();
+
 	int adj_snap_count = 0;
 	for (it = it1 - 1; it >= 0; it--) {
 

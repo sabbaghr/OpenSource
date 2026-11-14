@@ -380,6 +380,11 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 	if (sna && sna->nsnap > 0)
 		writeSnapTimesReset();
 
+	/* Zero the adjoint CFS-CPML memory. Once, before the whole sweep: the
+	 * adjoint psi recursion runs continuously backwards in time and must
+	 * NOT be restarted at each checkpoint segment boundary. */
+	cpmlAdjReset();
+
 	for (k = chk->nsnap - 1; k >= 0; k--) {
 
 		seg_start = chk->delay + k * chk->skipdt;

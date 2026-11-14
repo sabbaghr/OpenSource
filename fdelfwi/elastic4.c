@@ -84,10 +84,15 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 	float dvx, dvz;
 	int   ix, iz;
 	int   n1;
+	int   pml;
+	int   ioPx, iePx, ioPz, iePz;
+	int   ioTx, ieTx, ioTz, ieTz;
+
 
 	c1 = 9.0/8.0;
 	c2 = -1.0/24.0;
 	n1  = mod.naz;
+	pml = (bnd.top==2 || bnd.bot==2 || bnd.lef==2 || bnd.rig==2);
 
 	/* ============================================================ */
 	/*  Step 1 / Phase F1: Velocity update                          */
@@ -135,10 +140,37 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 	/*  txx -= l2m * D+x(vx) + lam * D+z(vz)                      */
 	/*  tzz -= lam * D+x(vx) + l2m * D+z(vz)                      */
 	/* ============================================================ */
+	/* Under CFS-CPML the stress in the PML zone is computed by boundariesV,
+	 * so the kernel must skip it. fdelfwi's mod.ioPx/ioPz/ioTx/ioTz do NOT
+	 * include the absorbing pad (getParameters.c leaves them unshifted, and
+	 * ~60 call sites across the FWI files rely on that), so the pad is removed
+	 * here in a locally scoped way -- the same trick acoustic4.c:119-142
+	 * already uses for the acoustic PML.
+	 *
+	 * The resulting ranges reproduce fdelmodc's elastic4.c exactly: BOTH stress
+	 * loops there run over [ioTx,ieTx) x [ioPz,iePz) of its own shifted indices,
+	 * which is the complement of the four PML blocks in boundaries.c -- no gap,
+	 * no double update. Note the txx/tzz loop uses the T-range in x, one column
+	 * narrower than fdelfwi's usual ioPx..iePx; that is deliberate, not a typo. */
+	if (pml) {
+		ioPx = mod.ioTx + (bnd.lef==2 ? bnd.npml : 0);
+		iePx = mod.ieTx - (bnd.rig==2 ? bnd.npml : 0);
+		ioPz = mod.ioPz + (bnd.top==2 ? bnd.npml : 0);
+		iePz = mod.iePz - (bnd.bot==2 ? bnd.npml : 0);
+		ioTx = ioPx; ieTx = iePx;
+		ioTz = ioPz; ieTz = iePz;
+	}
+	else {
+		ioPx = mod.ioPx; iePx = mod.iePx;
+		ioPz = mod.ioPz; iePz = mod.iePz;
+		ioTx = mod.ioTx; ieTx = mod.ieTx;
+		ioTz = mod.ioTz; ieTz = mod.ieTz;
+	}
+
 #pragma omp	for private (ix, iz, dvx, dvz) nowait schedule(guided,1)
-	for (ix=mod.ioPx; ix<mod.iePx; ix++) {
+	for (ix=ioPx; ix<iePx; ix++) {
 #pragma simd
-		for (iz=mod.ioPz; iz<mod.iePz; iz++) {
+		for (iz=ioPz; iz<iePz; iz++) {
 			dvx = c1*(vx[(ix+1)*n1+iz] - vx[ix*n1+iz]) +
 			      c2*(vx[(ix+2)*n1+iz] - vx[(ix-1)*n1+iz]);
 			dvz = c1*(vz[ix*n1+iz+1]   - vz[ix*n1+iz]) +
@@ -150,9 +182,9 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 
 	/* txz -= mul * [D-z(vx) + D-x(vz)] */
 #pragma omp	for private (ix, iz)  schedule(guided,1)
-	for (ix=mod.ioTx; ix<mod.ieTx; ix++) {
+	for (ix=ioTx; ix<ieTx; ix++) {
 #pragma simd
-		for (iz=mod.ioTz; iz<mod.ieTz; iz++) {
+		for (iz=ioTz; iz<ieTz; iz++) {
 			txz[ix*n1+iz] -= mul[ix*n1+iz]*(
 					c1*(vx[ix*n1+iz]     - vx[ix*n1+iz-1] +
 						vz[ix*n1+iz]     - vz[(ix-1)*n1+iz]) +

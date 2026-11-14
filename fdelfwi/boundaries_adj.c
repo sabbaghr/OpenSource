@@ -1159,12 +1159,32 @@ int boundariesV_adj(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz,
 	/*                                                                  */
 	/* Similarly for adj_vz at virtual z-boundary positions when        */
 	/* left/right free surfaces or top free surface with iorder>=8.     */
+	/*                                                                  */
+	/* NOT under CFS-CPML.  There the premise above is false on both    */
+	/* sides, and zeroing here loses two transpose entries (measured    */
+	/* with test_fs_col at left=2 right=2 top=1 bottom=2):              */
+	/*                                                                  */
+	/*   left  -- boundariesP's ghost fill (boundaries.c:493) sets      */
+	/*            vx[0]=vx[1]=vx[2], so the forward DOES write these    */
+	/*            columns and the free-surface txx stencil then reads   */
+	/*            them.  Their transpose contribution belongs on        */
+	/*            vx[2], and cpmlAdjGhostT folds it there -- but only   */
+	/*            if it is still present.  Zeroing here pre-empts it.   */
+	/*   right -- there is no ghost fill on the right, so the forward   */
+	/*            stencil vx[ix+2] at ix=iePx-1 reads vx[iePx+1] =      */
+	/*            vx[nax-ibnd] as a genuine input.  F^T must return a   */
+	/*            value there.                                          */
+	/*                                                                  */
+	/* The protection this block provides is not needed under PML:      */
+	/* Phase A2 is cpmlAdjF1T, which already gates every adj_vx on      */
+	/* msk_vx, so inactive columns cannot leak into the valid domain.   */
 	/* ================================================================ */
 	{
 		int ibnd = mod.iorder/2;
+		int pml  = (bnd.top==2 || bnd.bot==2 || bnd.lef==2 || bnd.rig==2);
 
 		/* adj_vx: virtual x-boundary positions from TOP/BOTTOM free surface scatter */
-		if (bnd.top==1 || bnd.bot==1) {
+		if ((bnd.top==1 || bnd.bot==1) && !pml) {
 #pragma omp for private (ix, iz) nowait
 			for (ix=0; ix<ibnd; ix++)
 				for (iz=0; iz<n1; iz++)

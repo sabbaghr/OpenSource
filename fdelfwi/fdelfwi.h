@@ -211,6 +211,8 @@ typedef struct _boundPar { /* Boundary Parameters */
     int npml;
     float R; /* reflection at side of model */
     float m; /* scaling order */
+    float amax; /*  CFS-CPML */
+    float kmax; /* CFS-CPML */
     float *pml_Vx;
     float *pml_nzVx;
     float *pml_nxVz;
@@ -240,6 +242,11 @@ typedef struct _checkpointPar {
     char   file_tzz[1024]; /* Path for tzz (pressure) checkpoint file */
     char   file_txx[1024]; /* Path for txx checkpoint file (elastic only) */
     char   file_txz[1024]; /* Path for txz checkpoint file (elastic only) */
+    char   file_psi[1024]; /* Path for the CFS-CPML psi memory variables */
+    size_t npsi;            /* Floats of psi state per checkpoint; 0 = no PML.
+                             * Discovered at the first write (the psi arrays
+                             * do not exist until the first PML time step) and
+                             * then held fixed for the reads. */
     int    it;              /* Running snapshot index (for adjoint sync) */
 } checkpointPar;
 
@@ -339,6 +346,50 @@ typedef struct _energyWeightPar {
     float *lam;       /* [nrec] Lame lambda at receiver                        */
     float *muu;       /* [nrec] Lame mu at receiver                            */
 } energyWeight;
+
+/* --- petro_constraint.c: probabilistic petrophysical model constraint ---
+ * Aragao & Sava (2020, GEOPHYSICS 85(2), R101-R111), equations 16-20.
+ * Adds J_P = a*sum_x D(m) to the objective, where D(m) is the harmonic
+ * mean distance from the model point m to a petrophysical PDF f(p) in a
+ * two-parameter crossplot plane (a well-log crossplot).  Confines the
+ * inversion to a feasible petrophysical region and so suppresses
+ * interparameter crosstalk.  The PDF is stored sparsely as its non-empty
+ * histogram cells and is held FIXED, since it is prior information and a
+ * moving f(p) would make J a moving target.
+ *
+ * The crossplot plane is selectable.  The paper uses (lambda, mu), which
+ * is where the elastic radiation patterns make the crosstalk; (Vp, Vs) is
+ * where classical rock-physics trends are quoted and is the identity
+ * mapping when the inversion runs with param=2.  d(m,p) mixes the two
+ * axes, so the axis UNIT sets the relative weight of the two parameters
+ * and is part of the physics: GPa for lambda-mu, km/s for Vp-Vs. */
+#define PETRO_SPACE_LAMMU 1
+#define PETRO_SPACE_VPVS  2
+
+typedef struct _petroPar {
+    int    on;        /* 1 = constraint active                            */
+    int    space;     /* PETRO_SPACE_LAMMU or PETRO_SPACE_VPVS            */
+    float  a;         /* trade-off weight (eq 18); set or auto-calibrated */
+    float  balance;   /* >0: pick a so ||g_petro|| = balance*||g_data||   */
+    int    calibrated;/* 1 once 'a' has been fixed (must not drift)       */
+    int    wrote_grad;/* 1 once g_petro has been written to disk          */
+    int    ncell;     /* number of significant PDF cells                  */
+    float *c1;        /* [ncell] cell-centre axis 1 (lambda GPa | Vp km/s)*/
+    float *c2;        /* [ncell] cell-centre axis 2 (mu GPa | Vs km/s)    */
+    float *f;         /* [ncell] probability, sums to 1                   */
+    float  eps;       /* floor on d(m,p), axis units (eq 16 singularity)  */
+    int    nsample;   /* samples read from petro_file (diagnostic)        */
+    float  c1_min, c1_max, c2_min, c2_max;  /* histogram axes             */
+} petroPar;
+
+int    petroBuild(const char *file, int space, int nlam, int nmu, float smooth,
+                  float eps, petroPar *pp, int verbose);
+double petroCostGrad(const float *xlame, int nmodel, const petroPar *pp,
+                     const int *wmask, float *g1, float *g2);
+void   petroAccumGradient(float *g, int nmodel, int param, const float *xlame,
+                          const float *g1, const float *g2, float a,
+                          const petroPar *pp);
+void   petroFree(petroPar *pp);
 
 energyWeight *energyWeightsBuild(modPar *mod, bndPar *bnd, recPar *rec, int verbose);
 int  energyWeightIsFluid(float mu_r, float lam_r);
@@ -754,6 +805,13 @@ typedef struct {
 	float tap_z;       /* ... on z;     near the model edges          */
 	int   pad;         /* minimum zero-pad factor per axis (>= 1)     */
 	int   nu0_keep;    /* 0 = 'limit' (default), 1 = pass the nu=0 plane */
+	/* --- PSPI (non-stationary) extension; ignored when nv <= 1 --- *
+	 * s_pass/s_stop above are a SINGLE velocity's slopes.  To let the
+	 * cutoff follow v(x,z) the ANGLES must be carried instead, because the
+	 * slope is then per-bin, s_i = cos(theta)/v_i.                       */
+	float theta_pass;  /* full opening angle 2theta [deg], H = 1 at/above */
+	float theta_stop;  /* full opening angle 2theta [deg], H = 0 at/below */
+	int   nv;          /* reference velocity count; <= 1 = stationary     */
 } lagConePar;
 
 typedef struct {
@@ -781,6 +839,60 @@ void  lagConeFilter(const float *cube, int nlag, int nx, int nz,
 /* Verify the FFT round-trip normalisation, the only backend-dependent part.
  * Returns max error relative to input RMS; > 1e-5 means trouble. */
 float lagConeSelfTest(int verbose);
+/* Raised-cosine edge taper; shared with lag_cone_pspi.c so both paths taper
+ * identically and can be compared sample for sample. */
+void  lagConeTaper1d(float *w, int n, float frac);
+
+/* ------------------------------------------------------------------ *
+ * lag_cone_pspi.c -- the same cone, but with a cutoff that FOLLOWS v(x,z),
+ * and returning only the tau = 0 slice.
+ *
+ * WHY.  lagConeFilter turns an angle into a slope through |p| = cos(theta)/v
+ * with ONE scalar v for the whole cube, so the angle it actually enforces
+ * drifts wherever the model is not that velocity.  Measured on a
+ * constant-opening-angle probe, the half-power cutoff spreads 3.8 deg across
+ * a 10% contrast and 19.3 deg across a 50% contrast; this routine holds it to
+ * 0.1 and 0.9 deg respectively.
+ *
+ * HOW.  Gazdag's phase-shift-plus-interpolation, applied to the cone: filter
+ * once per reference velocity, then blend the results pointwise by the local
+ * velocity.  The cost that would normally make that nv times too slow is
+ * removed by the fact that only tau = 0 is ever wanted -- the sum over nu IS
+ * the tau = 0 slice (Fourier projection-slice), so the nv inverse transforms
+ * are 2D, not 3D, and the whole routine is CHEAPER than the stationary one it
+ * replaces.
+ *
+ * `vel` is the velocity on the interior grid [nx*nz], ix*nz+iz: mod->cp for
+ * the Vp cube, mod->cs for the Vs cube.  Pass NULL (or p->nv <= 1) for the
+ * stationary cutoff, which reproduces lagConeFilter's tau = 0 slice exactly
+ * -- that equivalence is the regression test, lagConePspiSelfTest. */
+void  lagConePspiTau0(const float *cube, int nlag, int nx, int nz,
+    float dx, float dz, float dtau, const lagConePar *p,
+    const float *vel, float *tau0, lagConeStats *st, int verbose);
+/* Verify the tau=0 projection-slice shortcut against lagConeFilter's own
+ * inverse transform, on a random cube with nv=1.  Returns the max absolute
+ * difference relative to the slice RMS; > ~1e-5 means the phase weight or the
+ * normalisation is wrong. */
+float lagConePspiSelfTest(int verbose);
+/* Verify that the cutoff really FOLLOWS v: blocks held at exactly vmin / vmax
+ * must come back identical to the matching single-velocity run.  That is exact
+ * by construction of the blend, so > ~1e-5 means the bin index, the
+ * interpolation weight, the per-bin cos(theta)/v_i or one of the all-pass /
+ * all-stop early-outs is wrong. */
+float lagConePspiVaryTest(int verbose);
+/* Measure, in DEGREES, the opening angle the filter actually cuts at versus the
+ * one asked for -- solved in closed form from the blended response, so it needs
+ * no probe.  Covers the NARROW/migration end, where the stationary error is
+ * unbounded.  Returns the worst nv=4 error in degrees (NOT a relative residual
+ * like the two above); > ~1 deg means the cutoff is not following v. */
+float lagConePspiCutoffTest(int verbose);
+/* How many reference bins a given cone needs over a given velocity range.
+ * The transition band is a fixed FRACTIONAL width in slope, so a narrow
+ * (migration) cone needs ~13x more bins than a wide (tomographic) one over the
+ * same model.  lagConePspiTau0 warns, not gated on verbose, when lag_nv is
+ * below this -- too few bins makes the delivered cutoff discontinuous in v. */
+int   lagConePspiNvRequired(float theta_pass, float theta_stop,
+    float vmin, float vmax);
 
 /* --- lag_gradient.c, declared here because it needs lagConePar ---
  * Build this shot's (Vp, Vs) lag cubes, cone-filter each one, and ADD the
@@ -792,6 +904,61 @@ float lagConeSelfTest(int verbose);
 void lagGradientTomo(modPar *mod, bndPar *bnd, int nlag, float dlag,
     float *mask, const lagConePar *p, float *gvp, float *gvs, int verbose);
 
+
+/* --- cpml_coef.c : the ONE builder of the CFS-CPML profiles ---
+ * The forward (boundaries.c) and the adjoint (boundaries_cpml_adj.c) must use
+ * bit-identical b/c/ik or the adjoint is not a transpose.  Note the two
+ * routines build DIFFERENT sets: the velocity update samples xi on the field
+ * faces, the stress update half a cell off.  They are not interchangeable.
+ * The b_x/c_x/ik_x arrays are [mod.nax], the b_z/c_z/ik_z ones [mod.naz]. */
+void cpmlCoefVel(modPar mod, bndPar bnd,
+    float *b_xf, float *c_xf, float *ik_xf,
+    float *b_zf, float *c_zf, float *ik_zf);
+void cpmlCoefStr(modPar mod, bndPar bnd,
+    float *b_xc, float *c_xc, float *ik_xc,
+    float *b_zc, float *c_zc, float *ik_zc,
+    float *b_xf, float *c_xf, float *ik_xf,
+    float *b_zf, float *c_zf, float *ik_zf);
+
+/* --- boundaries_cpml_adj.c : exact discrete transpose of the CFS-CPML ---
+ * cpmlAdjF1T / cpmlAdjF2T REPLACE the corresponding main loops of
+ * elastic4_adj.c when any side is PML (they cover the whole grid, PML zone
+ * included, degenerating to the plain stencil where ik=1, b=c=0).
+ * cpmlAdjGhostT is the transpose of the forward ghost-column fill.
+ * cpmlAdjReset zeroes the adjoint psi memory; call it before every backward
+ * sweep, exactly as the forward psi starts at zero at it=0. */
+void cpmlAdjReset(void);
+void cpmlAdjF1T(modPar mod, bndPar bnd, float *vx, float *vz,
+    float *tzz, float *txx, float *txz, float *rox, float *roz);
+void cpmlAdjF2T(modPar mod, bndPar bnd, float *vx, float *vz,
+    float *tzz, float *txx, float *txz,
+    float *l2m, float *lam, float *mul);
+void cpmlAdjGhostT(modPar mod, bndPar bnd, float *vx, float *vz);
+
+/* --- cpml_state.c : owner of the FORWARD CFS-CPML psi memory variables ---
+ * psi is part of the forward STATE, not a by-product of it, so a checkpoint
+ * that stores only {vx,vz,txx,tzz,txz} does not determine the continuation.
+ * boundariesP/boundariesV get their psi arrays from here instead of owning
+ * function statics, so checkpoint.c can serialise them.
+ * The CPML_PSI_* order is the on-disk order; do not reshuffle it. */
+enum {
+    CPML_PSI_VX_X = 0,   /* boundariesP (velocity update): d(sigma)/dx for vx */
+    CPML_PSI_VZ_Z,       /*                                d(sigma)/dz for vz */
+    CPML_PSI_VX_Z,       /*                                d(sigma)/dz for vx */
+    CPML_PSI_VZ_X,       /*                                d(sigma)/dx for vz */
+    CPML_PSI_P_X,        /* boundariesV (stress update):   d(vx)/dx           */
+    CPML_PSI_P_Z,        /*                                d(vz)/dz           */
+    CPML_PSI_TXZ_X,      /*                                d(vz)/dx           */
+    CPML_PSI_TXZ_Z,      /*                                d(vx)/dz           */
+    CPML_NPSI
+};
+
+float **cpmlStateAlloc(size_t n);
+void    cpmlStateFree(void);
+void    cpmlStateZero(void);
+size_t  cpmlStateFloats(void);
+int     cpmlStateSave(float *buf, size_t n);
+int     cpmlStateLoad(const float *buf, size_t n);
 
 #if __STDC_VERSION__ >= 199901L
   /* "restrict" is a keyword */

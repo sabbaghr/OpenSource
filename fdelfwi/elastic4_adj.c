@@ -61,10 +61,18 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 	float c1, c2;
 	int   ix, iz;
 	int   n1;
+	int   pml;
 
 	c1 = 9.0/8.0;
 	c2 = -1.0/24.0;
 	n1 = mod.naz;
+	/* Under CFS-CPML the main loops below are not the whole forward
+	 * operator: boundaries.c adds the PML blocks and the ghost fill, and
+	 * elastic4.c scopes the stress range inward by npml. The transpose of
+	 * that whole thing lives in boundaries_cpml_adj.c, so when any side is
+	 * PML these loops are REPLACED, not supplemented. With no PML the code
+	 * path below is untouched and stays bit-identical. */
+	pml = (bnd.top==2 || bnd.bot==2 || bnd.lef==2 || bnd.rig==2);
 
 	/* ============================================================ */
 	/*  Step 6^T: Adjoint free surface (boundariesV_adj)            */
@@ -85,6 +93,10 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 	/*  Material params (l2m, lam, mul) INSIDE the derivative --    */
 	/*  transpose of fwd where they multiply OUTSIDE.                */
 	/* ============================================================ */
+	if (pml) {
+		cpmlAdjF2T(mod, bnd, vx, vz, tzz, txx, txz, l2m, lam, mul);
+	}
+	else {
 #pragma omp for private (ix, iz) nowait schedule(guided,1)
 	for (ix=mod.ioXx; ix<mod.ieXx; ix++) {
 #pragma simd
@@ -113,11 +125,17 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 				    mul[(ix+2)*n1+iz]*txz[(ix+2)*n1+iz] - mul[(ix-1)*n1+iz]*txz[(ix-1)*n1+iz]);
 		}
 	}
+	} /* end !pml */
 
 	/* ============================================================ */
 	/*  Step 3^T: Adjoint velocity boundaries (boundariesP_adj)     */
 	/* ============================================================ */
 	boundariesP_adj(mod, bnd, vx, vz, tzz, txx, txz, rox, roz, l2m, lam, mul, itime, verbose);
+
+	/* G^T: transpose of the PML ghost-column fill. Sits here because
+	 * the forward applies G after the velocity update and before the
+	 * stress update, so its transpose separates (F2)^T from (F1)^T. */
+	if (pml) cpmlAdjGhostT(mod, bnd, vx, vz);
 
 	/* ============================================================ */
 	/*  Step 2^T: Inject adjoint force sources                      */
@@ -132,6 +150,10 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 	/*  Buoyancy (rox, roz) INSIDE the derivative -- transpose of   */
 	/*  fwd where they multiply OUTSIDE.                             */
 	/* ============================================================ */
+	if (pml) {
+		cpmlAdjF1T(mod, bnd, vx, vz, tzz, txx, txz, rox, roz);
+	}
+	else {
 #pragma omp for private (ix, iz) nowait schedule(guided,1)
 	for (ix=mod.ioPx; ix<mod.iePx; ix++) {
 #pragma simd
@@ -157,6 +179,7 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 				    roz[(ix+1)*n1+iz]*vz[(ix+1)*n1+iz] - roz[(ix-2)*n1+iz]*vz[(ix-2)*n1+iz]);
 		}
 	}
+	} /* end !pml */
 
 	/* ============================================================ */
 	/*  Free surface txz correction (supplement to Step 1^T)        */
@@ -166,8 +189,15 @@ int elastic4_adj(modPar mod, adjSrcPar adj, bndPar bnd, int itime,
 	/*  ioTz=surface+1 and misses these transpose contributions.    */
 	/*  Without them, BV_adj's txz scatter has nothing to propagate */
 	/*  and the antisymmetric mirror coupling is lost.              */
+	/*                                                               */
+	/*  Only on the !pml path.  cpmlAdjF1T gathers txz over the      */
+	/*  WHOLE padded grid (iz=0..naz) and is gated by msk_vx, not    */
+	/*  by ioTz, so it already contains both of these terms.  Adding */
+	/*  them again doubles exactly the txz[izs] and txz[izs-1]       */
+	/*  entries of F^T (measured with test_fs_col at left=2 right=2  */
+	/*  top=1 bottom=2: code/meas = 2.000000 on both).               */
 	/* ============================================================ */
-	if (bnd.top == 1) {
+	if (bnd.top == 1 && !pml) {
 		int izs = bnd.surface[mod.ioPx];
 #pragma omp for private (ix) schedule(guided,1)
 		for (ix=mod.ioTx; ix<mod.ieTx; ix++) {

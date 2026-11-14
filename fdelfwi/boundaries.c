@@ -161,19 +161,21 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
     if ( (npml != 0) && (allocated==0) && pml) {
 #pragma omp master
 {
-        double sig, kap, alp, sak, L_pml, sigma_max_cpml, m_cpml, R_cpml, kmax, amax, xi_val;
-
-        if (psi_vx_x) free(psi_vx_x);
-        if (psi_vz_z) free(psi_vz_z);
-        if (psi_vx_z) free(psi_vx_z);
-        if (psi_vz_x) free(psi_vz_x);
         if (b_xf) free(b_xf); if (c_xf) free(c_xf); if (ik_xf) free(ik_xf);
         if (b_zf) free(b_zf); if (c_zf) free(c_zf); if (ik_zf) free(ik_zf);
 
-        psi_vx_x = (float *)calloc(n2*n1, sizeof(float));
-        psi_vz_z = (float *)calloc(n2*n1, sizeof(float));
-        psi_vx_z = (float *)calloc(n2*n1, sizeof(float));
-        psi_vz_x = (float *)calloc(n2*n1, sizeof(float));
+        /* psi is the FORWARD STATE and is owned by cpml_state.c, not by this
+         * function, so that checkpoint.c can save and restore it.  The call
+         * is idempotent: it keeps the existing buffers when the grid size is
+         * unchanged, which is what lets a restored checkpoint survive until
+         * the first time step of the reconstruction. */
+        {
+            float **psi = cpmlStateAlloc((size_t)n2*n1);
+            psi_vx_x = psi[CPML_PSI_VX_X];
+            psi_vz_z = psi[CPML_PSI_VZ_Z];
+            psi_vx_z = psi[CPML_PSI_VX_Z];
+            psi_vz_x = psi[CPML_PSI_VZ_X];
+        }
         b_xf  = (float *)calloc(n2, sizeof(float));
         c_xf  = (float *)calloc(n2, sizeof(float));
         ik_xf = (float *)calloc(n2, sizeof(float));
@@ -182,74 +184,13 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
         ik_zf = (float *)calloc(n1, sizeof(float));
         allocated = 1;
 
-        m_cpml = (bnd.m > 0.0) ? bnd.m : 2.0;
-        R_cpml = (bnd.R > 0.0) ? bnd.R : 1e-5;
-        kmax   = 5.0;
-        amax   = 0.0;
-        L_pml  = npml * mod.dx;
-        sigma_max_cpml = (m_cpml+1.0)*mod.cp_min/(2.0*L_pml)*log(1.0/R_cpml);
+        /* Face-staggered CFS-CPML profile. Shared with the adjoint via
+         * cpml_coef.c -- the discrete transpose is only a transpose if it
+         * uses bit-identical b/c/ik, so there must be ONE builder. */
+        cpmlCoefVel(mod, bnd, b_xf, c_xf, ik_xf, b_zf, c_zf, ik_zf);
 
-        /* default outside PML: b=0 c=0 ik=1 => no correction applied */
-        for (ib=0; ib<n2; ib++) { b_xf[ib]=0.0f; c_xf[ib]=0.0f; ik_xf[ib]=1.0f; }
-        for (ib=0; ib<n1; ib++) { b_zf[ib]=0.0f; c_zf[ib]=0.0f; ik_zf[ib]=1.0f; }
-
-        /* Left PML: vx face positions */
-        if (bnd.lef == 2) {
-            for (ix=((mod.ioXx-npml)>0?(mod.ioXx-npml):0); ix<(mod.ioXx<n2?mod.ioXx:n2); ix++) {
-                xi_val = (double)(mod.ioXx - ix) / (double)npml;
-                if (xi_val > 1.0) xi_val = 1.0;
-                sig = sigma_max_cpml * pow(xi_val, m_cpml);
-                kap = 1.0 + (kmax-1.0) * pow(xi_val, m_cpml);
-                alp = amax * (1.0 - xi_val);
-                sak = sig + kap*alp;
-                b_xf[ix] = (float)exp(-(sig/kap + alp)*mod.dt);
-                c_xf[ix] = (sak > 1e-30) ? (float)(sig/(kap*sak)*(b_xf[ix]-1.0)) : 0.0f;
-                ik_xf[ix] = (float)(1.0/kap);
-            }
-        }
-        /* Right PML: vx face positions */
-        if (bnd.rig == 2) {
-            for (ix=(mod.ieXx>0?mod.ieXx:0); ix<((mod.ieXx+npml)<n2?(mod.ieXx+npml):n2); ix++) {
-                xi_val = (double)(ix - mod.ieXx + 1) / (double)npml;
-                if (xi_val > 1.0) xi_val = 1.0;
-                sig = sigma_max_cpml * pow(xi_val, m_cpml);
-                kap = 1.0 + (kmax-1.0) * pow(xi_val, m_cpml);
-                alp = amax * (1.0 - xi_val);
-                sak = sig + kap*alp;
-                b_xf[ix] = (float)exp(-(sig/kap + alp)*mod.dt);
-                c_xf[ix] = (sak > 1e-30) ? (float)(sig/(kap*sak)*(b_xf[ix]-1.0)) : 0.0f;
-                ik_xf[ix] = (float)(1.0/kap);
-            }
-        }
-        /* Top PML: vz face positions */
-        if (bnd.top == 2) {
-            for (iz=((mod.ioZz-npml)>0?(mod.ioZz-npml):0); iz<(mod.ioZz<n1?mod.ioZz:n1); iz++) {
-                xi_val = (double)(mod.ioZz - iz) / (double)npml;
-                if (xi_val > 1.0) xi_val = 1.0;
-                sig = sigma_max_cpml * pow(xi_val, m_cpml);
-                kap = 1.0 + (kmax-1.0) * pow(xi_val, m_cpml);
-                alp = amax * (1.0 - xi_val);
-                sak = sig + kap*alp;
-                b_zf[iz] = (float)exp(-(sig/kap + alp)*mod.dt);
-                c_zf[iz] = (sak > 1e-30) ? (float)(sig/(kap*sak)*(b_zf[iz]-1.0)) : 0.0f;
-                ik_zf[iz] = (float)(1.0/kap);
-            }
-        }
-        /* Bottom PML: vz face positions */
-        if (bnd.bot == 2) {
-            for (iz=(mod.ieZz>0?mod.ieZz:0); iz<((mod.ieZz+npml)<n1?(mod.ieZz+npml):n1); iz++) {
-                xi_val = (double)(iz - mod.ieZz + 1) / (double)npml;
-                if (xi_val > 1.0) xi_val = 1.0;
-                sig = sigma_max_cpml * pow(xi_val, m_cpml);
-                kap = 1.0 + (kmax-1.0) * pow(xi_val, m_cpml);
-                alp = amax * (1.0 - xi_val);
-                sak = sig + kap*alp;
-                b_zf[iz] = (float)exp(-(sig/kap + alp)*mod.dt);
-                c_zf[iz] = (sak > 1e-30) ? (float)(sig/(kap*sak)*(b_zf[iz]-1.0)) : 0.0f;
-                ik_zf[iz] = (float)(1.0/kap);
-            }
-        }
-        if (verbose>=4) vmess("CFS-CPML boundP: sigma_max=%e cp_min=%e npml=%d", sigma_max_cpml, mod.cp_min, npml);
+        if (verbose>=4) vmess("CFS-CPML boundP: cp_min=%e npml=%d kmax=%e amax=%e",
+                              mod.cp_min, npml, bnd.kmax, bnd.amax);
 }
     }
 #pragma omp barrier
@@ -379,6 +320,11 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 
 	} /* end acoustic CFS-CPML */
 
+    /* Elastic velocity CFS-CPML. Ported VERBATIM from fdelmodc/boundaries.c:385-568
+     * (modPar/bndPar are byte-identical between the two headers, and this block uses
+     * only mod.ioXx/ieXx/ioXz/ieXz/ioZx/ieZx/ioZz/ieZz, whose values agree in both
+     * codes -- unlike the P/T ranges, so NO index translation is needed here.
+     * Keep diffable against fdelmodc. */
     if (mod.ischeme == 3 && pml) { /* Elastic CFS-CPML: full velocity update in PML */
         if (itime == 0) {
 #pragma omp master
@@ -394,96 +340,154 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
         /* vx: update all PML cells skipped by elastic4 main kernel */
         zmin = ((mod.ioXz-npml)>0?(mod.ioXz-npml):0);
         zmax = ((mod.ieXz+npml)<n1?(mod.ieXz+npml):n1);
-        zlo = has_top_pml ? zmin : mod.ioXz;
-        zhi = has_bot_pml ? zmax : mod.ieXz;
+//fprintf(stderr,"ixo=%d ixe=%d zmin=%d zmax=%d\n", ((mod.ioXx-npml)>0?(mod.ioXx-npml):0), ((mod.ieXx+npml)<n2?(mod.ieXx+npml):n2), zmin, zmax);
 
+
+       if (has_lef_pml) {
 #pragma omp for private(ix, iz, dpx, dpz) schedule(static)
-        for (ix=((mod.ioXx-npml)>0?(mod.ioXx-npml):0); ix<((mod.ieXx+npml)<n2?(mod.ieXx+npml):n2); ix++) {
-            int in_x = ((has_lef_pml && ix < mod.ioXx) || (has_rig_pml && ix >= mod.ieXx));
-
-            for (iz=zlo; iz<zhi; iz++) {
-                int in_z = ((has_top_pml && iz < mod.ioXz) || (has_bot_pml && iz >= mod.ieXz));
-                int i;
-                if (!in_x && !in_z) continue;
-                i = ix*n1+iz;
-
-                if (ix >= 2 && ix <= n2-2) {
+            for (ix=mod.ioXx-npml; ix<mod.ioXx; ix++) {
+                for (iz=zmin; iz<zmax; iz++) {
+                    int i = ix*n1+iz;
                     dpx = c1*(txx[i]     - txx[i-n1]) +
                           c2*(txx[i+n1]  - txx[i-2*n1]);
-                }
-                else {
-                    int ixm1 = (ix > 0) ? ix-1 : ix;
-                    int ixp1 = (ix+1 < n2) ? ix+1 : ix;
-                    dpx = txx[ixp1*n1+iz] - txx[ixm1*n1+iz];
-                }
-                if (iz >= 1 && iz <= n1-3) {
                     dpz = c1*(txz[i+1]   - txz[i]) +
                           c2*(txz[i+2]   - txz[i-1]);
-                }
-                else {
-                    int izm1 = (iz > 0) ? iz-1 : iz;
-                    int izp1 = (iz+1 < n1) ? iz+1 : iz;
-                    dpz = txz[ix*n1+izp1] - txz[ix*n1+izm1];
-                }
-
-                if (in_x) {
                     psi_vx_x[i] = b_xf[ix]*psi_vx_x[i] + c_xf[ix]*dpx;
                     dpx = ik_xf[ix]*dpx + psi_vx_x[i];
-                }
-                if (in_z) {
                     psi_vx_z[i] = b_zf[iz]*psi_vx_z[i] + c_zf[iz]*dpz;
                     dpz = ik_zf[iz]*dpz + psi_vx_z[i];
+                    vx[i] -= rox[i]*(dpx + dpz);
                 }
-                vx[i] -= rox[i]*(dpx + dpz);
             }
-        }
+       }
+       if (has_rig_pml) {
+#pragma omp for private(ix, iz, dpx, dpz) schedule(static)
+            for (ix=mod.ieXx; ix<mod.ieXx+npml; ix++) {
+                for (iz=zmin; iz<zmax; iz++) {
+                    int i = ix*n1+iz;
+                    dpx = c1*(txx[i]     - txx[i-n1]) +
+                          c2*(txx[i+n1]  - txx[i-2*n1]);
+                    dpz = c1*(txz[i+1]   - txz[i]) +
+                          c2*(txz[i+2]   - txz[i-1]);
+                    psi_vx_x[i] = b_xf[ix]*psi_vx_x[i] + c_xf[ix]*dpx;
+                    dpx = ik_xf[ix]*dpx + psi_vx_x[i];
+                    psi_vx_z[i] = b_zf[iz]*psi_vx_z[i] + c_zf[iz]*dpz;
+                    dpz = ik_zf[iz]*dpz + psi_vx_z[i];
+                    vx[i] -= rox[i]*(dpx + dpz);
+                }
+            }
+       }
+       if (has_top_pml) {
+#pragma omp for private(ix, iz, dpx, dpz) schedule(static)
+            for (ix=mod.ioXx; ix<mod.ieXx; ix++) {
+                for (iz=mod.ioXz-npml; iz<mod.ioXz; iz++) {
+                    int i = ix*n1+iz;
+                    dpx = c1*(txx[i]     - txx[i-n1]) +
+                          c2*(txx[i+n1]  - txx[i-2*n1]);
+                    dpz = c1*(txz[i+1]   - txz[i]) +
+                          c2*(txz[i+2]   - txz[i-1]);
+                    psi_vx_x[i] = b_xf[ix]*psi_vx_x[i] + c_xf[ix]*dpx;
+                    dpx = ik_xf[ix]*dpx + psi_vx_x[i];
+                    psi_vx_z[i] = b_zf[iz]*psi_vx_z[i] + c_zf[iz]*dpz;
+                    dpz = ik_zf[iz]*dpz + psi_vx_z[i];
+                    vx[i] -= rox[i]*(dpx + dpz);
+                }
+            }
+       }
+       if (has_bot_pml) {
+#pragma omp for private(ix, iz, dpx, dpz) schedule(static)
+            for (ix=mod.ioXx; ix<mod.ieXx; ix++) {
+                for (iz=mod.ieXz; iz<mod.ieXz+npml; iz++) {
+                    int i = ix*n1+iz;
+                    dpx = c1*(txx[i]     - txx[i-n1]) +
+                          c2*(txx[i+n1]  - txx[i-2*n1]);
+                    dpz = c1*(txz[i+1]   - txz[i]) +
+                          c2*(txz[i+2]   - txz[i-1]);
+                    psi_vx_x[i] = b_xf[ix]*psi_vx_x[i] + c_xf[ix]*dpx;
+                    dpx = ik_xf[ix]*dpx + psi_vx_x[i];
+                    psi_vx_z[i] = b_zf[iz]*psi_vx_z[i] + c_zf[iz]*dpz;
+                    dpz = ik_zf[iz]*dpz + psi_vx_z[i];
+                    vx[i] -= rox[i]*(dpx + dpz);
+                }
+            }
+       }
 
         /* vz: update all PML cells skipped by elastic4 main kernel */
         zmin = ((mod.ioZz-npml)>0?(mod.ioZz-npml):0);
         zmax = ((mod.ieZz+npml)<n1?(mod.ieZz+npml):n1);
-        zlo = has_top_pml ? zmin : mod.ioZz;
-        zhi = has_bot_pml ? zmax : mod.ieZz;
-
+        if (has_lef_pml) {
 #pragma omp for private(ix, iz, dpx, dpz) schedule(static)
-        for (ix=((mod.ioZx-npml)>0?(mod.ioZx-npml):0); ix<((mod.ieZx+npml)<n2?(mod.ieZx+npml):n2); ix++) {
-            int in_x = ((has_lef_pml && ix < mod.ioZx) || (has_rig_pml && ix >= mod.ieZx));
-
-            for (iz=zlo; iz<zhi; iz++) {
-                int in_z = ((has_top_pml && iz < mod.ioZz) || (has_bot_pml && iz >= mod.ieZz));
-                int i;
-                if (!in_x && !in_z) continue;
-                i = ix*n1+iz;
-
-                if (iz >= 2 && iz <= n1-2) {
+            for (ix=mod.ioZx-npml; ix<mod.ioZx; ix++) {
+                for (iz=zmin; iz<zmax; iz++) {
+                    int i = ix*n1+iz;
                     dpz = c1*(tzz[i]   - tzz[i-1]) +
                           c2*(tzz[i+1] - tzz[i-2]);
-                }
-                else {
-                    int izm1 = (iz > 0) ? iz-1 : iz;
-                    int izp1 = (iz+1 < n1) ? iz+1 : iz;
-                    dpz = tzz[ix*n1+izp1] - tzz[ix*n1+izm1];
-                }
-                if (ix >= 1 && ix <= n2-3) {
-                    dpx = c1*(txz[i+n1]   - txz[i]) +
-                          c2*(txz[i+2*n1] - txz[i-n1]);
-                }
-                else {
-                    int ixm1 = (ix > 0) ? ix-1 : ix;
-                    int ixp1 = (ix+1 < n2) ? ix+1 : ix;
-                    dpx = txz[ixp1*n1+iz] - txz[ixm1*n1+iz];
-                }
-
-                if (in_z) {
                     psi_vz_z[i] = b_zf[iz]*psi_vz_z[i] + c_zf[iz]*dpz;
                     dpz = ik_zf[iz]*dpz + psi_vz_z[i];
-                }
-                if (in_x) {
+    
+                    dpx = c1*(txz[i+n1]   - txz[i]) +
+                          c2*(txz[i+2*n1] - txz[i-n1]);
                     psi_vz_x[i] = b_xf[ix]*psi_vz_x[i] + c_xf[ix]*dpx;
                     dpx = ik_xf[ix]*dpx + psi_vz_x[i];
+                    vz[i] -= roz[i]*(dpz + dpx);
                 }
-                vz[i] -= roz[i]*(dpz + dpx);
             }
         }
+        if (has_rig_pml) {
+#pragma omp for private(ix, iz, dpx, dpz) schedule(static)
+            for (ix=mod.ieZx; ix<mod.ieZx+npml; ix++) {
+                for (iz=zmin; iz<zmax; iz++) {
+                    int i = ix*n1+iz;
+                    dpz = c1*(tzz[i]   - tzz[i-1]) +
+                          c2*(tzz[i+1] - tzz[i-2]);
+                    psi_vz_z[i] = b_zf[iz]*psi_vz_z[i] + c_zf[iz]*dpz;
+                    dpz = ik_zf[iz]*dpz + psi_vz_z[i];
+    
+                    dpx = c1*(txz[i+n1]   - txz[i]) +
+                          c2*(txz[i+2*n1] - txz[i-n1]);
+                    psi_vz_x[i] = b_xf[ix]*psi_vz_x[i] + c_xf[ix]*dpx;
+                    dpx = ik_xf[ix]*dpx + psi_vz_x[i];
+                    vz[i] -= roz[i]*(dpz + dpx);
+                }
+            }
+        }
+        if (has_top_pml) {
+#pragma omp for private(ix, iz, dpx, dpz) schedule(static)
+            for (ix=mod.ioZx; ix<mod.ieZx; ix++) {
+                for (iz=mod.ioZz-npml; iz<mod.ioZz; iz++) {
+                    int i = ix*n1+iz;
+                    dpz = c1*(tzz[i]   - tzz[i-1]) +
+                          c2*(tzz[i+1] - tzz[i-2]);
+                    psi_vz_z[i] = b_zf[iz]*psi_vz_z[i] + c_zf[iz]*dpz;
+                    dpz = ik_zf[iz]*dpz + psi_vz_z[i];
+    
+                    dpx = c1*(txz[i+n1]   - txz[i]) +
+                          c2*(txz[i+2*n1] - txz[i-n1]);
+                    psi_vz_x[i] = b_xf[ix]*psi_vz_x[i] + c_xf[ix]*dpx;
+                    dpx = ik_xf[ix]*dpx + psi_vz_x[i];
+                    vz[i] -= roz[i]*(dpz + dpx);
+                }
+            }
+        }
+        if (has_bot_pml) {
+#pragma omp for private(ix, iz, dpx, dpz) schedule(static)
+            for (ix=mod.ioZx; ix<mod.ieZx; ix++) {
+                for (iz=mod.ieZz; iz<mod.ieZz+npml; iz++) {
+                    int i = ix*n1+iz;
+                    dpz = c1*(tzz[i]   - tzz[i-1]) +
+                          c2*(tzz[i+1] - tzz[i-2]);
+                    psi_vz_z[i] = b_zf[iz]*psi_vz_z[i] + c_zf[iz]*dpz;
+                    dpz = ik_zf[iz]*dpz + psi_vz_z[i];
+    
+                    dpx = c1*(txz[i+n1]   - txz[i]) +
+                          c2*(txz[i+2*n1] - txz[i-n1]);
+                    psi_vz_x[i] = b_xf[ix]*psi_vz_x[i] + c_xf[ix]*dpx;
+                    dpx = ik_xf[ix]*dpx + psi_vz_x[i];
+                    vz[i] -= roz[i]*(dpz + dpx);
+                }
+            }
+        }
+
         /* Fill outer ghost cells with linear extrapolation so 4th-order stress
          * stencils in boundariesV have symmetric closure at all four sides. */
         if (bnd.lef == 2) {
@@ -1306,10 +1310,11 @@ tzz[ix*n1+iz], txz[ix*n1+iz], txx[ix*n1+iz], lam[ix*n1+iz], l2m[ix*n1+iz]);
 #pragma omp master
 {
 		if (allocated) {
-            if (psi_vx_x) { free(psi_vx_x); psi_vx_x = NULL; }
-            if (psi_vz_z) { free(psi_vz_z); psi_vz_z = NULL; }
-            if (psi_vx_z) { free(psi_vx_z); psi_vx_z = NULL; }
-            if (psi_vz_x) { free(psi_vz_x); psi_vz_x = NULL; }
+            /* Drop the references but do NOT free: psi belongs to
+             * cpml_state.c and must outlive this shot so the adjoint can
+             * restore it from a checkpoint.  The next shot gets the same
+             * buffers back and zeroes them at itime==0. */
+            psi_vx_x = psi_vz_z = psi_vx_z = psi_vz_x = NULL;
             if (b_xf)  { free(b_xf);  b_xf  = NULL; }
             if (c_xf)  { free(c_xf);  c_xf  = NULL; }
             if (ik_xf) { free(ik_xf); ik_xf = NULL; }
@@ -1369,22 +1374,20 @@ int boundariesV(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
     if ( (npml != 0) && (allocated==0) && pml) {
 #pragma omp master
 {
-        double sig, kap, alp, sak, L_pml, sigma_max_cpml, m_cpml, R_cpml, kmax, amax, xi_val;
-        int ioXx_ref, ieXx_ref, ioZz_ref, ieZz_ref;
-
-        if (psi_p_x) free(psi_p_x);
-        if (psi_p_z) free(psi_p_z);
-        if (psi_txz_x) free(psi_txz_x);
-        if (psi_txz_z) free(psi_txz_z);
         if (b_xc) free(b_xc); if (c_xc) free(c_xc); if (ik_xc) free(ik_xc);
         if (b_zc) free(b_zc); if (c_zc) free(c_zc); if (ik_zc) free(ik_zc);
         if (b_xf) free(b_xf); if (c_xf) free(c_xf); if (ik_xf) free(ik_xf);
         if (b_zf) free(b_zf); if (c_zf) free(c_zf); if (ik_zf) free(ik_zf);
 
-        psi_p_x   = (float *)calloc(n2*n1, sizeof(float));
-        psi_p_z   = (float *)calloc(n2*n1, sizeof(float));
-        psi_txz_x = (float *)calloc(n2*n1, sizeof(float));
-        psi_txz_z = (float *)calloc(n2*n1, sizeof(float));
+        /* psi is owned by cpml_state.c -- see the matching block in
+         * boundariesP.  Same buffers, different four slots. */
+        {
+            float **psi = cpmlStateAlloc((size_t)n2*n1);
+            psi_p_x   = psi[CPML_PSI_P_X];
+            psi_p_z   = psi[CPML_PSI_P_Z];
+            psi_txz_x = psi[CPML_PSI_TXZ_X];
+            psi_txz_z = psi[CPML_PSI_TXZ_Z];
+        }
         b_xc  = (float *)calloc(n2, sizeof(float));
         c_xc  = (float *)calloc(n2, sizeof(float));
         ik_xc = (float *)calloc(n2, sizeof(float));
@@ -1399,131 +1402,15 @@ int boundariesV(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
         ik_zf = (float *)calloc(n1, sizeof(float));
         allocated = 1;
 
-        m_cpml = (bnd.m > 0.0) ? bnd.m : 2.0;
-        R_cpml = (bnd.R > 0.0) ? bnd.R : 1e-5;
-        kmax   = 5.0;
-        amax   = 0.0;
-        L_pml  = npml * mod.dx;
-        sigma_max_cpml = (m_cpml+1.0)*mod.cp_min/(2.0*L_pml)*log(1.0/R_cpml);
+        /* Cell-centred (txx/tzz) and face-staggered (txz) CFS-CPML profiles.
+         * Shared with the adjoint via cpml_coef.c. NOTE the face set built
+         * here is NOT the one cpmlCoefVel builds -- the stress update samples
+         * xi half a cell off. See cpml_coef.c for why that matters. */
+        cpmlCoefStr(mod, bnd, b_xc, c_xc, ik_xc, b_zc, c_zc, ik_zc,
+                              b_xf, c_xf, ik_xf, b_zf, c_zf, ik_zf);
 
-        /* default outside PML: b=0 c=0 ik=1 => no correction */
-        for (ib=0; ib<n2; ib++) { b_xc[ib]=0.0f; c_xc[ib]=0.0f; ik_xc[ib]=1.0f; }
-        for (ib=0; ib<n1; ib++) { b_zc[ib]=0.0f; c_zc[ib]=0.0f; ik_zc[ib]=1.0f; }
-        for (ib=0; ib<n2; ib++) { b_xf[ib]=0.0f; c_xf[ib]=0.0f; ik_xf[ib]=1.0f; }
-        for (ib=0; ib<n1; ib++) { b_zf[ib]=0.0f; c_zf[ib]=0.0f; ik_zf[ib]=1.0f; }
-
-        ioXx_ref = mod.ioXx;
-        ieXx_ref = mod.iePx;
-        ioZz_ref = mod.ioPz+1;
-        ieZz_ref = mod.ieXz;
-
-        /* Left PML: p cell-centre */
-        if (bnd.lef == 2) {
-            for (ix=mod.ioPx-npml; ix<ioXx_ref; ix++) {
-                xi_val = ((double)(ioXx_ref - ix) - 0.5) / (double)npml;
-                if (xi_val < 0.0) xi_val = 0.0;
-                if (xi_val > 1.0) xi_val = 1.0;
-                sig = sigma_max_cpml * pow(xi_val, m_cpml);
-                kap = 1.0 + (kmax-1.0) * pow(xi_val, m_cpml);
-                alp = amax * (1.0 - xi_val);
-                sak = sig + kap*alp;
-                b_xc[ix] = (float)exp(-(sig/kap + alp)*mod.dt);
-                c_xc[ix] = (sak > 1e-30) ? (float)(sig/(kap*sak)*(b_xc[ix]-1.0)) : 0.0f;
-                ik_xc[ix] = (float)(1.0/kap);
-            }
-            for (ix=(mod.ioXx-npml>0?mod.ioXx-npml:0); ix<(mod.ioXx<n2?mod.ioXx:n2); ix++) {
-                xi_val = ((double)(mod.ioXx - ix) - 0.5) / (double)npml;
-                if (xi_val < 0.0) xi_val = 0.0;
-                if (xi_val > 1.0) xi_val = 1.0;
-                sig = sigma_max_cpml * pow(xi_val, m_cpml);
-                kap = 1.0 + (kmax-1.0) * pow(xi_val, m_cpml);
-                alp = amax * (1.0 - xi_val);
-                sak = sig + kap*alp;
-                b_xf[ix] = (float)exp(-(sig/kap + alp)*mod.dt);
-                c_xf[ix] = (sak > 1e-30) ? (float)(sig/(kap*sak)*(b_xf[ix]-1.0)) : 0.0f;
-                ik_xf[ix] = (float)(1.0/kap);
-            }
-        }
-        /* Right PML: p cell-centre */
-        if (bnd.rig == 2) {
-            for (ix=ieXx_ref; ix<(ieXx_ref+npml<n2?ieXx_ref+npml:n2); ix++) {
-                xi_val = ((double)(ix - ieXx_ref) + 0.5) / (double)npml;
-                if (xi_val > 1.0) xi_val = 1.0;
-                sig = sigma_max_cpml * pow(xi_val, m_cpml);
-                kap = 1.0 + (kmax-1.0) * pow(xi_val, m_cpml);
-                alp = amax * (1.0 - xi_val);
-                sak = sig + kap*alp;
-                b_xc[ix] = (float)exp(-(sig/kap + alp)*mod.dt);
-                c_xc[ix] = (sak > 1e-30) ? (float)(sig/(kap*sak)*(b_xc[ix]-1.0)) : 0.0f;
-                ik_xc[ix] = (float)(1.0/kap);
-            }
-            for (ix=(mod.ieXx<n2?mod.ieXx:n2); ix<(mod.ieXx+npml<n2?mod.ieXx+npml:n2); ix++) {
-                xi_val = ((double)(ix - mod.ieXx) + 0.5) / (double)npml;
-                if (xi_val > 1.0) xi_val = 1.0;
-                if (xi_val < 0.0) xi_val = 0.0;
-                sig = sigma_max_cpml * pow(xi_val, m_cpml);
-                kap = 1.0 + (kmax-1.0) * pow(xi_val, m_cpml);
-                alp = amax * (1.0 - xi_val);
-                sak = sig + kap*alp;
-                b_xf[ix] = (float)exp(-(sig/kap + alp)*mod.dt);
-                c_xf[ix] = (sak > 1e-30) ? (float)(sig/(kap*sak)*(b_xf[ix]-1.0)) : 0.0f;
-                ik_xf[ix] = (float)(1.0/kap);
-            }
-        }
-        /* Top PML: p cell-centre */
-        if (bnd.top == 2) {
-            for (iz=mod.ioPz-npml; iz<ioZz_ref; iz++) {
-                xi_val = ((double)(ioZz_ref - iz) - 0.5) / (double)npml;
-                if (xi_val < 0.0) xi_val = 0.0;
-                if (xi_val > 1.0) xi_val = 1.0;
-                sig = sigma_max_cpml * pow(xi_val, m_cpml);
-                kap = 1.0 + (kmax-1.0) * pow(xi_val, m_cpml);
-                alp = amax * (1.0 - xi_val);
-                sak = sig + kap*alp;
-                b_zc[iz] = (float)exp(-(sig/kap + alp)*mod.dt);
-                c_zc[iz] = (sak > 1e-30) ? (float)(sig/(kap*sak)*(b_zc[iz]-1.0)) : 0.0f;
-                ik_zc[iz] = (float)(1.0/kap);
-            }
-            for (iz=(mod.ioXz-npml>0?mod.ioXz-npml:0); iz<(mod.ioXz<n1?mod.ioXz:n1); iz++) {
-                xi_val = ((double)(mod.ioXz - iz) - 0.5) / (double)npml;
-                if (xi_val < 0.0) xi_val = 0.0;
-                if (xi_val > 1.0) xi_val = 1.0;
-                sig = sigma_max_cpml * pow(xi_val, m_cpml);
-                kap = 1.0 + (kmax-1.0) * pow(xi_val, m_cpml);
-                alp = amax * (1.0 - xi_val);
-                sak = sig + kap*alp;
-                b_zf[iz] = (float)exp(-(sig/kap + alp)*mod.dt);
-                c_zf[iz] = (sak > 1e-30) ? (float)(sig/(kap*sak)*(b_zf[iz]-1.0)) : 0.0f;
-                ik_zf[iz] = (float)(1.0/kap);
-            }
-        }
-        /* Bottom PML: p cell-centre */
-        if (bnd.bot == 2) {
-            for (iz=ieZz_ref; iz<(ieZz_ref+npml<n1?ieZz_ref+npml:n1); iz++) {
-                xi_val = ((double)(iz - ieZz_ref) + 0.5) / (double)npml;
-                if (xi_val > 1.0) xi_val = 1.0;
-                sig = sigma_max_cpml * pow(xi_val, m_cpml);
-                kap = 1.0 + (kmax-1.0) * pow(xi_val, m_cpml);
-                alp = amax * (1.0 - xi_val);
-                sak = sig + kap*alp;
-                b_zc[iz] = (float)exp(-(sig/kap + alp)*mod.dt);
-                c_zc[iz] = (sak > 1e-30) ? (float)(sig/(kap*sak)*(b_zc[iz]-1.0)) : 0.0f;
-                ik_zc[iz] = (float)(1.0/kap);
-            }
-            for (iz=(mod.ieXz<n1?mod.ieXz:n1); iz<(mod.ieXz+npml<n1?mod.ieXz+npml:n1); iz++) {
-                xi_val = ((double)(iz - mod.ieXz) + 0.5) / (double)npml;
-                if (xi_val > 1.0) xi_val = 1.0;
-                if (xi_val < 0.0) xi_val = 0.0;
-                sig = sigma_max_cpml * pow(xi_val, m_cpml);
-                kap = 1.0 + (kmax-1.0) * pow(xi_val, m_cpml);
-                alp = amax * (1.0 - xi_val);
-                sak = sig + kap*alp;
-                b_zf[iz] = (float)exp(-(sig/kap + alp)*mod.dt);
-                c_zf[iz] = (sak > 1e-30) ? (float)(sig/(kap*sak)*(b_zf[iz]-1.0)) : 0.0f;
-                ik_zf[iz] = (float)(1.0/kap);
-            }
-        }
-        if (verbose>=4) vmess("CFS-CPML boundV: sigma_max=%e cp_min=%e npml=%d", sigma_max_cpml, mod.cp_min, npml);
+        if (verbose>=4) vmess("CFS-CPML boundV: cp_min=%e npml=%d kmax=%e amax=%e",
+                              mod.cp_min, npml, bnd.kmax, bnd.amax);
 }
     }
 
@@ -1542,11 +1429,17 @@ int boundariesV(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 #pragma omp barrier
         }
 
-        /* unified-mask CPML update for pressure on P-grid */
-        int zmin = ((mod.ioPz-npml)>0?(mod.ioPz-npml):mod.ioPz);
-        int zmax = ((mod.iePz+npml)<n1?(mod.iePz+npml):mod.iePz);
+        /* unified-mask CPML update for pressure on P-grid.
+         * ioPx_a..iePz_a are the fdelmodc-equivalent (pad-excluded) stress
+         * limits; see the translation comment in the coefficient setup above. */
+        int ioPx_a = mod.ioPx + (bnd.lef==2 ? npml : 0);
+        int iePx_a = mod.iePx - (bnd.rig==2 ? npml : 0);
+        int ioPz_a = mod.ioPz + (bnd.top==2 ? npml : 0);
+        int iePz_a = mod.iePz - (bnd.bot==2 ? npml : 0);
+        int zmin = ((ioPz_a-npml)>0?(ioPz_a-npml):ioPz_a);
+        int zmax = ((iePz_a+npml)<n1?(iePz_a+npml):iePz_a);
         if (has_lef_pml) {
-            for (ix=mod.ioPx-npml; ix<mod.ioPx; ix++) {
+            for (ix=ioPx_a-npml; ix<ioPx_a; ix++) {
                 for (iz=zmin; iz<zmax; iz++) {
                     dvx = c1*(vx[(ix+1)*n1+iz] - vx[ix*n1+iz]) +
                           c2*(vx[(ix+2)*n1+iz] - vx[(ix-1)*n1+iz]);
@@ -1561,7 +1454,7 @@ int boundariesV(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
             }
         }
         if (has_rig_pml) {
-            for (ix=mod.iePx; ix<mod.iePx+npml; ix++) {
+            for (ix=iePx_a; ix<iePx_a+npml; ix++) {
                 for (iz=zmin; iz<zmax; iz++) {
                     dvx = c1*(vx[(ix+1)*n1+iz] - vx[ix*n1+iz]) +
                           c2*(vx[(ix+2)*n1+iz] - vx[(ix-1)*n1+iz]);
@@ -1576,8 +1469,8 @@ int boundariesV(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
             }
         }
         if (has_top_pml) {
-            for (ix=mod.ioPx; ix<mod.iePx; ix++) {
-                for (iz=mod.ioPz-npml; iz<mod.ioPz; iz++) {
+            for (ix=ioPx_a; ix<iePx_a; ix++) {
+                for (iz=ioPz_a-npml; iz<ioPz_a; iz++) {
                     dvx = c1*(vx[(ix+1)*n1+iz] - vx[ix*n1+iz]) +
                           c2*(vx[(ix+2)*n1+iz] - vx[(ix-1)*n1+iz]);
                     dvz = c1*(vz[ix*n1+iz+1]   - vz[ix*n1+iz]) +
@@ -1591,8 +1484,8 @@ int boundariesV(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
             }
         }
         if (has_bot_pml) {
-            for (ix=mod.ioPx; ix<mod.iePx; ix++) {
-                for (iz=mod.iePz; iz<mod.iePz+npml; iz++) {
+            for (ix=ioPx_a; ix<iePx_a; ix++) {
+                for (iz=iePz_a; iz<iePz_a+npml; iz++) {
                     dvx = c1*(vx[(ix+1)*n1+iz] - vx[ix*n1+iz]) +
                           c2*(vx[(ix+2)*n1+iz] - vx[(ix-1)*n1+iz]);
                     dvz = c1*(vz[ix*n1+iz+1]   - vz[ix*n1+iz]) +
@@ -1608,9 +1501,189 @@ int boundariesV(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 
     } /* end acoustic CFS-CPML */
 
+    if (mod.ischeme == 3 && pml) { /* Elastic CFS-CPML: direct full stress update for PML cells.
+         * elastic4 skips PML cells, so txx/tzz/txz there still hold the previous
+         * timestep value and the CPML update is applied directly here.
+         *
+         * Ported verbatim from fdelmodc/boundaries.c:1595-1769 (modPar and bndPar
+         * are byte-identical between fdelmodc.h and fdelfwi.h, so the physics code
+         * transfers unchanged). The ONLY edit is the index convention: fdelmodc
+         * shifts ioPx/ioPz/ioTx/ioTz by npml in getParameters.c and fdelfwi does
+         * not, so the pad-excluded equivalents are recomputed here as *_e. The
+         * velocity ranges ioXx/ieXx/ioXz/ieXz are already identical in both codes
+         * and are used as-is. Keep this block diffable against fdelmodc. */
+        int ioPx_e = mod.ioPx + (bnd.lef==2 ? npml : 0);
+        int iePx_e = mod.iePx - (bnd.rig==2 ? npml : 0);
+        int ioPz_e = mod.ioPz + (bnd.top==2 ? npml : 0);
+        int iePz_e = mod.iePz - (bnd.bot==2 ? npml : 0);
+        int ioTx_e = mod.ioTx + (bnd.lef==2 ? npml : 0);
+        int ieTx_e = mod.ieTx - (bnd.rig==2 ? npml : 0);
+        int ioTz_e = mod.ioTz + (bnd.top==2 ? npml : 0);
+        int ieTz_e = mod.ieTz - (bnd.bot==2 ? npml : 0);
+        int ize_pml, zmin, zmax;
 
-	
-/****************************************************************/	
+        if (itime == 0) {
+#pragma omp master
+{
+            memset(psi_p_x,   0, (size_t)n2*n1*sizeof(float));
+            memset(psi_p_z,   0, (size_t)n2*n1*sizeof(float));
+            memset(psi_txz_x, 0, (size_t)n2*n1*sizeof(float));
+            memset(psi_txz_z, 0, (size_t)n2*n1*sizeof(float));
+}
+#pragma omp barrier
+        }
+
+        /* Direct CPML update for txx/tzz on P-grid PML cells. The loop must cover
+         * the full PML extent including the right and bottom zones, which lie
+         * beyond iePx_e/iePz_e (those are the interior limits). */
+        ize_pml = bnd.bot==2 ? (mod.ieXz+npml<n1 ? mod.ieXz+npml : n1) : iePz_e;
+        zmin    = has_top_pml ? ioPz_e-npml : mod.ioXz;
+        zmax    = has_bot_pml ? ize_pml     : mod.ieXz;
+
+        if (has_lef_pml) {
+#pragma omp for private(ix, iz, dvx, dvz) schedule(static)
+            for (ix=ioPx_e-npml; ix<mod.ioXx; ix++) {
+                for (iz=zmin; iz<zmax; iz++) {
+                    dvx = c1*(vx[(ix+1)*n1+iz] - vx[ix*n1+iz]) +
+                          c2*(vx[(ix+2)*n1+iz] - vx[(ix-1)*n1+iz]);
+                    dvz = c1*(vz[ix*n1+iz+1]   - vz[ix*n1+iz]) +
+                          c2*(vz[ix*n1+iz+2]   - vz[ix*n1+iz-1]);
+                    psi_p_x[ix*n1+iz] = b_xc[ix]*psi_p_x[ix*n1+iz] + c_xc[ix]*dvx;
+                    dvx = ik_xc[ix]*dvx + psi_p_x[ix*n1+iz];
+                    psi_p_z[ix*n1+iz] = b_zc[iz]*psi_p_z[ix*n1+iz] + c_zc[iz]*dvz;
+                    dvz = ik_zc[iz]*dvz + psi_p_z[ix*n1+iz];
+                    txx[ix*n1+iz] -= l2m[ix*n1+iz]*dvx + lam[ix*n1+iz]*dvz;
+                    tzz[ix*n1+iz] -= l2m[ix*n1+iz]*dvz + lam[ix*n1+iz]*dvx;
+                }
+            }
+        }
+        if (has_rig_pml) {
+#pragma omp for private(ix, iz, dvx, dvz) schedule(static)
+            for (ix=mod.ieXx; ix<mod.ieXx+npml; ix++) {
+                for (iz=zmin; iz<zmax; iz++) {
+                    dvx = c1*(vx[(ix+1)*n1+iz] - vx[ix*n1+iz]) +
+                          c2*(vx[(ix+2)*n1+iz] - vx[(ix-1)*n1+iz]);
+                    dvz = c1*(vz[ix*n1+iz+1]   - vz[ix*n1+iz]) +
+                          c2*(vz[ix*n1+iz+2]   - vz[ix*n1+iz-1]);
+                    psi_p_x[ix*n1+iz] = b_xc[ix]*psi_p_x[ix*n1+iz] + c_xc[ix]*dvx;
+                    dvx = ik_xc[ix]*dvx + psi_p_x[ix*n1+iz];
+                    psi_p_z[ix*n1+iz] = b_zc[iz]*psi_p_z[ix*n1+iz] + c_zc[iz]*dvz;
+                    dvz = ik_zc[iz]*dvz + psi_p_z[ix*n1+iz];
+                    txx[ix*n1+iz] -= l2m[ix*n1+iz]*dvx + lam[ix*n1+iz]*dvz;
+                    tzz[ix*n1+iz] -= l2m[ix*n1+iz]*dvz + lam[ix*n1+iz]*dvx;
+                }
+            }
+        }
+        if (has_top_pml) {
+#pragma omp for private(ix, iz, dvx, dvz) schedule(static)
+            for (ix=mod.ioXx; ix<mod.ieXx; ix++) {
+                for (iz=ioPz_e-npml; iz<mod.ioXz; iz++) {
+                    dvx = c1*(vx[(ix+1)*n1+iz] - vx[ix*n1+iz]) +
+                          c2*(vx[(ix+2)*n1+iz] - vx[(ix-1)*n1+iz]);
+                    dvz = c1*(vz[ix*n1+iz+1]   - vz[ix*n1+iz]) +
+                          c2*(vz[ix*n1+iz+2]   - vz[ix*n1+iz-1]);
+                    psi_p_x[ix*n1+iz] = b_xc[ix]*psi_p_x[ix*n1+iz] + c_xc[ix]*dvx;
+                    dvx = ik_xc[ix]*dvx + psi_p_x[ix*n1+iz];
+                    psi_p_z[ix*n1+iz] = b_zc[iz]*psi_p_z[ix*n1+iz] + c_zc[iz]*dvz;
+                    dvz = ik_zc[iz]*dvz + psi_p_z[ix*n1+iz];
+                    txx[ix*n1+iz] -= l2m[ix*n1+iz]*dvx + lam[ix*n1+iz]*dvz;
+                    tzz[ix*n1+iz] -= l2m[ix*n1+iz]*dvz + lam[ix*n1+iz]*dvx;
+                }
+            }
+        }
+        if (has_bot_pml) {
+#pragma omp for private(ix, iz, dvx, dvz) schedule(static)
+            for (ix=mod.ioXx; ix<mod.ieXx; ix++) {
+                for (iz=iePz_e; iz<mod.ieXz+npml; iz++) {
+                    dvx = c1*(vx[(ix+1)*n1+iz] - vx[ix*n1+iz]) +
+                          c2*(vx[(ix+2)*n1+iz] - vx[(ix-1)*n1+iz]);
+                    dvz = c1*(vz[ix*n1+iz+1]   - vz[ix*n1+iz]) +
+                          c2*(vz[ix*n1+iz+2]   - vz[ix*n1+iz-1]);
+                    psi_p_x[ix*n1+iz] = b_xc[ix]*psi_p_x[ix*n1+iz] + c_xc[ix]*dvx;
+                    dvx = ik_xc[ix]*dvx + psi_p_x[ix*n1+iz];
+                    psi_p_z[ix*n1+iz] = b_zc[iz]*psi_p_z[ix*n1+iz] + c_zc[iz]*dvz;
+                    dvz = ik_zc[iz]*dvz + psi_p_z[ix*n1+iz];
+                    txx[ix*n1+iz] -= l2m[ix*n1+iz]*dvx + lam[ix*n1+iz]*dvz;
+                    tzz[ix*n1+iz] -= l2m[ix*n1+iz]*dvz + lam[ix*n1+iz]*dvx;
+                }
+            }
+        }
+
+        /* Direct CPML update for txz on T-grid PML cells */
+        ize_pml = bnd.bot==2 ? (mod.ieXz+npml<n1 ? mod.ieXz+npml : n1) : ieTz_e;
+        zmin    = has_top_pml ? ioTz_e-npml : mod.ioXz;
+        zmax    = has_bot_pml ? ize_pml     : mod.ieXz;
+
+        if (has_lef_pml) {
+#pragma omp for private(ix, iz, dvx, dvz) schedule(static)
+            for (ix=ioTx_e-npml; ix<ioTx_e; ix++) {
+                for (iz=zmin; iz<zmax; iz++) {
+                    /* txz stencil: dvz/dx uses vz[ix..ix-1], dvx/dz uses vx[iz..iz-1] */
+                    dvz = c1*(vz[ix*n1+iz]     - vz[(ix-1)*n1+iz]) +
+                          c2*(vz[(ix+1)*n1+iz] - vz[(ix-2)*n1+iz]);
+                    dvx = c1*(vx[ix*n1+iz]   - vx[ix*n1+iz-1]) +
+                          c2*(vx[ix*n1+iz+1] - vx[ix*n1+iz-2]);
+                    psi_txz_x[ix*n1+iz] = b_xf[ix]*psi_txz_x[ix*n1+iz] + c_xf[ix]*dvz;
+                    dvz = ik_xf[ix]*dvz + psi_txz_x[ix*n1+iz];
+                    psi_txz_z[ix*n1+iz] = b_zf[iz]*psi_txz_z[ix*n1+iz] + c_zf[iz]*dvx;
+                    dvx = ik_zf[iz]*dvx + psi_txz_z[ix*n1+iz];
+                    txz[ix*n1+iz] -= mul[ix*n1+iz]*(dvx + dvz);
+                }
+            }
+        }
+        if (has_rig_pml) {
+#pragma omp for private(ix, iz, dvx, dvz) schedule(static)
+            for (ix=ieTx_e; ix<mod.ieXx+npml; ix++) {
+                for (iz=zmin; iz<zmax; iz++) {
+                    dvz = c1*(vz[ix*n1+iz]     - vz[(ix-1)*n1+iz]) +
+                          c2*(vz[(ix+1)*n1+iz] - vz[(ix-2)*n1+iz]);
+                    dvx = c1*(vx[ix*n1+iz]   - vx[ix*n1+iz-1]) +
+                          c2*(vx[ix*n1+iz+1] - vx[ix*n1+iz-2]);
+                    psi_txz_x[ix*n1+iz] = b_xf[ix]*psi_txz_x[ix*n1+iz] + c_xf[ix]*dvz;
+                    dvz = ik_xf[ix]*dvz + psi_txz_x[ix*n1+iz];
+                    psi_txz_z[ix*n1+iz] = b_zf[iz]*psi_txz_z[ix*n1+iz] + c_zf[iz]*dvx;
+                    dvx = ik_zf[iz]*dvx + psi_txz_z[ix*n1+iz];
+                    txz[ix*n1+iz] -= mul[ix*n1+iz]*(dvx + dvz);
+                }
+            }
+        }
+        if (has_top_pml) {
+#pragma omp for private(ix, iz, dvx, dvz) schedule(static)
+            for (ix=ioTx_e; ix<ieTx_e; ix++) {
+                for (iz=ioTz_e-npml; iz<mod.ioXz; iz++) {
+                    dvz = c1*(vz[ix*n1+iz]     - vz[(ix-1)*n1+iz]) +
+                          c2*(vz[(ix+1)*n1+iz] - vz[(ix-2)*n1+iz]);
+                    dvx = c1*(vx[ix*n1+iz]   - vx[ix*n1+iz-1]) +
+                          c2*(vx[ix*n1+iz+1] - vx[ix*n1+iz-2]);
+                    psi_txz_x[ix*n1+iz] = b_xf[ix]*psi_txz_x[ix*n1+iz] + c_xf[ix]*dvz;
+                    dvz = ik_xf[ix]*dvz + psi_txz_x[ix*n1+iz];
+                    psi_txz_z[ix*n1+iz] = b_zf[iz]*psi_txz_z[ix*n1+iz] + c_zf[iz]*dvx;
+                    dvx = ik_zf[iz]*dvx + psi_txz_z[ix*n1+iz];
+                    txz[ix*n1+iz] -= mul[ix*n1+iz]*(dvx + dvz);
+                }
+            }
+        }
+        if (has_bot_pml) {
+#pragma omp for private(ix, iz, dvx, dvz) schedule(static)
+            for (ix=ioTx_e; ix<ieTx_e; ix++) {
+                for (iz=mod.ieXz; iz<mod.ieXz+npml; iz++) {
+                    dvz = c1*(vz[ix*n1+iz]     - vz[(ix-1)*n1+iz]) +
+                          c2*(vz[(ix+1)*n1+iz] - vz[(ix-2)*n1+iz]);
+                    dvx = c1*(vx[ix*n1+iz]   - vx[ix*n1+iz-1]) +
+                          c2*(vx[ix*n1+iz+1] - vx[ix*n1+iz-2]);
+                    psi_txz_x[ix*n1+iz] = b_xf[ix]*psi_txz_x[ix*n1+iz] + c_xf[ix]*dvz;
+                    dvz = ik_xf[ix]*dvz + psi_txz_x[ix*n1+iz];
+                    psi_txz_z[ix*n1+iz] = b_zf[iz]*psi_txz_z[ix*n1+iz] + c_zf[iz]*dvx;
+                    dvx = ik_zf[iz]*dvx + psi_txz_z[ix*n1+iz];
+                    txz[ix*n1+iz] -= mul[ix*n1+iz]*(dvx + dvz);
+                }
+            }
+        }
+
+    } /* end elastic CFS-CPML */
+
+
+/****************************************************************/
 /* Free surface: calculate free surface conditions for stresses */
 /****************************************************************/
 
@@ -1862,10 +1935,8 @@ int boundariesV(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 #pragma omp master
 {
 		if (allocated) {
-            if (psi_p_x)   { free(psi_p_x);   psi_p_x   = NULL; }
-            if (psi_p_z)   { free(psi_p_z);   psi_p_z   = NULL; }
-            if (psi_txz_x) { free(psi_txz_x); psi_txz_x = NULL; }
-            if (psi_txz_z) { free(psi_txz_z); psi_txz_z = NULL; }
+            /* Drop the references but do NOT free -- see boundariesP. */
+            psi_p_x = psi_p_z = psi_txz_x = psi_txz_z = NULL;
             if (b_xc)  { free(b_xc);  b_xc  = NULL; }
             if (c_xc)  { free(c_xc);  c_xc  = NULL; }
             if (ik_xc) { free(ik_xc); ik_xc = NULL; }

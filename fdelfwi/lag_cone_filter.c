@@ -149,13 +149,17 @@ float lagConeAngleToSlope(float theta_deg, float v)
 
 
 /***********************************************************************
- * lagTaper1d -- Raised-cosine taper over the outer `frac` of each end.
+ * lagConeTaper1d -- Raised-cosine taper over the outer `frac` of each end.
  *
  * frac = 0 gives a box, frac = 0.5 a full Hann.  Matches
  * lag_slope_filter.py:taper1d sample for sample, including the half-sample
  * offset that keeps the taper strictly inside (0,1).
+ *
+ * NOT static: lag_cone_pspi.c must taper identically, and one definition is
+ * the only way to guarantee that the PSPI path and the stationary path can be
+ * compared sample for sample.
  ***********************************************************************/
-static void lagTaper1d(float *w, int n, float frac)
+void lagConeTaper1d(float *w, int n, float frac)
 {
 	int i, k;
 
@@ -186,6 +190,9 @@ void lagConeDefaults(lagConePar *p)
 	p->tap_z    = 0.10f;
 	p->pad      = 2;
 	p->nu0_keep = 0;
+	p->theta_pass = 0.0f;   /* unset; only lag_cone_pspi.c reads these */
+	p->theta_stop = 0.0f;
+	p->nv         = 1;      /* 1 = stationary, the shipped behaviour   */
 }
 
 
@@ -236,9 +243,9 @@ void lagConeFilter(const float *cube, int nlag, int nx, int nz,
 	wx = (float *)malloc((size_t)nx   * sizeof(float));
 	wz = (float *)malloc((size_t)nz   * sizeof(float));
 	if (!wt || !wx || !wz) verr("lagConeFilter: cannot allocate tapers.");
-	lagTaper1d(wt, nlag, p->tap_tau);
-	lagTaper1d(wx, nx,   p->tap_x);
-	lagTaper1d(wz, nz,   p->tap_z);
+	lagConeTaper1d(wt, nlag, p->tap_tau);
+	lagConeTaper1d(wx, nx,   p->tap_x);
+	lagConeTaper1d(wz, nz,   p->tap_z);
 
 	tap = (tapered != NULL) ? tapered
 	                        : (float *)malloc(ncube * sizeof(float));

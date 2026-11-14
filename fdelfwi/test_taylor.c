@@ -15,6 +15,7 @@
  *   chk_base=     checkpoint file base path (chk_taylor)
  *   pert_pct=     model perturbation amplitude fraction (0.01)
  *   seed=         random number seed (12345)
+ *   smooth_dm=    band-limit dm, smoothing half-width in grid points (0=off)
  *   comp=_rvz     component suffix for recording
  *   test_param=0  parameter to test (0=all, 1=Vp, 2=Vs, 3=rho, 4=rho_Lame)
  *   neps=10       number of epsilon values
@@ -90,6 +91,7 @@ char *sdoc[] = {
 "   chk_base=     checkpoint file base path (chk_taylor)",
 "   pert_pct=     model perturbation amplitude fraction (0.01)",
 "   seed=         random number seed (12345)",
+"   smooth_dm=    band-limit dm, smoothing half-width in grid points (0=off)",
 "   comp=_rvz     component suffix for recording",
 "   test_param=0  parameter to test (0=all, 1=Vp, 2=Vs, 3=rho)",
 "   neps=10       number of epsilon values",
@@ -123,7 +125,7 @@ int main(int argc, char **argv)
 
 	/* Test parameters */
 	char  *chk_base, *comp_str, *file_obs;
-	int    chk_skipdt, seed, test_param, neps;
+	int    chk_skipdt, seed, test_param, neps, smooth_dm;
 	float  pert_pct, eps_min_f, eps_max_f;
 	double eps_min, eps_max;
 	float *grad_vp, *grad_vs, *grad_rho;
@@ -158,6 +160,7 @@ int main(int argc, char **argv)
 	if (!getparstring("chk_base", &chk_base)) chk_base = "chk_taylor";
 	if (!getparint("seed", &seed)) seed = 12345;
 	if (!getparfloat("pert_pct", &pert_pct)) pert_pct = 0.01f;
+	if (!getparint("smooth_dm", &smooth_dm)) smooth_dm = 0;
 	if (!getparstring("comp", &comp_str)) comp_str = "_rvz";
 	if (!getparint("test_param", &test_param)) test_param = 0;
 	if (!getparint("neps", &neps)) neps = 10;
@@ -400,6 +403,37 @@ int main(int argc, char **argv)
 				delta_cs[idx] = pert_pct * cs0 * (float)(drand48() * 2.0 - 1.0);
 				delta_ro[idx] = pert_pct * ro0 * (float)(drand48() * 2.0 - 1.0);
 			}
+		}
+
+		/* Band-limit dm.  Grid-scale white noise is the worst possible
+		 * Taylor direction: it scatters hard, so the quadratic term
+		 * 0.5*eps^2*|J dm|^2 is large, and it is near-orthogonal to the
+		 * smooth gradient, so the linear term eps*<g,dm> is only a
+		 * sqrt(N) random-sign sum.  With both working against us the
+		 * quadratic term still dominates at the eps where dphi hits the
+		 * float32 noise floor of the .su residual, leaving no eps at
+		 * which the test can confirm (or refute) the gradient.
+		 * Smoothing shrinks |J dm|^2 far faster than <g,dm>.
+		 * Must run BEFORE the margin/source zeroing below, or smoothing
+		 * would spread nonzero values back into the zeroed region. */
+		if (smooth_dm > 0) {
+			float *dm_all[3];
+			int    k;
+			dm_all[0] = delta_cp; dm_all[1] = delta_cs; dm_all[2] = delta_ro;
+			for (k = 0; k < 3; k++) {
+				double r0 = 0.0, r1 = 0.0;
+				size_t i, n = (size_t)mod.nx * mod.nz;
+				for (i = 0; i < n; i++) r0 += (double)dm_all[k][i] * dm_all[k][i];
+				smooth2d(dm_all[k], mod.nx, mod.nz, smooth_dm, smooth_dm);
+				for (i = 0; i < n; i++) r1 += (double)dm_all[k][i] * dm_all[k][i];
+				/* Restore the pre-smoothing RMS so pert_pct keeps meaning
+				 * the same thing it did before this option existed. */
+				if (r1 > 0.0) {
+					float s = (float)sqrt(r0 / r1);
+					for (i = 0; i < n; i++) dm_all[k][i] *= s;
+				}
+			}
+			vmess("Smoothed dm with half-width %d (RMS restored)", smooth_dm);
 		}
 
 		/* Zero out perturbations based on test_param */

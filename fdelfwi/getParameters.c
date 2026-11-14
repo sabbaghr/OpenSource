@@ -349,6 +349,8 @@ int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav, srcPar *sr
 	if (!bnd->ntap) if (!getparint("npml",&bnd->ntap)) bnd->ntap=3*NINT((cp_max/wav->fmax)/dx);
 	if (!getparfloat("R",&bnd->R)) bnd->R=1e-5;
 	if (!getparfloat("m",&bnd->m)) bnd->m=2.0;
+	if (!getparfloat("amax",&bnd->amax)) bnd->amax=M_PI*fmax*0.2;
+	if (!getparfloat("kmax",&bnd->kmax)) bnd->kmax=5.0;
 	bnd->npml=bnd->ntap;
 	
 /*

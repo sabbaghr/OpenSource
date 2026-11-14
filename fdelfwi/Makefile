@@ -38,6 +38,9 @@ test_recop_dp: $(PRG14)
 test_lag_gradient: $(PRG17)
 test_lag_cone: $(PRG18)
 test_space_lag_gradient: $(PRG19)
+test_cpml_dp: $(PRG21)
+test_fs_col: $(PRG22)
+test_petro: $(PRG20)
 
 PRG3 = fwi_driver
 PRG4 = fwi_mpi_driver
@@ -55,6 +58,9 @@ PRG16 = test_ei_modesep
 PRG17 = test_lag_gradient
 PRG18 = test_lag_cone
 PRG19 = test_space_lag_gradient
+PRG20 = test_petro
+PRG21 = test_cpml_dp
+PRG22 = test_fs_col
 
 # Alias must come AFTER PRG13 is defined: make expands prerequisites
 # immediately when the rule is read.
@@ -102,6 +108,7 @@ SRCC	= fdfwimodc.c \
 		lag_gradient.c  \
 		space_lag_gradient.c  \
 		lag_cone_filter.c  \
+		lag_cone_pspi.c  \
 		kh_misfit.c  \
 		aperture_taper.c  \
 		residual_taper.c  \
@@ -118,12 +125,16 @@ SRCC	= fdfwimodc.c \
 		toy2dac_scaling.c  \
 		source_estimation.c  \
 		regularization.c  \
+		petro_constraint.c  \
 		shin_precond_acoustic.c  \
 		bandpass_filter.c  \
 		sourceOnSurface.c  \
 		getWaveletHeaders.c  \
 		boundaries.c  \
 		boundaries_adj.c  \
+		cpml_coef.c  \
+		cpml_state.c  \
+		boundaries_cpml_adj.c  \
 		verbosepkg.c  \
 		writesufile.c  \
 		gaussGen.c  \
@@ -165,7 +176,7 @@ $(PRG6):	$(OBJC) fdelfwi.h
 	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG6) test_dotproduct.o $(OBJC) fileOpen.o writeRec.o $(LIBS)
 
 # Taylor gradient verification test
-$(PRG7):	$(OBJC) fdelfwi.h
+$(PRG7):	$(OBJC) fdelfwi.h test_taylor.c
 	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
 	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
 	$(CC) $(CFLAGS) $(OPTC) -c test_taylor.c
@@ -350,6 +361,42 @@ $(PRG19):	$(OBJC) fdelfwi.h test_space_lag_gradient.c
 	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG19) test_space_lag_gradient.o updateModel.o \
 		$(OBJC) fileOpen.o writeRec.o $(LIBS)
 
+# test_petro -- J_P is a pure model-domain functional, so it is checked
+# with no wave equation at all and runs in well under a second.  Worth
+# having standalone because inside fwi_inversion J_P is buried under
+# scaling, masking and a chain rule, where a sign or exponent error would
+# surface only as an unexplained linesearch failure.  Returns non-zero on
+# failure, so this target is usable as a regression test.
+$(PRG20):	$(OBJC) fdelfwi.h test_petro.c
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -c test_petro.c
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG20) test_petro.o \
+		$(OBJC) fileOpen.o writeRec.o $(LIBS)
+
+# Bare-propagator dot product test: <F^N S0, R> = <S0, (F^T)^N R> over the
+# full padded wavefield, with no source and no receivers.  This is the test
+# that isolates the boundary transpose -- CFS-CPML in particular -- from the
+# source injection and receiver registration that test_wave_op_dp also
+# exercises.  Returns non-zero on failure.
+$(PRG21):	$(OBJC) fdelfwi.h test_cpml_dp.c
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -c test_cpml_dp.c
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG21) test_cpml_dp.o \
+		$(OBJC) fileOpen.o writeRec.o $(LIBS)
+
+# Brute-force extraction of ONE column of F^T at a free-surface txx slot,
+# compared entry by entry against the adjoint the code computes.  A dot
+# product returns a single scalar and can only say "wrong"; this names the
+# exact (component, ix, iz) entry that is wrong.
+$(PRG22):	$(OBJC) fdelfwi.h test_fs_col.c
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -c test_fs_col.c
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG22) test_fs_col.o \
+		$(OBJC) fileOpen.o writeRec.o $(LIBS)
+
 install: $(PRG8) $(PRG9)
 	cp $(PRG8) $B
 	cp $(PRG9) $B
@@ -363,8 +410,9 @@ clean:
 			test_wave_op_dp.o test_dotproduct.o test_taylor.o test_hessian_dp.o \
 			test_gradient_visual.o fdelfwi_fwd.o test_recop_dp.o \
 			test_ei_planewave.o test_ei_modesep.o test_lag_gradient.o \
-			test_space_lag_gradient.o \
-			$(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7) $(PRG8) $(PRG9) $(PRG10) $(PRG12) $(PRG13) $(PRG14) $(PRG15) $(PRG16) $(PRG17) $(PRG19) \
+			test_space_lag_gradient.o test_petro.o test_cpml_dp.o \
+			test_fs_col.o \
+			$(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7) $(PRG8) $(PRG9) $(PRG10) $(PRG12) $(PRG13) $(PRG14) $(PRG15) $(PRG16) $(PRG17) $(PRG19) $(PRG20) $(PRG21) $(PRG22) \
 			fwi_gpu_inversion fwi_mpi_gpu_inversion
 
 realclean:
