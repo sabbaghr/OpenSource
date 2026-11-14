@@ -414,11 +414,16 @@ int main(int argc, char **argv)
 	{ void *_hp = malloc(64); if (_hp) { memset(_hp, 0, 64); free(_hp); }
 	  vmess("  [heap check OK after hess_shot dm1]"); }
 
-	/* Extract H*dm1 to flat vector.
-	 * Use param=1 (Lame) because adj_shot with param=1 accumulates
-	 * in Lame space without chain rule conversion. */
+	/* Extract H*dm1 to a flat vector IN THE SAME SPACE AS dm.
+	 *
+	 * hess_shot was called with param=1 so that adj_shot accumulates in
+	 * Lame without any chain rule (applying it per shot and again here
+	 * would convert twice -- the bug already fixed in fwi_inversion.c).
+	 * The single conversion belongs here, and it must happen: dm lives in
+	 * the user's parameterization, so Hd must too or the dot product
+	 * below mixes spaces.  See the derivation at Step 5. */
 	float *Hd1 = (float *)calloc(nvec, sizeof(float));
-	extractGradientVector(Hd1, hd1_g1, hd1_g2, hd1_g3, &mod, &bnd, 1);
+	extractGradientVector(Hd1, hd1_g1, hd1_g2, hd1_g3, &mod, &bnd, param);
 
 	{
 		double norm_Hd1 = 0.0;
@@ -461,9 +466,9 @@ int main(int argc, char **argv)
 	{ void *_hp = malloc(64); if (_hp) { memset(_hp, 0, 64); free(_hp); }
 	  vmess("  [heap check OK after hess_shot dm2]"); }
 
-	/* Extract H*dm2 to flat vector */
+	/* Extract H*dm2 to flat vector -- same space as dm, see Hd1 above */
 	float *Hd2 = (float *)calloc(nvec, sizeof(float));
-	extractGradientVector(Hd2, hd2_g1, hd2_g2, hd2_g3, &mod, &bnd, 1);
+	extractGradientVector(Hd2, hd2_g1, hd2_g2, hd2_g3, &mod, &bnd, param);
 
 	{
 		double norm_Hd2 = 0.0;
@@ -488,30 +493,37 @@ int main(int argc, char **argv)
 	double dp1 = 0.0;  /* <H*dm1, dm2> */
 	double dp2 = 0.0;  /* <dm1, H*dm2> */
 
-	/* If param=2 (velocity), the perturbation dm is in velocity space
-	 * but H*dm is in Lame space. We need both in the same space.
-	 * Since we accumulated H*dm in Lame (param=1 to hess_shot/extract),
-	 * we need dm also in Lame space for the dot product.
+	/* WHY BOTH SIDES MUST BE IN THE USER'S PARAMETERIZATION.
 	 *
-	 * For param=1, dm is already in Lame space. For param=2, we need
-	 * to convert the flat dm to Lame using the chain rule. However,
-	 * the simplest approach for the symmetry test is to just use
-	 * param=1 throughout. If the user specifies param=2, the dm
-	 * vectors are in velocity space but perturbFDcoefficients already
-	 * handles the conversion to Lame FD coefficients internally.
-	 * The dot product test is valid in either space as long as both
-	 * dm and Hd are in the same space.
+	 * Write T for the chain rule dm_Lame/dm_user, built by
+	 * perturbFDcoefficients.  For param=2 it is upper triangular and
+	 * NOT symmetric:
 	 *
-	 * Since we call hess_shot and extract with param=1 (Lame), the
-	 * Hd vectors are in Lame space. If the user's dm is in velocity
-	 * space (param=2), we need to convert dm to Lame for the dot
-	 * product. For simplicity, we generate dm directly in the
-	 * parameterization specified, and perturbFDcoefficients handles
-	 * the conversion internally. But the dot product must be in
-	 * consistent space.
+	 *     [dlam]   [ 2rVp  -4rVs  Vp^2-2Vs^2 ] [dVp ]
+	 *     [dmu ] = [    0   2rVs  Vs^2       ] [dVs ]
+	 *     [drho]   [    0      0  1          ] [drho]
 	 *
-	 * SOLUTION: We always use param=1 for BOTH dm generation AND
-	 * Hd extraction. The test operates entirely in Lame space. */
+	 * born_shot therefore sees T*dm, and hess_shot (called with param=1)
+	 * returns J^T J T dm in Lame.  If Hd were extracted in Lame while dm
+	 * stayed in velocity, the two scores would be
+	 *
+	 *     <Hd1, dm2> = dm2^T (J^T J T) dm1
+	 *     <dm1, Hd2> = dm1^T (J^T J T) dm2
+	 *
+	 * and J^T J T is NOT symmetric, so they differ for any T != I.  That
+	 * is a bug in the TEST, not in the operator: it measured a mixed-space
+	 * quantity that has no reason to be symmetric, and it scored
+	 * 3.5e-01 even on the taper boundary with everything else correct.
+	 *
+	 * Extracting with the user's param applies T^T (convertGradientToVelocity
+	 * in fwi_gradient.c is the exact transpose of the matrix above), giving
+	 * H_user = T^T J^T J T, which IS symmetric.  This also makes the test
+	 * strictly stronger: it now verifies that perturbFDcoefficients and
+	 * convertGradientToVelocity really are a transpose pair, which nothing
+	 * else in the suite checks.
+	 *
+	 * Note the data-space diagnostic below is unaffected and still expects
+	 * +1.0, since <T^T J^T J T dm1, dm2> = <J T dm1, J T dm2> either way. */
 
 	/* Per-parameter dot product breakdown */
 	double dp1_lam = 0.0, dp1_mu = 0.0, dp1_rho = 0.0;
@@ -602,13 +614,18 @@ int main(int argc, char **argv)
 
 	printf("\n");
 	printf("=== HESSIAN SYMMETRY DOT PRODUCT TEST RESULTS ===\n");
+	/* Both dm and Hd now live in the user's parameterisation, so label the
+	 * slots accordingly: param=1 is Lame (lambda,mu,rho), param=2 is
+	 * velocity (vp,vs,rho). */
 	printf("  Per-parameter breakdown:\n");
-	printf("    lambda:  dp1=%+.6e  dp2=%+.6e  ratio=%.6f\n",
+	printf("    %-8s dp1=%+.6e  dp2=%+.6e  ratio=%.6f\n",
+	       (param == 2) ? "vp:" : "lambda:",
 	       dp1_lam, dp2_lam, dp2_lam != 0.0 ? dp1_lam/dp2_lam : 0.0);
 	if (elastic)
-		printf("    mu:      dp1=%+.6e  dp2=%+.6e  ratio=%.6f\n",
+		printf("    %-8s dp1=%+.6e  dp2=%+.6e  ratio=%.6f\n",
+		       (param == 2) ? "vs:" : "mu:",
 		       dp1_mu, dp2_mu, dp2_mu != 0.0 ? dp1_mu/dp2_mu : 0.0);
-	printf("    rho:     dp1=%+.6e  dp2=%+.6e  ratio=%.6f\n",
+	printf("    %-8s dp1=%+.6e  dp2=%+.6e  ratio=%.6f\n", "rho:",
 	       dp1_rho, dp2_rho, dp2_rho != 0.0 ? dp1_rho/dp2_rho : 0.0);
 	printf("  Total:\n");
 	printf("  <H*dm1, dm2> = %+.10e\n", dp1);

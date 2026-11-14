@@ -255,7 +255,7 @@ fwi_mpi_gpu_inversion:	$(OBJC) $(OPTIM_LIB) fdelfwi.h fdelfwi_gpu.h domain_decom
 		$(OBJC) fileOpen.o writeRec.o $(OPTIM_LIB) $(LIBS) $(CUDA_LIBS)
 
 # Hessian symmetry dot product test
-$(PRG10):	$(OBJC) fdelfwi.h
+$(PRG10):	$(OBJC) fdelfwi.h test_hessian_dp.c
 	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
 	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
 	$(CC) $(CFLAGS) $(OPTC) -c updateModel.c

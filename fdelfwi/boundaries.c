@@ -158,17 +158,42 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 /************************************************************/
 
     npml=bnd.npml; /* length of pml in grid-points */
-    if ( (npml != 0) && (allocated==0) && pml) {
+    if ( (npml != 0) && pml) {
 #pragma omp master
 {
-        if (b_xf) free(b_xf); if (c_xf) free(c_xf); if (ik_xf) free(ik_xf);
-        if (b_zf) free(b_zf); if (c_zf) free(c_zf); if (ik_zf) free(ik_zf);
+        if (allocated==0) {
+            if (b_xf) free(b_xf); if (c_xf) free(c_xf); if (ik_xf) free(ik_xf);
+            if (b_zf) free(b_zf); if (c_zf) free(c_zf); if (ik_zf) free(ik_zf);
 
-        /* psi is the FORWARD STATE and is owned by cpml_state.c, not by this
+            b_xf  = (float *)calloc(n2, sizeof(float));
+            c_xf  = (float *)calloc(n2, sizeof(float));
+            ik_xf = (float *)calloc(n2, sizeof(float));
+            b_zf  = (float *)calloc(n1, sizeof(float));
+            c_zf  = (float *)calloc(n1, sizeof(float));
+            ik_zf = (float *)calloc(n1, sizeof(float));
+            allocated = 1;
+
+            /* Face-staggered CFS-CPML profile. Shared with the adjoint via
+             * cpml_coef.c -- the discrete transpose is only a transpose if it
+             * uses bit-identical b/c/ik, so there must be ONE builder. */
+            cpmlCoefVel(mod, bnd, b_xf, c_xf, ik_xf, b_zf, c_zf, ik_zf);
+
+            if (verbose>=4) vmess("CFS-CPML boundP: cp_min=%e npml=%d kmax=%e amax=%e",
+                                  mod.cp_min, npml, bnd.kmax, bnd.amax);
+        }
+
+        /* psi is the WAVEFIELD STATE and is owned by cpml_state.c, not by this
          * function, so that checkpoint.c can save and restore it.  The call
          * is idempotent: it keeps the existing buffers when the grid size is
          * unchanged, which is what lets a restored checkpoint survive until
-         * the first time step of the reconstruction. */
+         * the first time step of the reconstruction.
+         *
+         * Re-bound on EVERY call, not just the first.  The coefficient arrays
+         * belong to the grid and never change, but psi belongs to a wavefield
+         * and the ACTIVE CONTEXT can change between calls -- born_shot drives
+         * two independent wavefields through this same function inside one
+         * time loop.  Caching the pointers across a cpmlStateSelect would
+         * hand the Born field the background field's PML memory. */
         {
             float **psi = cpmlStateAlloc((size_t)n2*n1);
             psi_vx_x = psi[CPML_PSI_VX_X];
@@ -176,21 +201,6 @@ int boundariesP(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
             psi_vx_z = psi[CPML_PSI_VX_Z];
             psi_vz_x = psi[CPML_PSI_VZ_X];
         }
-        b_xf  = (float *)calloc(n2, sizeof(float));
-        c_xf  = (float *)calloc(n2, sizeof(float));
-        ik_xf = (float *)calloc(n2, sizeof(float));
-        b_zf  = (float *)calloc(n1, sizeof(float));
-        c_zf  = (float *)calloc(n1, sizeof(float));
-        ik_zf = (float *)calloc(n1, sizeof(float));
-        allocated = 1;
-
-        /* Face-staggered CFS-CPML profile. Shared with the adjoint via
-         * cpml_coef.c -- the discrete transpose is only a transpose if it
-         * uses bit-identical b/c/ik, so there must be ONE builder. */
-        cpmlCoefVel(mod, bnd, b_xf, c_xf, ik_xf, b_zf, c_zf, ik_zf);
-
-        if (verbose>=4) vmess("CFS-CPML boundP: cp_min=%e npml=%d kmax=%e amax=%e",
-                              mod.cp_min, npml, bnd.kmax, bnd.amax);
 }
     }
 #pragma omp barrier
@@ -1371,16 +1381,43 @@ int boundariesV(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
 /************************************************************/
 
     npml=bnd.npml; /* length of pml in grid-points */
-    if ( (npml != 0) && (allocated==0) && pml) {
+    if ( (npml != 0) && pml) {
 #pragma omp master
 {
-        if (b_xc) free(b_xc); if (c_xc) free(c_xc); if (ik_xc) free(ik_xc);
-        if (b_zc) free(b_zc); if (c_zc) free(c_zc); if (ik_zc) free(ik_zc);
-        if (b_xf) free(b_xf); if (c_xf) free(c_xf); if (ik_xf) free(ik_xf);
-        if (b_zf) free(b_zf); if (c_zf) free(c_zf); if (ik_zf) free(ik_zf);
+        if (allocated==0) {
+            if (b_xc) free(b_xc); if (c_xc) free(c_xc); if (ik_xc) free(ik_xc);
+            if (b_zc) free(b_zc); if (c_zc) free(c_zc); if (ik_zc) free(ik_zc);
+            if (b_xf) free(b_xf); if (c_xf) free(c_xf); if (ik_xf) free(ik_xf);
+            if (b_zf) free(b_zf); if (c_zf) free(c_zf); if (ik_zf) free(ik_zf);
+
+            b_xc  = (float *)calloc(n2, sizeof(float));
+            c_xc  = (float *)calloc(n2, sizeof(float));
+            ik_xc = (float *)calloc(n2, sizeof(float));
+            b_zc  = (float *)calloc(n1, sizeof(float));
+            c_zc  = (float *)calloc(n1, sizeof(float));
+            ik_zc = (float *)calloc(n1, sizeof(float));
+            b_xf  = (float *)calloc(n2, sizeof(float));
+            c_xf  = (float *)calloc(n2, sizeof(float));
+            ik_xf = (float *)calloc(n2, sizeof(float));
+            b_zf  = (float *)calloc(n1, sizeof(float));
+            c_zf  = (float *)calloc(n1, sizeof(float));
+            ik_zf = (float *)calloc(n1, sizeof(float));
+            allocated = 1;
+
+            /* Cell-centred (txx/tzz) and face-staggered (txz) CFS-CPML profiles.
+             * Shared with the adjoint via cpml_coef.c. NOTE the face set built
+             * here is NOT the one cpmlCoefVel builds -- the stress update samples
+             * xi half a cell off. See cpml_coef.c for why that matters. */
+            cpmlCoefStr(mod, bnd, b_xc, c_xc, ik_xc, b_zc, c_zc, ik_zc,
+                                  b_xf, c_xf, ik_xf, b_zf, c_zf, ik_zf);
+
+            if (verbose>=4) vmess("CFS-CPML boundV: cp_min=%e npml=%d kmax=%e amax=%e",
+                                  mod.cp_min, npml, bnd.kmax, bnd.amax);
+        }
 
         /* psi is owned by cpml_state.c -- see the matching block in
-         * boundariesP.  Same buffers, different four slots. */
+         * boundariesP, including why this is re-bound on every call and not
+         * only when allocated==0.  Same buffers, different four slots. */
         {
             float **psi = cpmlStateAlloc((size_t)n2*n1);
             psi_p_x   = psi[CPML_PSI_P_X];
@@ -1388,29 +1425,6 @@ int boundariesV(modPar mod, bndPar bnd, float *vx, float *vz, float *tzz, float 
             psi_txz_x = psi[CPML_PSI_TXZ_X];
             psi_txz_z = psi[CPML_PSI_TXZ_Z];
         }
-        b_xc  = (float *)calloc(n2, sizeof(float));
-        c_xc  = (float *)calloc(n2, sizeof(float));
-        ik_xc = (float *)calloc(n2, sizeof(float));
-        b_zc  = (float *)calloc(n1, sizeof(float));
-        c_zc  = (float *)calloc(n1, sizeof(float));
-        ik_zc = (float *)calloc(n1, sizeof(float));
-        b_xf  = (float *)calloc(n2, sizeof(float));
-        c_xf  = (float *)calloc(n2, sizeof(float));
-        ik_xf = (float *)calloc(n2, sizeof(float));
-        b_zf  = (float *)calloc(n1, sizeof(float));
-        c_zf  = (float *)calloc(n1, sizeof(float));
-        ik_zf = (float *)calloc(n1, sizeof(float));
-        allocated = 1;
-
-        /* Cell-centred (txx/tzz) and face-staggered (txz) CFS-CPML profiles.
-         * Shared with the adjoint via cpml_coef.c. NOTE the face set built
-         * here is NOT the one cpmlCoefVel builds -- the stress update samples
-         * xi half a cell off. See cpml_coef.c for why that matters. */
-        cpmlCoefStr(mod, bnd, b_xc, c_xc, ik_xc, b_zc, c_zc, ik_zc,
-                              b_xf, c_xf, ik_xf, b_zf, c_zf, ik_zf);
-
-        if (verbose>=4) vmess("CFS-CPML boundV: cp_min=%e npml=%d kmax=%e amax=%e",
-                              mod.cp_min, npml, bnd.kmax, bnd.amax);
 }
     }
 

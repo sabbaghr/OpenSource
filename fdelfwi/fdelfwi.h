@@ -953,12 +953,26 @@ enum {
     CPML_NPSI
 };
 
+/* CONTEXTS.  psi is per-WAVEFIELD state.  born_shot advances two independent
+ * wavefields in one time loop -- the background re-propagation and the Born
+ * scattered field -- and both reach the PML through the same boundariesP /
+ * boundariesV, so they need separate psi.  A context is selected around each
+ * kernel call; everything that runs a single wavefield can ignore this and
+ * keep using the default, CPML_CTX_FWD. */
+enum {
+    CPML_CTX_FWD = 0,    /* the background / incident wavefield (default) */
+    CPML_CTX_BORN,       /* born_shot's scattered field                   */
+    CPML_NCTX
+};
+
 float **cpmlStateAlloc(size_t n);
 void    cpmlStateFree(void);
 void    cpmlStateZero(void);
 size_t  cpmlStateFloats(void);
 int     cpmlStateSave(float *buf, size_t n);
 int     cpmlStateLoad(const float *buf, size_t n);
+void    cpmlStateSelect(int ctx);
+int     cpmlStateContext(void);
 
 #if __STDC_VERSION__ >= 199901L
   /* "restrict" is a keyword */

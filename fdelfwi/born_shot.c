@@ -269,6 +269,30 @@ int born_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 	rec->file_rcv = (char *)file_born;
 
 	/* ------------------------------------------------------------ */
+	/* 5b. Separate the two wavefields' CFS-CPML memory              */
+	/*                                                               */
+	/* The time loop below advances TWO independent wavefields       */
+	/* through the same boundariesP/boundariesV: the background      */
+	/* re-propagation (callKernel) and the Born scattered field      */
+	/* (callKernelNoSrc).  psi is STATE, so a single psi set would   */
+	/* make each field's PML memory depend on the other's history.   */
+	/* That is not a stale-buffer nuisance -- it silently changes    */
+	/* the operator, so born_shot stops computing J and H = J^T Jhat */
+	/* loses its symmetry (measured: relative error 2.2e-01 under    */
+	/* CPML x4, 2.0e+00 with a free surface, against 4.5e-07 under   */
+	/* taper, by demo/dproduct/test_hessian_bnd.sh).                 */
+	/*                                                               */
+	/* Dropping the Born context forces a fresh zeroed allocation on */
+	/* the next boundariesP call.  It cannot be left to the kernels' */
+	/* own itime==0 reset: the Born field starts at it=chk->delay,   */
+	/* not 0, so that reset never fires here, and born_shot is       */
+	/* re-entered once per inner CG iteration under TRN.             */
+	/* ------------------------------------------------------------ */
+	cpmlStateSelect(CPML_CTX_BORN);
+	cpmlStateFree();
+	cpmlStateSelect(CPML_CTX_FWD);
+
+	/* ------------------------------------------------------------ */
 	/* 6. Segment loop: forward in time (k=0 to nsnap-1)            */
 	/*                                                               */
 	/* Unlike adj_shot which processes segments in reverse, the Born */
@@ -297,7 +321,9 @@ int born_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			memcpy(saved_txz, wfl_fwd.txz, sizem * sizeof(float));
 		}
 
-		/* Load forward checkpoint */
+		/* Load forward checkpoint.  readCheckpoint restores psi into
+		 * the ACTIVE context, so select the background one first. */
+		cpmlStateSelect(CPML_CTX_FWD);
 		readCheckpoint(chk, k, &wfl_fwd);
 
 		/* Process each time step in this segment */
@@ -326,6 +352,7 @@ int born_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			 * Re-applying it would double-step the forward wavefield.
 			 * (Same convention as adj_shot.c which starts at j=1.) */
 			if (j > 0) {
+			cpmlStateSelect(CPML_CTX_FWD);
 #pragma omp parallel default(shared)
 {
 			callKernel(mod, src, wav, bnd, it, ixsrc, izsrc,
@@ -334,10 +361,12 @@ int born_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			}
 
 			/* ---- Advance Born wavefield (no physical source) ---- */
+			cpmlStateSelect(CPML_CTX_BORN);
 #pragma omp parallel default(shared)
 {
 			callKernelNoSrc(mod, bnd, it, &wfl_born, verbose);
 }
+			cpmlStateSelect(CPML_CTX_FWD);
 
 			/* ---- Phase F2 virtual source (stress, from stiffness) ----
 			 * Inject AFTER both kernels.
@@ -412,6 +441,12 @@ int born_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 	if (wfl_born.txz) free(wfl_born.txz);
 
 	free(saved_txx); free(saved_tzz); free(saved_txz);
+
+	/* The Born psi set dies with the Born wavefield.  The background
+	 * context is left alone -- adj_shot still needs it. */
+	cpmlStateSelect(CPML_CTX_BORN);
+	cpmlStateFree();
+	cpmlStateSelect(CPML_CTX_FWD);
 
 	if (rec_vx)   free(rec_vx);
 	if (rec_vz)   free(rec_vz);

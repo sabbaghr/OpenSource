@@ -41,16 +41,53 @@
  * here is a far better way to introduce a subtle bug than it is to save disk.
  */
 
-static float *g_psi[CPML_NPSI];
-static size_t g_n = 0;
+/*
+ * CONTEXTS.  psi belongs to a WAVEFIELD, not to the grid.  born_shot runs the
+ * background re-propagation and the Born scattered field in the same time
+ * loop, both through boundariesP/boundariesV, so a single psi set would make
+ * each field's PML memory depend on the other's history.  That is not a
+ * stale-buffer nuisance; it silently changes the operator, and it broke the
+ * Gauss-Newton Hessian symmetry test (relative error 2.2e-01 under CPML x4
+ * and 2.0e+00 with a free surface, against 4.5e-07 under taper).
+ *
+ * Contexts are independent psi sets.  Callers that run one wavefield never
+ * touch this and stay on CPML_CTX_FWD.
+ */
+static float *g_psi[CPML_NCTX][CPML_NPSI];
+static size_t g_n[CPML_NCTX];
+static int    g_ctx = CPML_CTX_FWD;
 
 
 /***********************************************************************
- * cpmlStatePtrs -- The fixed serialisation order.
+ * cpmlStatePtrs -- The fixed serialisation order, for the ACTIVE context.
  ***********************************************************************/
 static float **cpmlStatePtrs(void)
 {
-	return g_psi;
+	return g_psi[g_ctx];
+}
+
+
+/***********************************************************************
+ * cpmlStateSelect -- Make ctx the active psi set.
+ *
+ * Cheap and allocation-free: the arrays are created on demand by the next
+ * cpmlStateAlloc, which boundariesP/boundariesV call on every time step.
+ ***********************************************************************/
+void cpmlStateSelect(int ctx)
+{
+	if (ctx < 0 || ctx >= CPML_NCTX)
+		verr("cpmlStateSelect: context %d out of range [0,%d)", ctx, CPML_NCTX);
+	g_ctx = ctx;
+}
+
+
+/***********************************************************************
+ * cpmlStateContext -- The active context, so a caller can save/restore it
+ * instead of assuming it owns the selection.
+ ***********************************************************************/
+int cpmlStateContext(void)
+{
+	return g_ctx;
 }
 
 
@@ -72,18 +109,18 @@ float **cpmlStateAlloc(size_t n)
 
 	if (n == 0) return NULL;
 
-	if (g_n == n && g_psi[0] != NULL) return cpmlStatePtrs();
+	if (g_n[g_ctx] == n && g_psi[g_ctx][0] != NULL) return cpmlStatePtrs();
 
 	cpmlStateFree();
 
 	for (i = 0; i < CPML_NPSI; i++) {
-		g_psi[i] = (float *)calloc(n, sizeof(float));
-		if (!g_psi[i]) {
+		g_psi[g_ctx][i] = (float *)calloc(n, sizeof(float));
+		if (!g_psi[g_ctx][i]) {
 			verr("cpmlStateAlloc: cannot allocate psi array %d (%zu floats)", i, n);
 			return NULL;
 		}
 	}
-	g_n = n;
+	g_n[g_ctx] = n;
 
 	return cpmlStatePtrs();
 }
@@ -97,9 +134,9 @@ void cpmlStateFree(void)
 	int i;
 
 	for (i = 0; i < CPML_NPSI; i++) {
-		if (g_psi[i]) { free(g_psi[i]); g_psi[i] = NULL; }
+		if (g_psi[g_ctx][i]) { free(g_psi[g_ctx][i]); g_psi[g_ctx][i] = NULL; }
 	}
-	g_n = 0;
+	g_n[g_ctx] = 0;
 }
 
 
@@ -111,7 +148,7 @@ void cpmlStateFree(void)
  ***********************************************************************/
 size_t cpmlStateFloats(void)
 {
-	return (g_psi[0] != NULL) ? (size_t)CPML_NPSI * g_n : 0;
+	return (g_psi[g_ctx][0] != NULL) ? (size_t)CPML_NPSI * g_n[g_ctx] : 0;
 }
 
 
@@ -124,14 +161,14 @@ int cpmlStateSave(float *buf, size_t n)
 {
 	int i;
 
-	if (!buf || g_psi[0] == NULL) return -1;
-	if (n != g_n) {
-		verr("cpmlStateSave: grid size mismatch (have %zu, asked %zu)", g_n, n);
+	if (!buf || g_psi[g_ctx][0] == NULL) return -1;
+	if (n != g_n[g_ctx]) {
+		verr("cpmlStateSave: grid size mismatch (have %zu, asked %zu)", g_n[g_ctx], n);
 		return -1;
 	}
 
 	for (i = 0; i < CPML_NPSI; i++)
-		memcpy(buf + (size_t)i * n, g_psi[i], n * sizeof(float));
+		memcpy(buf + (size_t)i * n, g_psi[g_ctx][i], n * sizeof(float));
 
 	return 0;
 }
@@ -150,12 +187,12 @@ int cpmlStateLoad(const float *buf, size_t n)
 	int i;
 
 	if (!buf || n == 0) return -1;
-	if (g_psi[0] == NULL || g_n != n) {
+	if (g_psi[g_ctx][0] == NULL || g_n[g_ctx] != n) {
 		if (!cpmlStateAlloc(n)) return -1;
 	}
 
 	for (i = 0; i < CPML_NPSI; i++)
-		memcpy(g_psi[i], buf + (size_t)i * n, n * sizeof(float));
+		memcpy(g_psi[g_ctx][i], buf + (size_t)i * n, n * sizeof(float));
 
 	return 0;
 }
@@ -171,7 +208,7 @@ void cpmlStateZero(void)
 {
 	int i;
 
-	if (g_psi[0] == NULL) return;
+	if (g_psi[g_ctx][0] == NULL) return;
 	for (i = 0; i < CPML_NPSI; i++)
-		memset(g_psi[i], 0, g_n * sizeof(float));
+		memset(g_psi[g_ctx][i], 0, g_n[g_ctx] * sizeof(float));
 }
