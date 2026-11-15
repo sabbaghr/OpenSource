@@ -120,3 +120,4 @@ FFTlib/include/
 fdelfwi/demo/*/*.pdf
 fdelfwi/demo/*/*.png
 fdelfwi/demo/*/*.gif
+fdelfwi/demo/dproduct/offload_check_*/
