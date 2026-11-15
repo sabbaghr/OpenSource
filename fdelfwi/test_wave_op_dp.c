@@ -34,6 +34,7 @@
 #include"par.h"
 #include"segy.h"
 #include"fdelfwi.h"
+#include"fdelfwi_offload.h"
 
 #define MAX(x,y) ((x) > (y) ? (x) : (y))
 #define MIN(x,y) ((x) < (y) ? (x) : (y))
@@ -329,7 +330,7 @@ int main(int argc, char **argv)
 	int it;
 	for (it = 0; it < it1; it++) {
 
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 		if (it == 0 && verbose > 2) threadAffinity();
 
@@ -560,7 +561,7 @@ int main(int argc, char **argv)
 		 *   phase=2 (before Phase A1): stress types (P, Txx, Tzz, Txz)
 		 *   phase=1 (after Phase A1):  force types (Fx, Fz)
 		 * All use += sign (true adjoint). */
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 		if (it == it1 - 1 && verbose > 2) threadAffinity();
 

@@ -58,6 +58,7 @@
 #include "par.h"
 #include "segy.h"
 #include "fdelfwi.h"
+#include "fdelfwi_offload.h"
 
 int getParameters(modPar *mod, recPar *rec, snaPar *sna, wavPar *wav,
                   srcPar *src, shotPar *shot, bndPar *bnd, int verbose);
@@ -325,12 +326,12 @@ int main(int argc, char **argv)
 	 * irrelevant here -- what matters is that EVERY contribution of
 	 * R^T is emitted across the two calls, exactly once. */
 	if (nthreads == 0) {
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 		{
 			applyAdjointSource(mod, adj, 0, z_vx, z_vz, z_tzz, z_txx, z_txz,
 			                   mod.rox, mod.roz, mod.muu, 0, 1, 2, verbose);
 		}
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 		{
 			applyAdjointSource(mod, adj, 0, z_vx, z_vz, z_tzz, z_txx, z_txz,
 			                   mod.rox, mod.roz, mod.muu, 0, 1, 1, verbose);

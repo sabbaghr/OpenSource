@@ -8,6 +8,7 @@
 #include<string.h>
 #include"par.h"
 #include"fdelfwi.h"
+#include"fdelfwi_offload.h"
 
 /**
  * adj_shot.c  --  Adjoint backpropagation with re-propagation checkpointing.
@@ -336,7 +337,7 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			readCheckpoint(chk, k, &wfl_fwd);
 			for (j = 1; j < nsteps; j++) {
 				it = seg_start + j;
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 				callKernel(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav, &wfl_fwd, verbose);
 }
@@ -410,7 +411,7 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 		/* Re-propagate forward through rest of segment */
 		for (j = 1; j < nsteps; j++) {
 			it = seg_start + j;
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 			callKernel(mod, src, wav, bnd, it, ixsrc, izsrc, src_nwav, &wfl_fwd, verbose);
 }
@@ -504,7 +505,7 @@ int adj_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			 * The adjoint kernel injects force residuals (Fx,Fz) at the
 			 * velocity-update point and stress residuals (P,Txx,Tzz,Txz)
 			 * at the stress-update point — physically correct timing. */
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 			callAdjKernel(mod, adj, bnd, it, &wfl_adj,
 				rec->delay, rec->skipdt, verbose);

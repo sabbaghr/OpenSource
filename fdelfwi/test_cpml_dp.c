@@ -71,6 +71,7 @@
 #include"par.h"
 #include"segy.h"
 #include"fdelfwi.h"
+#include"fdelfwi_offload.h"
 
 #define NINT(x) ((int)((x)>0.0?(x)+0.5:(x)-0.5))
 
@@ -307,7 +308,7 @@ int main(int argc, char **argv)
 	/* S_N = F^N S_0                                                  */
 	/* ============================================================== */
 	for (it = 0; it < nstep; it++) {
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 		elastic4(mod, src, wav, bnd, it, 0, 0, src_nwav,
 			fvx, fvz, ftzz, ftxx, ftxz,
@@ -348,7 +349,7 @@ int main(int argc, char **argv)
 	cpmlAdjReset();
 
 	for (it = nstep - 1; it >= 0; it--) {
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 		elastic4_adj(mod, adj, bnd, it,
 			avx, avz, atzz, atxx, atxz,

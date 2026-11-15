@@ -3,6 +3,7 @@
 #include<math.h>
 #include<assert.h>
 #include"fdelfwi.h"
+#include"fdelfwi_offload.h"
 
 #define MAX(x,y) ((x) > (y) ? (x) : (y))
 
@@ -81,27 +82,38 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 ***********************************************************************/
 
 	float c1, c2;
-	float dvx, dvz;
 	int   ix, iz;
 	int   n1;
 	int   pml;
 	int   ioPx, iePx, ioPz, iePz;
 	int   ioTx, ieTx, ioTz, ieTz;
+	int   ioXx, ieXx, ioXz, ieXz;
+	int   ioZx, ieZx, ioZz, ieZz;
+	size_t sizem;   /* full padded grid; used by the slice-1a update macros */
 
 
+	sizem = (size_t)mod.nax * mod.naz;
 	c1 = 9.0/8.0;
 	c2 = -1.0/24.0;
 	n1  = mod.naz;
 	pml = (bnd.top==2 || bnd.bot==2 || bnd.lef==2 || bnd.rig==2);
 
+	/* Hoist every grid bound out of the struct BEFORE the kernels.
+	 * A target region must not touch modPar: it is passed by value and
+	 * carries host pointers, which are meaningless on the device.  As
+	 * plain scalars these are implicitly firstprivate, so the kernels
+	 * below need no map clause of any kind. */
+	ioXx = mod.ioXx; ieXx = mod.ieXx; ioXz = mod.ioXz; ieXz = mod.ieXz;
+	ioZx = mod.ioZx; ieZx = mod.ieZx; ioZz = mod.ioZz; ieZz = mod.ieZz;
+
 	/* ============================================================ */
 	/*  Step 1 / Phase F1: Velocity update                          */
 	/*  vx -= rox * [D-x(txx) + D+z(txz)]                         */
 	/* ============================================================ */
-#pragma omp for private (ix, iz) nowait schedule(guided,1)
-	for (ix=mod.ioXx; ix<mod.ieXx; ix++) {
-#pragma simd
-		for (iz=mod.ioXz; iz<mod.ieXz; iz++) {
+	FD_LOOP_IJ_NW
+	for (ix=ioXx; ix<ieXx; ix++) {
+		FD_SIMD
+		for (iz=ioXz; iz<ieXz; iz++) {
 			vx[ix*n1+iz] -= rox[ix*n1+iz]*(
 						c1*(txx[ix*n1+iz]     - txx[(ix-1)*n1+iz] +
 							txz[ix*n1+iz+1]   - txz[ix*n1+iz])    +
@@ -111,10 +123,10 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 	}
 
 	/* vz -= roz * [D+x(txz) + D-z(tzz)] */
-#pragma omp for private (ix, iz)  schedule(guided,1)
-	for (ix=mod.ioZx; ix<mod.ieZx; ix++) {
-#pragma simd
-		for (iz=mod.ioZz; iz<mod.ieZz; iz++) {
+	FD_LOOP_IJ
+	for (ix=ioZx; ix<ieZx; ix++) {
+		FD_SIMD
+		for (iz=ioZz; iz<ieZz; iz++) {
 			vz[ix*n1+iz] -= roz[ix*n1+iz]*(
 						c1*(tzz[ix*n1+iz]     - tzz[ix*n1+iz-1] +
 							txz[(ix+1)*n1+iz] - txz[ix*n1+iz])  +
@@ -125,15 +137,24 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 
 	/* ============================================================ */
 	/*  Step 2: Force source injection (src_type > 5)               */
+	/*  Step 3: Velocity boundary conditions (boundariesP / taper)  */
 	/* ============================================================ */
+	/* SCAFFOLDING (slice 1a).  applySource and boundariesP still run on
+	 * the host, so the wavefields are pulled back and pushed again around
+	 * them.  This is CORRECT but slow -- it is the very host round-trip
+	 * the offload exists to remove, and it disappears in slice 1b once
+	 * the taper path and point-source injection are themselves kernels.
+	 * Kept explicit rather than hidden so the cost is impossible to
+	 * forget about. */
+	OFFLOAD_WFL_FROM_DEVICE;
+
 	if (src.type > 5 && src.type!=20) {
 		 applySource(mod, src, wav, bnd, itime, ixsrc, izsrc, vx, vz, tzz, txx, txz, rox, roz, l2m, src_nwav, verbose);
 	}
 
-	/* ============================================================ */
-	/*  Step 3: Velocity boundary conditions (boundariesP / taper)  */
-	/* ============================================================ */
 	boundariesP(mod, bnd, vx, vz, tzz, txx, txz, rox, roz, l2m, lam, mul, itime, verbose);
+
+	OFFLOAD_WFL_TO_DEVICE;
 
 	/* ============================================================ */
 	/*  Step 4 / Phase F2: Stress update                            */
@@ -167,23 +188,23 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 		ioTz = mod.ioTz; ieTz = mod.ieTz;
 	}
 
-#pragma omp	for private (ix, iz, dvx, dvz) nowait schedule(guided,1)
+	FD_LOOP_IJ_NW
 	for (ix=ioPx; ix<iePx; ix++) {
-#pragma simd
+		FD_SIMD
 		for (iz=ioPz; iz<iePz; iz++) {
-			dvx = c1*(vx[(ix+1)*n1+iz] - vx[ix*n1+iz]) +
-			      c2*(vx[(ix+2)*n1+iz] - vx[(ix-1)*n1+iz]);
-			dvz = c1*(vz[ix*n1+iz+1]   - vz[ix*n1+iz]) +
-			      c2*(vz[ix*n1+iz+2]   - vz[ix*n1+iz-1]);
+			float dvx = c1*(vx[(ix+1)*n1+iz] - vx[ix*n1+iz]) +
+			            c2*(vx[(ix+2)*n1+iz] - vx[(ix-1)*n1+iz]);
+			float dvz = c1*(vz[ix*n1+iz+1]   - vz[ix*n1+iz]) +
+			            c2*(vz[ix*n1+iz+2]   - vz[ix*n1+iz-1]);
 			txx[ix*n1+iz] -= l2m[ix*n1+iz]*dvx + lam[ix*n1+iz]*dvz;
 			tzz[ix*n1+iz] -= l2m[ix*n1+iz]*dvz + lam[ix*n1+iz]*dvx;
 		}
 	}
 
 	/* txz -= mul * [D-z(vx) + D-x(vz)] */
-#pragma omp	for private (ix, iz)  schedule(guided,1)
+	FD_LOOP_IJ
 	for (ix=ioTx; ix<ieTx; ix++) {
-#pragma simd
+		FD_SIMD
 		for (iz=ioTz; iz<ieTz; iz++) {
 			txz[ix*n1+iz] -= mul[ix*n1+iz]*(
 					c1*(vx[ix*n1+iz]     - vx[ix*n1+iz-1] +
@@ -195,18 +216,20 @@ float *vz, float *tzz, float *txx, float *txz, float *rox, float *roz, float
 
 	/* ============================================================ */
 	/*  Step 5: Stress source injection (src_type < 6)              */
+	/*  Step 6: Free surface boundary conditions                    */
+	/*  storeSourceOnSurface -> boundariesV -> reStoreSource        */
 	/* ============================================================ */
+	OFFLOAD_WFL_FROM_DEVICE;        /* slice 1a scaffolding, see above */
+
 	if (src.type < 6) {
 		 applySource(mod, src, wav, bnd, itime, ixsrc, izsrc, vx, vz, tzz, txx, txz, rox, roz, l2m, src_nwav, verbose);
 	}
 
-	/* ============================================================ */
-	/*  Step 6: Free surface boundary conditions                    */
-	/*  storeSourceOnSurface -> boundariesV -> reStoreSource        */
-	/* ============================================================ */
     storeSourceOnSurface(mod, src, bnd, ixsrc, izsrc, vx, vz, tzz, txx, txz, verbose);
     boundariesV(mod, bnd, vx, vz, tzz, txx, txz, rox, roz, l2m, lam, mul, itime, verbose);
 	reStoreSourceOnSurface(mod, src, bnd, ixsrc, izsrc, vx, vz, tzz, txx, txz, verbose);
+
+	OFFLOAD_WFL_TO_DEVICE;
 
     return 0;
 }

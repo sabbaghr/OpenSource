@@ -21,6 +21,7 @@
 #include <math.h>
 #include <assert.h>
 #include "fdelfwi.h"
+#include "fdelfwi_offload.h"
 
 /* External functions (same as adj_shot uses) */
 void vmess(char *fmt, ...);
@@ -230,7 +231,7 @@ int precond_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 
 		for (j = 1; j < nsteps; j++) {
 			it = seg_start + j;
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 			callKernel(mod, src, wav, bnd, it, ixsrc, izsrc,
 			           src_nwav, &wfl_fwd, 0);
@@ -249,7 +250,7 @@ int precond_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			memcpy(rcv_vz_prev, wfl_rcv.vz, sizem * sizeof(float));
 
 			/* Inject synthetic data into receiver wavefield */
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 			callAdjKernel(mod, &syn_adj, bnd, it, &wfl_rcv,
 			              rec->delay, rec->skipdt, 0);

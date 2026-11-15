@@ -5,6 +5,13 @@
 #include<string.h>
 #include"par.h"
 #include"fdelfwi.h"
+#include"fdelfwi_offload.h"
+
+#ifdef USE_OMP_TARGET
+/* The one definition of the gate declared in fdelfwi_offload.h.  It lives
+ * here because the data region below is the only code allowed to raise it. */
+int fdOffloadActive = 0;
+#endif
 
 
 #define MAX(x,y) ((x) > (y) ? (x) : (y))
@@ -180,9 +187,51 @@ int fdfwimodc(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd, recPar *rec, s
 		fprintf(stderr, "    %s: Progress: %3d%%", xargv[0], 0);
 	}
 
+#ifdef USE_OMP_TARGET
+	/* ------------------------------------------------------------------
+	 * Per-shot device data region.
+	 *
+	 * The ten arrays are mapped ONCE here and the whole time loop runs
+	 * against the device copies; no kernel below carries a map clause.
+	 * That is the entire point -- a map clause on a per-step kernel would
+	 * re-copy the grid every step, which costs more than the arithmetic.
+	 *
+	 * Plain local pointers, never the wflPar/modPar structs: mapping a
+	 * struct by value would put HOST pointers in device memory (the same
+	 * ABI hazard already documented for bndPar).  OpenMP keys its device
+	 * table on the host base ADDRESS, so a target region that later names
+	 * the same buffer `vx` finds this mapping regardless of the variable
+	 * name used here.
+	 *
+	 * Gated on exactly the one kernel that is annotated so far.  Any other
+	 * scheme/order leaves fdOffloadActive at 0 and runs the untouched host
+	 * path -- including CPML, which still executes host-side inside
+	 * boundariesP/boundariesV via the round-trips in elastic4.
+	 *
+	 * Materials are re-mapped per shot.  For the 24000x2400 production
+	 * grid that is ~1.15 GB of PCIe traffic per shot, tens of ms against a
+	 * multi-second shot; hoisting them to a per-model region is a later
+	 * optimisation, not a correctness issue.
+	 * ------------------------------------------------------------------ */
+	float *o_vx=wfl.vx,   *o_vz=wfl.vz,   *o_tzz=wfl.tzz;
+	float *o_txx=wfl.txx, *o_txz=wfl.txz;
+	float *o_rox=mod->rox, *o_roz=mod->roz, *o_l2m=mod->l2m;
+	float *o_lam=mod->lam, *o_muu=mod->muu;
+
+	fdOffloadActive = (mod->ischeme == 3 && mod->iorder == 4);
+	if (fdOffloadActive) {
+		if (verbose) vmess("fdfwimodc: OpenMP target data region, %.1f MB on device",
+			10.0*sizem*sizeof(float)/(1024.0*1024.0));
+#pragma omp target enter data map(to: o_vx[0:sizem],  o_vz[0:sizem],  o_tzz[0:sizem], \
+                                      o_txx[0:sizem], o_txz[0:sizem], \
+                                      o_rox[0:sizem], o_roz[0:sizem], o_l2m[0:sizem], \
+                                      o_lam[0:sizem], o_muu[0:sizem])
+	}
+#endif
+
 	for (it=it0; it<it1; it++) {
 
-#pragma omp parallel default(shared)
+	FD_HOST_PARALLEL
 {
 		if (it==it0 && verbose>2) {
 			threadAffinity();
@@ -247,8 +296,12 @@ int fdfwimodc(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd, recPar *rec, s
 		}
 
 		/* write samples to file if rec->nt samples are calculated */
+		/* No `target update` is needed before the three host consumers
+		 * below: elastic4 ends by pushing the host-side boundary result
+		 * TO the device, so the host copies are already current.  Slice 1b
+		 * must revisit this when the boundaries move to the device. */
 
-#pragma omp master
+	FD_HOST_MASTER
 {
 		if ( (((it-rec->delay) % rec->skipdt)==0) && (it >= rec->delay) ) {
 			int writeToFile, itwritten;
@@ -298,9 +351,9 @@ int fdfwimodc(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd, recPar *rec, s
 			}
 		}
 }
-#pragma omp barrier
+	FD_HOST_BARRIER
 
-#pragma omp master
+	FD_HOST_MASTER
 {
 		if (verbose) {
 			if(!((it1-it)%perc)) fprintf(stderr,"\b\b\b\b%3d%%",it*100/(it1-it0));
@@ -315,6 +368,20 @@ int fdfwimodc(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd, recPar *rec, s
 } /* end of OpenMP parallel section */
 
 	} /* end of loop over time steps it */
+
+#ifdef USE_OMP_TARGET
+	if (fdOffloadActive) {
+		/* `from` on the wavefields is redundant today -- the slice-1a
+		 * round-trips already leave the host copies current -- but it is
+		 * the clause that stays correct once those round-trips are
+		 * deleted, so it is cheaper to be right than to be minimal. */
+#pragma omp target exit data map(from:   o_vx[0:sizem],  o_vz[0:sizem],  o_tzz[0:sizem], \
+                                         o_txx[0:sizem], o_txz[0:sizem]) \
+                             map(delete: o_rox[0:sizem], o_roz[0:sizem], o_l2m[0:sizem], \
+                                         o_lam[0:sizem], o_muu[0:sizem])
+		fdOffloadActive = 0;
+	}
+#endif
 
 	/* write output files: receivers */
 	/* For FWI: use fileno_shot to create separate files per shot */

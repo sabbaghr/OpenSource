@@ -8,6 +8,7 @@
 #include<string.h>
 #include"par.h"
 #include"fdelfwi.h"
+#include"fdelfwi_offload.h"
 
 /**
  * born_shot.c -- Forward propagation of Born (mu_1) wavefield.
@@ -336,7 +337,7 @@ int born_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			 * Uses forward stress BEFORE the elastic step at time 'it':
 			 *   j=0: saved_stress (end of previous segment, or zero IC for k=0)
 			 *   j>0: wfl_fwd stress (current time, before this step's kernel) */
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 			inject_born_vsrc_vel(mod,
 				(j == 0) ? saved_txx : wfl_fwd.txx,
@@ -353,7 +354,7 @@ int born_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			 * (Same convention as adj_shot.c which starts at j=1.) */
 			if (j > 0) {
 			cpmlStateSelect(CPML_CTX_FWD);
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 			callKernel(mod, src, wav, bnd, it, ixsrc, izsrc,
 			           src_nwav, &wfl_fwd, verbose);
@@ -362,7 +363,7 @@ int born_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 
 			/* ---- Advance Born wavefield (no physical source) ---- */
 			cpmlStateSelect(CPML_CTX_BORN);
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 			callKernelNoSrc(mod, bnd, it, &wfl_born, verbose);
 }
@@ -371,7 +372,7 @@ int born_shot(modPar *mod, srcPar *src, wavPar *wav, bndPar *bnd,
 			/* ---- Phase F2 virtual source (stress, from stiffness) ----
 			 * Inject AFTER both kernels.
 			 * Uses forward velocity at time n+1 (after elastic step). */
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 			inject_born_vsrc_stress(mod, bnd,
 				wfl_fwd.vx, wfl_fwd.vz,

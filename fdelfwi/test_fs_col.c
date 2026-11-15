@@ -44,6 +44,7 @@
 #include"par.h"
 #include"segy.h"
 #include"fdelfwi.h"
+#include"fdelfwi_offload.h"
 
 double wallclock_time(void);
 
@@ -174,14 +175,14 @@ int main(int argc, char **argv)
 
 	cpmlAdjReset();
 	if (stage == 1) {
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 		boundariesV_adj(mod, bnd, avx, avz, atzz, atxx, atxz,
 			mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu, 0, verbose);
 }
 	}
 	else if (stage == 2) {
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 		boundariesV_adj(mod, bnd, avx, avz, atzz, atxx, atxz,
 			mod.rox, mod.roz, mod.l2m, mod.lam, mod.muu, 0, verbose);
@@ -190,7 +191,7 @@ int main(int argc, char **argv)
 	}
 	else {
 		for (it = nstep-1; it >= 0; it--) {
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 			elastic4_adj(mod, adj, bnd, it,
 				avx, avz, atzz, atxx, atxz,
@@ -253,7 +254,7 @@ int main(int argc, char **argv)
 
 					cpmlStateZero();
 					for (it = 0; it < nstep; it++) {
-#pragma omp parallel default(shared)
+FD_HOST_PARALLEL
 {
 						elastic4(mod, src, wav, bnd, it, 0, 0, src_nwav,
 							fvx, fvz, ftzz, ftxx, ftxz,

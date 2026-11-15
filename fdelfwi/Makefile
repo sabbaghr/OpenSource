@@ -22,6 +22,80 @@ CUDA_ARCH ?= -arch=sm_60
 CUDA_FLAGS = -O3 --use_fast_math -lineinfo $(CUDA_ARCH) -Xcompiler "$(OPTC)"
 CUDA_LIBS = -lcudart -lstdc++
 
+########################################################################
+# OpenMP target offload -- ONE SOURCE, every NVIDIA card and Intel PVC.
+#
+#   make OFFLOAD=v100 fwd     nvc, NVIDIA cc70   (MIO gpu004)
+#   make OFFLOAD=h100 fwd     nvc, NVIDIA cc90   (Stampede3, module nvidia/26.1)
+#   make OFFLOAD=pvc  fwd     icx, Intel spir64  (Stampede3, module intel/26.0)
+#   make OFFLOAD=host fwd     gcc, target regions forced to the host
+#   make              fwd     unchanged gcc CPU build (the reference)
+#
+# This overrides only the toolchain variables, so EVERY existing target
+# gains an offload build and there is no per-program rule to keep in sync.
+#
+# Three things must change together, not just the compiler:
+#
+#  1. -DUSE_OMP_TARGET flips fdelfwi_offload.h from `omp for` to
+#     `omp target teams distribute parallel for collapse(2)`.
+#
+#  2. The OpenMP RUNTIME.  Make_include links -lmkl_gnu_thread and -lgomp.
+#     Pulling libgomp into an nvc or icx binary puts TWO OpenMP runtimes in
+#     one process, which deadlocks or silently serialises.  MKL is used here
+#     only for FFTs, never in the FD hot loop, so the sequential layer is
+#     substituted: it has no threading runtime of its own and so cannot
+#     conflict.  Costs nothing that matters.
+#
+#  3. -march=native -ffast-math are gcc spellings and are dropped.  Dropping
+#     fast-math is DELIBERATE, not an oversight: the offload build is
+#     validated by bit-comparison against the gcc CPU reference, and that is
+#     exactly what --use_fast_math makes impossible for the legacy CUDA path.
+########################################################################
+ifneq ($(OFFLOAD),)
+  MKL_SEQ_LIBS = -L$(MKLROOT)/lib/intel64 -lmkl_intel_lp64 -lmkl_sequential \
+                 -lmkl_core -lpthread -lm -ldl
+  LIBS = -L$L -lgenfft $(MKL_SEQ_LIBS) -lgfortran
+endif
+
+# NVIDIA / NVHPC.  Compute capability is the ONLY thing that changes between
+# cards, so the mode is "nvidia" and the card names are just shorthands:
+#   OFFLOAD=v100     cc70    MIO gpu004, Wendian
+#   OFFLOAD=a100     cc80
+#   OFFLOAD=h100     cc90    Stampede3
+#   OFFLOAD=nvidia           you set GPU_ARCH= yourself
+ifeq ($(OFFLOAD),v100)
+  GPU_ARCH ?= cc70
+endif
+ifeq ($(OFFLOAD),a100)
+  GPU_ARCH ?= cc80
+endif
+ifeq ($(OFFLOAD),h100)
+  GPU_ARCH ?= cc90
+endif
+ifneq ($(filter $(OFFLOAD),nvidia v100 a100 h100),)
+  CC        = nvc
+  GPU_ARCH ?= cc70
+  OPTC      = -O3 -mp=gpu -gpu=$(GPU_ARCH) -DUSE_OMP_TARGET -Minfo=mp
+  LDFLAGS  += -mp=gpu -gpu=$(GPU_ARCH)
+endif
+
+# Intel / oneAPI.  "pvc" is a shorthand for "intel".  spir64 is JIT'd for
+# whatever Level Zero device is present, so there is no arch flag to set.
+ifneq ($(filter $(OFFLOAD),intel pvc),)
+  CC       = icx
+  OPTC     = -O3 -fiopenmp -fopenmp-targets=spir64 -DUSE_OMP_TARGET
+  LDFLAGS += -fiopenmp -fopenmp-targets=spir64
+endif
+
+# Host-fallback validation build.  Same annotated source, no device code
+# generated, target regions execute on the host.  This is what makes the
+# port testable on a workstation with no GPU toolchain at all -- and on
+# Stampede3 it is the build you compare against before spending queue time.
+ifeq ($(OFFLOAD),host)
+  CC       = gcc
+  OPTC     = -O3 -fopenmp -foffload=disable -DUSE_OMP_TARGET
+endif
+
 all: fwi_inversion
 
 # FWI driver targets
