@@ -51,7 +51,10 @@ CUDA_LIBS = -lcudart -lstdc++
 #     validated by bit-comparison against the gcc CPU reference, and that is
 #     exactly what --use_fast_math makes impossible for the legacy CUDA path.
 ########################################################################
-ifneq ($(OFFLOAD),)
+# Only the NON-gcc toolchains need the MKL runtime swap.  The gcc-based
+# offload modes (host, gcc-nvptx) use libgomp themselves, so Make_include's
+# -lmkl_gnu_thread/-lgomp is already the right pairing for them.
+ifneq ($(filter $(OFFLOAD),nvidia p100 v100 a100 h100 intel pvc),)
   MKL_SEQ_LIBS = -L$(MKLROOT)/lib/intel64 -lmkl_intel_lp64 -lmkl_sequential \
                  -lmkl_core -lpthread -lm -ldl
   LIBS = -L$L -lgenfft $(MKL_SEQ_LIBS) -lgfortran
@@ -59,11 +62,19 @@ endif
 
 # NVIDIA / NVHPC.  Compute capability is the ONLY thing that changes between
 # cards, so the mode is "nvidia" and the card names are just shorthands:
-#   OFFLOAD=p100     cc60    MIO gpu004 (slurm GRES says gpu:pascal:1)
+#   OFFLOAD=p100     cc60    DOES NOT BUILD -- see below
 #   OFFLOAD=v100     cc70    Wendian
 #   OFFLOAD=a100     cc80
 #   OFFLOAD=h100     cc90    Stampede3
 #   OFFLOAD=nvidia           you set GPU_ARCH= yourself
+#
+# OFFLOAD=p100 is kept only to document that it is a DEAD END with nvc.
+# Measured on MIO 2026-11-14 with nvhpc 21.3:
+#   nvc-Fatal-OpenMP GPU Offload is available only on systems with NVIDIA
+#   GPUs with compute capability '>= cc70'
+# NVHPC supports Pascal for OpenACC but not for OpenMP target.  MIO's only
+# GPU node (gpu004) is a Tesla P100, so on MIO use OFFLOAD=gcc-nvptx below;
+# gcc's nvptx offload does emit sm_60.
 ifeq ($(OFFLOAD),p100)
   GPU_ARCH ?= cc60
 endif
@@ -98,6 +109,21 @@ endif
 ifeq ($(OFFLOAD),host)
   CC       = gcc
   OPTC     = -O3 -fopenmp -foffload=disable -DUSE_OMP_TARGET
+endif
+
+# gcc + nvptx offload.  The ONLY way to reach a Pascal card from OpenMP
+# target, since NVHPC refuses anything below cc70 (see the note above).
+# Needs a gcc built with --enable-offload-targets=nvptx-none, i.e. the
+# distro package gcc-offload-nvptx / libgomp-plugin-nvptx.  Probe with:
+#   gcc -fopenmp -foffload=nvptx-none -O1 probe.c -o probe
+# PTX_ISA is overridable; gcc's default is old enough to run anywhere, and
+# sm_60 is what MIO's P100 actually is.
+ifeq ($(OFFLOAD),gcc-nvptx)
+  CC       = gcc
+  PTX_ISA ?= sm_60
+  OPTC     = -O3 -fopenmp -foffload=nvptx-none \
+             -foffload-options=nvptx-none=-misa=$(PTX_ISA) -DUSE_OMP_TARGET
+  LDFLAGS += -fopenmp -foffload=nvptx-none
 endif
 
 all: fwi_inversion
