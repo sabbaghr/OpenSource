@@ -25,7 +25,7 @@ CUDA_LIBS = -lcudart -lstdc++
 ########################################################################
 # OpenMP target offload -- ONE SOURCE, every NVIDIA card and Intel PVC.
 #
-#   make OFFLOAD=v100 fwd     nvc, NVIDIA cc70   (MIO gpu004)
+#   make OFFLOAD=p100 fwd     nvc, NVIDIA cc60   (MIO gpu004, module libs/nvhpc/21.3)
 #   make OFFLOAD=h100 fwd     nvc, NVIDIA cc90   (Stampede3, module nvidia/26.1)
 #   make OFFLOAD=pvc  fwd     icx, Intel spir64  (Stampede3, module intel/26.0)
 #   make OFFLOAD=host fwd     gcc, target regions forced to the host
@@ -59,10 +59,14 @@ endif
 
 # NVIDIA / NVHPC.  Compute capability is the ONLY thing that changes between
 # cards, so the mode is "nvidia" and the card names are just shorthands:
-#   OFFLOAD=v100     cc70    MIO gpu004, Wendian
+#   OFFLOAD=p100     cc60    MIO gpu004 (slurm GRES says gpu:pascal:1)
+#   OFFLOAD=v100     cc70    Wendian
 #   OFFLOAD=a100     cc80
 #   OFFLOAD=h100     cc90    Stampede3
 #   OFFLOAD=nvidia           you set GPU_ARCH= yourself
+ifeq ($(OFFLOAD),p100)
+  GPU_ARCH ?= cc60
+endif
 ifeq ($(OFFLOAD),v100)
   GPU_ARCH ?= cc70
 endif
@@ -72,7 +76,7 @@ endif
 ifeq ($(OFFLOAD),h100)
   GPU_ARCH ?= cc90
 endif
-ifneq ($(filter $(OFFLOAD),nvidia v100 a100 h100),)
+ifneq ($(filter $(OFFLOAD),nvidia p100 v100 a100 h100),)
   CC        = nvc
   GPU_ARCH ?= cc70
   OPTC      = -O3 -mp=gpu -gpu=$(GPU_ARCH) -DUSE_OMP_TARGET -Minfo=mp
