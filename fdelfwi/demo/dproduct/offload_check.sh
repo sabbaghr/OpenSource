@@ -84,7 +84,7 @@ echo " iorder       : ${IORDER}"
 echo " OMP threads  : ${OMP_NUM_THREADS}"
 echo " workdir      : ${WORKDIR}"
 echo ""
-if strings "${FWD}" 2>/dev/null | grep -qiE '__nv_|nvomp|libomptarget|omp_target'; then
+if command -v strings >/dev/null 2>&1 && strings "${FWD}" 2>/dev/null | grep -qiE '__nv_|nvomp|libomptarget|omp_target'; then
 	echo " device runtime symbols in fdelfwi_fwd : PRESENT  (offload build)"
 else
 	echo " device runtime symbols in fdelfwi_fwd : absent   (plain CPU build)"
@@ -127,7 +127,7 @@ if [ "${NREG}" -gt 0 ]; then
 else
 	echo "  device data region : NOT REPORTED  <-- ran on the host"
 fi
-printf "  wall time          : %.2f s\n" "$(echo "${A1} - ${A0}" | bc)"
+awk -v a="${A0}" -v b="${A1}" 'BEGIN{printf "  wall time          : %.2f s\n", b-a}' 
 ls -1 fwd_*.su 2>/dev/null | sed 's/^/    gather: /'
 echo ""
 
@@ -150,7 +150,7 @@ B0=$(date +%s.%N)
     > dp.log 2>&1
 B1=$(date +%s.%N)
 grep -iE 'epsilon|^ +<Ax|^ +<x,|PASS|FAIL' dp.log | sed 's/^/  /' || echo "  (read dp.log)"
-printf "  wall time          : %.2f s\n" "$(echo "${B1} - ${B0}" | bc)"
+awk -v a="${B0}" -v b="${B1}" 'BEGIN{printf "  wall time          : %.2f s\n", b-a}' 
 echo ""
 
 # =====================================================================
