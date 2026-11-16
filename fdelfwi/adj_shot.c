@@ -527,6 +527,11 @@ FD_HOST_PARALLEL
 			/* Density gradient (elastic only — acoustic rho is
 			 * already handled by accumGradientAcoustic above) */
 			if (mod->ischeme > 2) {
+				/* The time-lag density kernel shares this call site, this
+				 * gating and this stress for the same reasons: psi_v is only
+				 * the valid multiplier for the F1 update here, and the tau=0
+				 * slice must be formed from exactly the pairs grad_rho is.
+				 * No-op unless lagGradientInit was called with do_rho. */
 				if (buf_txx && j > 0) {
 					accumGradient_rho_Dsig(mod, bnd,
 						buf_txx + (size_t)(j-1) * sizem,
@@ -534,6 +539,11 @@ FD_HOST_PARALLEL
 						buf_txz + (size_t)(j-1) * sizem,
 						&wfl_adj, dt,
 						grad_rho);
+					lagGradientAccumRho(mod,
+						buf_txx + (size_t)(j-1) * sizem,
+						buf_tzz + (size_t)(j-1) * sizem,
+						buf_txz + (size_t)(j-1) * sizem,
+						&wfl_adj, it, dt);
 				}
 				else if (seg_end_txx && j == 0 && k > 0) {
 					accumGradient_rho_Dsig(mod, bnd,
@@ -542,6 +552,11 @@ FD_HOST_PARALLEL
 						seg_end_txz + (size_t)(k-1) * sizem,
 						&wfl_adj, dt,
 						grad_rho);
+					lagGradientAccumRho(mod,
+						seg_end_txx + (size_t)(k-1) * sizem,
+						seg_end_tzz + (size_t)(k-1) * sizem,
+						seg_end_txz + (size_t)(k-1) * sizem,
+						&wfl_adj, it, dt);
 				}
 
 				/* The half of the energy inner product that needs psi_v:

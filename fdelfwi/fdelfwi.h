@@ -693,22 +693,25 @@ void shin_apply_precond(float *grad_preco, const float *grad,
 /* --- lag_gradient.c: time-lag extended imaging condition ---
  * Evaluates the lambda/mu gradient kernels at non-zero time lag,
  *   g(x,tau) = dt sum_t A(x,t) B(x,t+tau),
- * with A the forward strain and B the adjoint stress.  The accumulators
- * carry lambda and mu; the OUTPUT is g_Vp and g_Vs, converted per lag by the
- * same pointwise chain rule convertGradientToVelocity uses on the ordinary
- * gradient (that map is lag-independent, so it commutes with the lag
- * reconstruction).  There is no g_rho cube.  The adjoint source
- * is the data residual, so this is a lag-extension of dJ/dm and the tau=0
- * slice is the ordinary gradient (band limited to the frequencies
+ * with A the forward strain and B the adjoint stress.  Six accumulators
+ * carry lambda and mu, and four more the direct density kernel; the OUTPUT
+ * is g_Vp, g_Vs and g_rho, converted per lag by the same pointwise chain
+ * rule convertGradientToVelocity uses on the ordinary gradient (that map is
+ * lag-independent, so it commutes with the lag reconstruction).  The adjoint
+ * source is the data residual, so this is a lag-extension of dJ/dm and the
+ * tau=0 slice is the ordinary gradient (band limited to the frequencies
  * requested).
  *
  * Implemented as a product of running DFTs, which is what makes it fit
  * adj_shot's checkpoint scheme: the forward and adjoint states are only
  * ever co-resident at the same time index, and this formulation never
  * needs two different times at once.  Memory scales with nfreq, not with
- * the number of lags; the lag axis is chosen at write time. */
+ * the number of lags; the lag axis is chosen at write time.
+ *
+ * do_rho allocates the four density accumulators (+67% memory); pass 0 when
+ * only g_Vp and g_Vs are wanted, as lagGradientTomo does. */
 void lagGradientInit(modPar *mod, int nfreq, float fmin, float fmax,
-    int verbose);
+    int do_rho, int verbose);
 /* Fold one time step into the running DFTs.  Called from the backward
  * loop of adj_shot where psi_sigma is the valid multiplier (before
  * callAdjKernel), with the forward velocities of the same time index.
@@ -716,7 +719,15 @@ void lagGradientInit(modPar *mod, int nfreq, float fmin, float fmax,
 void lagGradientAccum(modPar *mod, bndPar *bnd,
     float *fwd_vx, float *fwd_vz,
     wflPar *wfl_adj, int it, float dt);
-/* Reconstruct and write <base>_shotNNN_lag{vp,vs}.su plus a lagaxis.txt
+/* The density half, at the accumGradient_rho_Dsig call site: AFTER
+ * callAdjKernel, where psi_v is the valid multiplier, and with the same
+ * forward stress sigma^{n-1} that call is given.  Mirror its gating.  `it`
+ * is the adjoint state's step, deliberately NOT the stress's -- see "THE
+ * TIME STAMP" in lag_gradient.c.  A no-op unless do_rho was set. */
+void lagGradientAccumRho(modPar *mod,
+    float *fwd_txx, float *fwd_tzz, float *fwd_txz,
+    wflPar *wfl_adj, int it, float dt);
+/* Reconstruct and write <base>_shotNNN_lag{vp,vs,rho}.su plus a lagaxis.txt
  * description, and add into the shot stack.  nlag is forced odd so tau=0
  * is sampled; dlag is in seconds and need not be a multiple of mod->dt.
  * mask is an optional [nx*nz] interior-grid multiplier (ix*nz+iz) applied
@@ -724,7 +735,7 @@ void lagGradientAccum(modPar *mod, bndPar *bnd,
  * the gradient and never reaches these accumulators. */
 void lagGradientWrite(modPar *mod, bndPar *bnd, const char *base, int ishot,
     int nlag, float dlag, float *mask, int verbose);
-/* Write the sum over all shots as <base>_lag{vp,vs}.su.  That stack, not
+/* Write the sum over all shots as <base>_lag{vp,vs,rho}.su.  That stack, not
  * any single shot, is what the conventional gradient corresponds to. */
 void lagGradientWriteStack(modPar *mod, const char *base, int verbose);
 /* Release everything including the stack; call after the shot loop. */

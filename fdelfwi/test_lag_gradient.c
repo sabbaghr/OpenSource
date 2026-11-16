@@ -32,7 +32,10 @@
  *   4. write that shot's lag cubes                (lagGradientWrite)
  *
  * and then writes the shot-stacked lag cubes plus the RAW (Vp, Vs, rho)
- * gradient.
+ * gradient.  All three parameters get a lag cube: lambda and mu from the
+ * strain/psi_sigma correlation, rho from the forward-stress/psi_v one, and
+ * the chain rule to (Vp, Vs, rho) is applied per lag -- it is pointwise and
+ * lag-independent, so it commutes with the lag reconstruction.
  *
  * WHAT IS DELIBERATELY ABSENT
  * ---------------------------
@@ -56,20 +59,22 @@
  * THE CHECK THIS PROGRAM IS BUILT AROUND
  * --------------------------------------
  * The tau=0 slice of <out_base>_lagvp.su must reproduce
- * <out_base>_vp_raw.su (and likewise Vs), both being sums over shots.  That
- * single comparison exercises the DFT accumulation, the 2*df reconstruction
- * weight, the conj(A)B complex algebra, the 0.25 Txz scatter and the loop
- * bounds at once.  It is not bit-exact -- the lag cube is band limited to
+ * <out_base>_vp_raw.su (and likewise Vs and rho), both being sums over
+ * shots.  That single comparison exercises the DFT accumulation, the 2*df
+ * reconstruction weight, the conj(A)B complex algebra, the 0.25 Txz scatter
+ * and the loop bounds at once.  The rho cube additionally checks the 2*df/dt
+ * weight and the 0.5/rho velocity-to-P scatter, and -- because it mixes all
+ * three kernels through the chain rule -- that the lambda/mu and rho
+ * accumulators share one lag reference.  It is not bit-exact -- the lag cube is band limited to
  * nfreq discrete lines over [lag_fmin, lag_fmax] -- so the ratio is itself
  * the measurement: it says how much of the kernel the frequency set captures.
  *
  * Output
  * ------
  *   <out_base>_vp_raw.su  <out_base>_vs_raw.su  <out_base>_rho_raw.su
- *   <out_base>_shotNNN_lagvp.su   <out_base>_shotNNN_lagvs.su
+ *   <out_base>_shotNNN_lag{vp,vs,rho}.su
  *   <out_base>_shotNNN_lagaxis.txt
- *   <out_base>_lagvp.su  <out_base>_lagvs.su  <out_base>_lagaxis.txt
- *                                                    (the shot stack)
+ *   <out_base>_lag{vp,vs,rho}.su  <out_base>_lagaxis.txt (the shot stack)
  */
 
 #define MAX_COMP 8
@@ -149,6 +154,9 @@ char *sdoc[] = {
 "                 enough that 1/(2 df) exceeds the lag range, or the run",
 "                 aborts rather than show wrap-around as lag moveout.",
 "   lag_nt=21     number of lags, forced odd so tau=0 is sampled exactly.",
+"   lag_rho=1     also build the DENSITY lag cube.  Costs four more DFT",
+"                 accumulators, +67% on the lag memory.  Set 0 for g_Vp and",
+"                 g_Vs only.",
 "   lag_dt=       lag increment in s (default 10*dt).  Need not be a",
 "                 multiple of dt: the shift is a phase rotation.",
 " ",
@@ -156,6 +164,11 @@ char *sdoc[] = {
 "   comp=_rp      residual component(s), comma separated: _rvx,_rvz,_rp,",
 "                 _rtxx,_rtzz,_rtxz.  _rp needs rec_type_txx=1 rec_type_tzz=1.",
 "   file_obs=obs  observed data stem; files are <stem>_NNN<comp>.su",
+"   data_weight=0 0=off, 1=Brossier per-component RMS, w_c=1/rms(d_obs,c),",
+"                 read from shot 0 once.  Set this to match the inversion you",
+"                 are comparing against: fwi_inversion DEFAULTS it to 1",
+"                 whenever scaling>0, and on two velocity channels the weights",
+"                 differ enough to change the kernel.",
 "   out_base=lag  output stem",
 "   res_taper=0   cosine ramp (samples) on each end of the residual trace",
 "   grad_taper=0  source/receiver taper radius in grid points.  Applied to",
@@ -172,19 +185,30 @@ char *sdoc[] = {
 "                 along tau.  This is the only check that validates the",
 "                 tau != 0 axis; tau=0 is invariant under both a factor-2",
 "                 error in the lag scale and a sign flip.",
+"   shot_first=0  first shot to compute, as an index into the nshot shots",
+"   shot_last=    last shot to compute (default nshot-1, i.e. all of them).",
+"                 For running several copies in parallel on disjoint ranges:",
+"                 give every copy the SAME nshot/xsrc1/dxshot and its own",
+"                 out_base and chk_base.  Do NOT instead give each copy a",
+"                 one-shot geometry -- the grad_taper mask is built from the",
+"                 sources and receivers TOGETHER, so that would change the",
+"                 mask per copy and the partial stacks would not be summable.",
+"                 <out_base>_lag{vp,vs}.su is then a PARTIAL stack over the",
+"                 range, and the full stack is the sum of the partials.",
 "   chk_skipdt=50 forward checkpoint interval in time steps",
 "   chk_base=chk_lag  checkpoint file stem",
 "   verbose=1     1 = per-shot progress, 2 = per-lag gradient norms",
 " ",
 " Output:",
 "   <out_base>_{vp,vs,rho}_raw.su           raw gradient (shot sum)",
-"   <out_base>_shotNNN_lag{vp,vs}.su       per-shot lag cubes",
-"   <out_base>_lag{vp,vs}.su               shot-stacked lag cubes",
+"   <out_base>_shotNNN_lag{vp,vs,rho}.su   per-shot lag cubes",
+"   <out_base>_lag{vp,vs,rho}.su           shot-stacked lag cubes",
 "   <out_base>_lagaxis.txt                  lag/grid axis description",
 " Cubes are nz samples by (nx*nlag) traces, lag SLOWEST: trace = ilag*nx+ix.",
 " ",
 " The check: the tau=0 slice of <out_base>_lagvp.su must reproduce",
-" <out_base>_vp_raw.su, up to the band limiting of the frequency set.",
+" <out_base>_vp_raw.su, up to the band limiting of the frequency set, and",
+" likewise for vs and rho.",
 " ",
 NULL};
 
@@ -246,8 +270,11 @@ int main(int argc, char **argv)
 	int     nmodel, verbose;
 
 	char   *chk_base, *comp_str, *file_obs, *out_base;
+	int     data_weight;
+	float  *comp_weights = NULL;
 	int     chk_skipdt, res_taper, grad_taper, grad_taper_core, lag_shift;
-	int     lag_nfreq, lag_nt, nfreq_dense;
+	int     shot_first, shot_last;
+	int     lag_nfreq, lag_nt, lag_rho, nfreq_dense;
 	float   lag_fmin, lag_fmax, lag_dt, trec;
 
 	float  *grad1, *grad2, *grad3;
@@ -267,6 +294,12 @@ int main(int argc, char **argv)
 	if (!getparstring("comp", &comp_str)) comp_str = "_rp";
 	if (!getparstring("file_obs", &file_obs)) file_obs = "obs";
 	if (!getparstring("out_base", &out_base)) out_base = "lag";
+	if (!getparint("data_weight", &data_weight)) data_weight = 0;
+	if (data_weight < 0 || data_weight > 1)
+		verr("test_lag_gradient: data_weight=%d invalid here (0=off, 1=Brossier "
+		     "per-component RMS).  The energy norm (2) needs the receiver "
+		     "sampling fwi_inversion builds and is not wired into this driver.",
+		     data_weight);
 	if (!getparint("res_taper", &res_taper)) res_taper = 0;
 	if (!getparint("grad_taper", &grad_taper)) grad_taper = 0;
 	if (!getparint("grad_taper_core", &grad_taper_core)) grad_taper_core = 0;
@@ -274,6 +307,20 @@ int main(int argc, char **argv)
 	/* ---- Standard model / source / receiver setup ---- */
 	getParameters(&mod, &rec, &sna, &wav, &src, &shot, &bnd, verbose);
 	n1 = mod.naz;
+
+	/* Shot subrange.  This driver has no MPI, so the only way to spread 24
+	 * shots over a multi-core box is to run several copies on disjoint
+	 * ranges.  The range must be expressed HERE, as a subset of the full
+	 * geometry, and NOT by handing each copy its own nshot=1 geometry: the
+	 * grad_taper mask below is built from `shot` and `rec` TOGETHER, so a
+	 * copy that only knew about its own shot would build a different mask
+	 * and the partial stacks would not be summable.  Defaults cover every
+	 * shot, so omitting both reproduces the serial run exactly. */
+	if (!getparint("shot_first", &shot_first)) shot_first = 0;
+	if (!getparint("shot_last",  &shot_last))  shot_last  = shot.n - 1;
+	if (shot_first < 0 || shot_last >= shot.n || shot_first > shot_last)
+		verr("shot_first=%d shot_last=%d is not a subrange of the %d shots "
+		     "defined by nshot/xsrc1/dxshot.", shot_first, shot_last, shot.n);
 
 	allocStoreSourceOnSurface(src);
 	readModel(&mod, &bnd);
@@ -373,6 +420,7 @@ int main(int argc, char **argv)
 		     lag_nfreq, trec, lag_fmin, lag_fmax, nfreq_dense,
 		     1.0f/trec, nfreq_dense);
 	if (!getparint("lag_nt", &lag_nt)) lag_nt = 21;
+	if (!getparint("lag_rho", &lag_rho)) lag_rho = 1;
 	if (!getparint("lag_shift", &lag_shift)) lag_shift = 0;
 	if (!getparfloat("lag_dt", &lag_dt)) lag_dt = 10.0f * mod.dt;
 	if (lag_dt <= 0.0f)
@@ -383,7 +431,8 @@ int main(int argc, char **argv)
 	vmess("*******************************************");
 	vmess("Grid: nx=%d nz=%d (padded nax=%d naz=%d)",
 		mod.nx, mod.nz, mod.nax, mod.naz);
-	vmess("Shots: %d   component(s): %s", shot.n, comp_str);
+	vmess("Shots: %d of %d (index %d..%d)   component(s): %s",
+		shot_last - shot_first + 1, shot.n, shot_first, shot_last, comp_str);
 	vmess("Lags: %d x %g s   frequencies: %d on [%g, %g] Hz",
 		lag_nt, lag_dt, lag_nfreq, lag_fmin, lag_fmax);
 	vmess("Residual taper: %d samples   gradient taper: %d grid pts",
@@ -423,10 +472,43 @@ int main(int argc, char **argv)
 		verr("test_lag_gradient: cannot allocate the gradient arrays "
 		     "(%zu points each).", sizem);
 
+	/* ---- data_weight=1: Brossier per-component RMS weights ----
+	 * w_c = 1/rms(d_obs,c), so each component contributes to the misfit
+	 * regardless of its physical amplitude.  Taken from shot 0 ONCE, exactly
+	 * as fwi_inversion does, so that a cube built here is the same per-shot
+	 * contribution the production run would have stacked.  It matters: on
+	 * comp=_rvx,_rvz the two channels differ by ~1.7x, and omitting the
+	 * weights silently reweights the kernel between them. */
+	if (data_weight == 1) {
+		char  comp_buf_w[1024];
+		char *token_w;
+		int   ncomp_w = 0;
+
+		strncpy(comp_buf_w, comp_str, sizeof(comp_buf_w) - 1);
+		comp_buf_w[sizeof(comp_buf_w) - 1] = '\0';
+		comp_weights = (float *)malloc(MAX_COMP * sizeof(float));
+		if (!comp_weights)
+			verr("test_lag_gradient: cannot allocate the component weights.");
+
+		token_w = strtok(comp_buf_w, ",");
+		while (token_w && ncomp_w < MAX_COMP) {
+			char  obs_w[512];
+			float rms;
+			snprintf(obs_w, sizeof(obs_w), "%s_%03d%s.su",
+			         file_obs, 0, token_w);
+			rms = computeDataRMS(obs_w);
+			comp_weights[ncomp_w] = (rms > 1.0e-30f) ? (1.0f / rms) : 1.0f;
+			vmess("Data weight: comp %s  rms=%.4e  w=%.4e",
+			      token_w, rms, comp_weights[ncomp_w]);
+			ncomp_w++;
+			token_w = strtok(NULL, ",");
+		}
+	}
+
 	/* ================================================================ *
 	 * Shot loop: forward -> residual -> adjoint (+ lag DFTs) -> cubes
 	 * ================================================================ */
-	for (ishot = 0; ishot < shot.n; ishot++) {
+	for (ishot = shot_first; ishot <= shot_last; ishot++) {
 
 		char  obs_names[MAX_COMP][512], syn_names[MAX_COMP][512];
 		const char *obs_arr[MAX_COMP], *syn_arr[MAX_COMP];
@@ -485,7 +567,7 @@ int main(int argc, char **argv)
 		snprintf(res_fname, sizeof(res_fname), "res_lag_%03d.su", ishot);
 
 		shot_misfit = computeResidual(ncomp, obs_arr, syn_arr, res_fname,
-			MISFIT_L2, NULL, NULL, NULL, verbose);
+			MISFIT_L2, comp_weights, NULL, NULL, verbose);
 		total_misfit += shot_misfit;
 		vmess("  misfit %.6e (cumulative %.6e)", shot_misfit, total_misfit);
 
@@ -533,7 +615,7 @@ int main(int argc, char **argv)
 		memset(g3_shot, 0, sizem * sizeof(float));
 
 		/* Clears this shot's DFT accumulators; the shot STACK is kept. */
-		lagGradientInit(&mod, lag_nfreq, lag_fmin, lag_fmax, verbose);
+		lagGradientInit(&mod, lag_nfreq, lag_fmin, lag_fmax, lag_rho, verbose);
 
 		/* param=1: accumulate in Lame.  Converting per shot and again on
 		 * the total is the double-chain-rule bug; here nothing converts at

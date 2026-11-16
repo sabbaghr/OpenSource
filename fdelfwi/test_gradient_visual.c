@@ -192,6 +192,9 @@ char *sdoc[] = {
 "                 |tau| range reaches 1/(4 df), half the aliasing period on",
 "                 the tau axis, since wrap-around is indistinguishable from",
 "                 genuine lag moveout.",
+"   lag_rho=1     also build the DENSITY lag cube <base>_shotNNN_lagrho.su.",
+"                 Costs four more DFT accumulators, +67% on the lag memory.",
+"                 Set 0 if only g_Vp and g_Vs are wanted.",
 " ",
 NULL};
 
@@ -611,7 +614,7 @@ int main(int argc, char **argv)
 
 	/* Time-lag extended imaging condition (lag_gradient.c).
 	 * lag_nfreq=0 disables it and leaves adj_shot untouched. */
-	int lag_nfreq = 0, lag_nt = 21;
+	int lag_nfreq = 0, lag_nt = 21, lag_rho = 1;
 	float lag_fmin = 0.0f, lag_fmax = 0.0f, lag_dt = 0.0f;
 	if (!getparint("lag_nfreq", &lag_nfreq)) lag_nfreq = 0;
 	if (lag_nfreq < 0)
@@ -628,6 +631,7 @@ int main(int argc, char **argv)
 		if (!getparfloat("lag_dt", &lag_dt)) lag_dt = 10.0f * mod.dt;
 		if (lag_dt <= 0.0f)
 			verr("test_gradient_visual: lag_dt=%g must be > 0 s.", lag_dt);
+		if (!getparint("lag_rho", &lag_rho)) lag_rho = 1;
 	}
 
 	/* grad_taper is applied far below, to g*_int/g*_sc, long after the lag
@@ -786,7 +790,8 @@ int main(int argc, char **argv)
 
 				/* Zeroes this shot's time-lag DFT accumulators; a no-op at
 				 * lag_nfreq=0, which leaves adj_shot untouched. */
-				lagGradientInit(&mod, lag_nfreq, lag_fmin, lag_fmax, verbose);
+				lagGradientInit(&mod, lag_nfreq, lag_fmin, lag_fmax,
+					lag_rho, verbose);
 
 				adj_shot(&mod, &src, &wav, &bnd, &rec, &adj,
 					ixsrc, izsrc, src_nwav, &chk, &sna_adj,

@@ -235,6 +235,42 @@ char *sdoc[] = {
 "   tik_lx=1           Tikhonov horizontal weight",
 "   tik_lz=1           Tikhonov vertical weight",
 "   prior_lambda=0     prior model regularization strength (0=off)",
+" ",
+" Probabilistic petrophysical constraint (petro_constraint.c):",
+"   Aragao & Sava, 2020, GEOPHYSICS 85(2), R101-R111, eq 16-20.  Adds",
+"   J_P = a*sum_x D(m) to the objective, where D(m) is the harmonic-mean",
+"   distance from the model point m to a petrophysical PDF f(p) built",
+"   from a well-log crossplot.  Confines the inversion to a feasible",
+"   petrophysical region and suppresses crosstalk between the two",
+"   crossplot parameters.",
+"   Elastic only.  J_P is a consistent (J,g) pair, so unlike grad_taper",
+"   or smooth_grad it does NOT break the Taylor test.",
+"   petro_file=        ASCII well-log crossplot: one sample pair per line,",
+"                      in the units of petro_space.  '#' comments and",
+"                      blank lines are ignored.  Activates the constraint.",
+"   petro_space=1      crossplot plane: 1=(lambda,mu) in GPa (as the",
+"                      paper), 2=(Vp,Vs) in km/s.  Independent of param=:",
+"                      the gradient is chain-ruled into whichever space",
+"                      the inversion runs in.  The choice is physics, not",
+"                      cosmetics -- d(m,p) mixes the two axes, so the",
+"                      units set the relative weight of the two",
+"                      parameters, and the numeric value of petro_a is",
+"                      tied to this choice.",
+"   petro_a=0          trade-off weight a (eq 18).  Paper sweeps 1e-9 to",
+"                      5e-8; the right value depends on your J_D scale,",
+"                      so prefer petro_balance unless reproducing a run.",
+"   petro_balance=0    auto-calibrate a at the FIRST gradient so that",
+"                      ||g_petro|| = petro_balance*||g_data||, then hold",
+"                      a fixed.  0.1 is a good starting point.",
+"                      Mutually exclusive with petro_a.",
+"   petro_nlam=100     PDF histogram bins along axis 1 (lambda or Vp)",
+"   petro_nmu=100      PDF histogram bins along axis 2 (mu or Vs)",
+"   petro_smooth=1     Gaussian smoothing of the histogram, in bins",
+"   petro_eps=0        softening length on d(m,p) (eq 16 singularity), in",
+"                      the crossplot unit.  0 = half a histogram bin",
+"                      diagonal, which is the right default: below the bin",
+"                      size the PDF carries no information, but 1/d^3",
+"                      would still spike there.",
 "   shin_precond=0     Shin diagonal preconditioner for acoustic (0=off, 1=on)",
 "   shin_eps=1e-4      Shin preconditioner threshold parameter",
 " ",
@@ -258,8 +294,17 @@ char *sdoc[] = {
 "                      angle = tomographic, so this is an upper bound.",
 "   lag_s_stop=0.30    cone: slope [ms/m] fully rejected.",
 "   lag_theta_pass=    ... or give the cone as a full opening angle 2theta [deg];",
-"   lag_theta_stop=    needs lag_v= and OVERRIDES lag_s_pass/lag_s_stop.",
+"   lag_theta_stop=    OVERRIDES lag_s_pass/lag_s_stop.  Needs lag_v= OR lag_nv>1.",
 "   lag_v=             velocity for the angle->slope map |p|=cos(theta)/v.",
+"   lag_nv=1           reference-velocity bins for the cutoff.  1 = one global",
+"                      velocity (lag_v), so the angle actually enforced drifts",
+"                      with the model: d(2theta) = -2 (dv/v) cot(theta).  >1 makes",
+"                      the cutoff FOLLOW v(x,z) (PSPI binning, Vp cube cut against",
+"                      Vp and Vs cube against Vs) and needs the ANGLES, not the",
+"                      slopes.  Measured half-power spread between a slow and a",
+"                      fast region: 3.8 deg (10% contrast) / 19.3 deg (50%) at",
+"                      nv=1, vs 0.1 / 0.9 deg at nv>=2.  nv=2 is already enough",
+"                      for a smooth trend; cost is sub-linear in nv.",
 "   lag_tap_tau=0.10   raised-cosine edge fraction on the lag axis",
 "   lag_tap_x=0.10     ... on x   NOTE: these attenuate the gradient near the",
 "   lag_tap_z=0.10     ... on z         model edges.  Not cosmetic.",
@@ -536,6 +581,121 @@ static void restoreWaterLayer(float *x, const float *x_frozen,
 
 
 /*--------------------------------------------------------------------
+ * applyPetroConstraint -- add J_P and its gradient to (fcost, grad_vec).
+ *
+ * Aragao & Sava (2020), equations 16-20.  See petro_constraint.c.
+ *
+ * Call AFTER extractGradientVector and the param/water masks, and
+ * BEFORE any scaling (Brossier m0 or TOY2DAC), so that the cost and the
+ * gradient receive identical treatment -- otherwise the pair handed to
+ * the optimizer is inconsistent and the Wolfe tests fail.
+ *
+ * The model is read back out of the FD arrays with extractModelVector
+ * rather than taken from the optimizer vector x, because x is in
+ * normalized tilde-space at this point whenever scaling>0.  Asking for
+ * param=1 gives lambda, mu, rho in Pa no matter what the inversion
+ * parameterization is.
+ *
+ * gvec/xlame/glam/gmuu are caller-owned scratch, sized nvec / 3*nmodel /
+ * nmodel / nmodel.
+ *--------------------------------------------------------------------*/
+static void applyPetroConstraint(float *fcost, float *grad_vec,
+                                 modPar *mod, bndPar *bnd, int param,
+                                 int nmodel, int nparam, petroPar *pp,
+                                 const paramMask *pmask, const int *water_mask,
+                                 float *xlame, float *glam, float *gmuu,
+                                 float *gvec, const char *file_grad,
+                                 int verbose)
+{
+	double dsum;
+	int    i, nvec = nparam * nmodel;
+
+	if (!pp->on) return;
+
+	extractModelVector(xlame, mod, bnd, 1);
+	dsum = petroCostGrad(xlame, nmodel, pp, water_mask, glam, gmuu);
+
+	/* Build g_petro at a=1 in the active parameterization, then mask it
+	 * the same way the data gradient was masked.  Whenever the crossplot
+	 * space and the inversion parameterization differ this picks up a
+	 * density component through the chain rule even though J_P has no
+	 * explicit rho dependence, so the rho mask matters here. */
+	memset(gvec, 0, (size_t)nvec * sizeof(float));
+	petroAccumGradient(gvec, nmodel, param, xlame, glam, gmuu, 1.0f, pp);
+	applyParamMask(gvec, nmodel, nparam, pmask);
+	applyWaterMask(gvec, nmodel, nparam, water_mask);
+
+	/* Calibrate 'a' against the data gradient ONCE, then freeze it.  An
+	 * 'a' that drifted with ||g_data|| would make J a moving target
+	 * between linesearch trials and break the Wolfe conditions -- the
+	 * same reason the energy-norm weights Q are sampled only once. */
+	if (!pp->calibrated) {
+		double gd = 0.0, gp = 0.0;
+		for (i = 0; i < nvec; i++) {
+			gd += (double)grad_vec[i] * (double)grad_vec[i];
+			gp += (double)gvec[i]     * (double)gvec[i];
+		}
+		gd = sqrt(gd);
+		gp = sqrt(gp);
+		if (gp > 0.0) {
+			pp->a = (float)((double)pp->balance * gd / gp);
+		} else {
+			pp->a = 0.0f;
+			vwarn("petro: ||g_petro||=0 at the initial model, "
+			      "cannot calibrate petro_a; constraint disabled");
+		}
+		pp->calibrated = 1;
+		if (verbose >= 1)
+			vmess("Petrophysical constraint: calibrated a=%.4e "
+			      "(||g_data||=%.4e, ||g_petro||=%.4e, balance=%.3f)",
+			      pp->a, gd, gp, pp->balance);
+	}
+
+	/* Write g_petro once, at the first gradient, so it can be compared with
+	 * gradient_initial_*.su.  That file is written BEFORE this function is
+	 * called, so it holds the pure data gradient; the constrained gradient
+	 * is the sum of the two.  Writing the constraint's own contribution
+	 * rather than the sum keeps the decomposition explicit, and avoids the
+	 * confound of comparing two separate runs whose scaling factors are
+	 * computed independently.  Units: same as the data gradient, already
+	 * multiplied by 'a', so the two files are directly addable. */
+	if (file_grad && !pp->wrote_grad) {
+		const char *pn1 = (param == 1) ? "lam" : "vp";
+		const char *pn2 = (param == 1) ? "mu" : "vs";
+		const char *pn[3];
+		char  fname[512];
+		float *tmp = (float *)malloc((size_t)nmodel * sizeof(float));
+		int    k;
+
+		pn[0] = pn1; pn[1] = pn2; pn[2] = "rho";
+		if (tmp) {
+			for (k = 0; k < nparam; k++) {
+				for (i = 0; i < nmodel; i++)
+					tmp[i] = pp->a * gvec[k*nmodel + i];
+				snprintf(fname, sizeof(fname), "%s_petro_%s.su",
+				         file_grad, pn[k]);
+				writesufile(fname, tmp, mod->nz, mod->nx,
+				            mod->z0, mod->x0, mod->dz, mod->dx);
+			}
+			free(tmp);
+			if (verbose >= 1)
+				vmess("Wrote petro gradient: %s_petro_{%s,%s,rho}.su",
+				      file_grad, pn1, pn2);
+		}
+		pp->wrote_grad = 1;
+	}
+
+	*fcost += pp->a * (float)dsum;
+	for (i = 0; i < nvec; i++) grad_vec[i] += pp->a * gvec[i];
+
+	if (verbose >= 2)
+		vmess("  J_P:           %.4e  (a=%.3e, sum_x D=%.4e %s)",
+		      pp->a * (float)dsum, pp->a, dsum,
+		      (pp->space == PETRO_SPACE_VPVS) ? "km/s" : "GPa");
+}
+
+
+/*--------------------------------------------------------------------
  * compute_fwi_gradient -- Compute total misfit and gradient.
  *
  * Distributes shots across MPI ranks, runs forward + residual +
@@ -729,8 +889,11 @@ static float compute_fwi_gradient(
 
 			/* Zeroes this shot's time-lag DFT accumulators.  A no-op at
 			 * nfreq=0, which leaves adj_shot bit-identical. */
+			/* do_rho=0: this path feeds lagGradientTomo, which uses only the
+			 * Vp and Vs cubes, so the four density accumulators would be
+			 * +67% memory for something it discards. */
 			lagGradientInit(mod, lt->on ? lt->nfreq : 0,
-			                lt->fmin, lt->fmax, verbose);
+			                lt->fmin, lt->fmax, 0, verbose);
 
 #ifdef USE_CUDA
 			if (s_ndom_fwi > 1 && s_dom_fwi)
@@ -1416,6 +1579,21 @@ int main(int argc, char **argv)
 	float prior_lambda = 0.0f;
 	if (!getparfloat("prior_lambda", &prior_lambda)) prior_lambda = 0.0f;
 
+	/* Probabilistic petrophysical constraint (Aragao & Sava 2020) */
+	petroPar petro;
+	char    *petro_file = NULL;
+	int      petro_nlam = 100, petro_nmu = 100, petro_space = PETRO_SPACE_LAMMU;
+	float    petro_smooth = 1.0f, petro_eps = 0.0f;
+	memset(&petro, 0, sizeof(petroPar));
+	if (!getparstring("petro_file", &petro_file)) petro_file = NULL;
+	if (!getparint("petro_space", &petro_space)) petro_space = PETRO_SPACE_LAMMU;
+	if (!getparfloat("petro_a", &petro.a)) petro.a = 0.0f;
+	if (!getparfloat("petro_balance", &petro.balance)) petro.balance = 0.0f;
+	if (!getparint("petro_nlam", &petro_nlam)) petro_nlam = 100;
+	if (!getparint("petro_nmu", &petro_nmu)) petro_nmu = 100;
+	if (!getparfloat("petro_smooth", &petro_smooth)) petro_smooth = 1.0f;
+	if (!getparfloat("petro_eps", &petro_eps)) petro_eps = 0.0f;
+
 	/* Shin preconditioner for acoustic */
 	int shin_precond = 0;
 	float shin_eps = 1e-4f;
@@ -1697,6 +1875,43 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* ============================================================ */
+	/* Build the petrophysical PDF (fixed prior, built once).       */
+	/* ============================================================ */
+	float *petro_xlame = NULL, *petro_glam = NULL, *petro_gmuu = NULL;
+	float *petro_gvec = NULL;
+	if (petro_file != NULL) {
+		if (!elastic)
+			verr("petro_file requires an elastic scheme (ischeme=3/4): "
+			     "the constraint needs a two-parameter elastic crossplot");
+		if (petro_space != PETRO_SPACE_LAMMU && petro_space != PETRO_SPACE_VPVS)
+			verr("petro_space must be 1 (lambda-mu, GPa) or 2 (Vp-Vs, km/s)");
+		if (petro.a <= 0.0f && petro.balance <= 0.0f)
+			verr("petro_file given but both petro_a and petro_balance are 0; "
+			     "set one of them to activate the constraint");
+		if (petro.a > 0.0f && petro.balance > 0.0f)
+			verr("petro_a and petro_balance are mutually exclusive: "
+			     "either fix 'a' or calibrate it");
+		if (petroBuild(petro_file, petro_space, petro_nlam, petro_nmu,
+		               petro_smooth, petro_eps, &petro,
+		               (mpi_rank == 0) ? verbose : 0))
+			verr("petroBuild failed for petro_file=%s", petro_file);
+		/* Re-check AFTER the build, not only before it.  An inert
+		 * constraint is the worst failure mode here: it still reports a
+		 * healthy sum_x D every iteration, so the run looks fine and the
+		 * result is simply unconstrained.  Cheap insurance against
+		 * petroBuild ever clobbering the weights again. */
+		if (petro.a <= 0.0f && petro.balance <= 0.0f)
+			verr("petro: the trade-off weight was lost during petroBuild "
+			     "(a=%g, balance=%g); the constraint would be inert",
+			     petro.a, petro.balance);
+		petro.calibrated = (petro.balance <= 0.0f);
+		petro_xlame = (float *)malloc((size_t)3 * nmodel * sizeof(float));
+		petro_glam  = (float *)malloc((size_t)nmodel * sizeof(float));
+		petro_gmuu  = (float *)malloc((size_t)nmodel * sizeof(float));
+		petro_gvec  = (float *)malloc((size_t)nvec * sizeof(float));
+	}
+
 	/* Parameter scaling (Métivier, pers. comm.):
 	 *   0 = none (raw physical units)
 	 *   1 = Range normalization: m* = m / Δm,  Δm = m_max - m_min
@@ -1849,18 +2064,36 @@ int main(int argc, char **argv)
 		getparfloat("lag_tap_z",   &lt.cone.tap_z);
 		getparint  ("lag_pad",     &lt.cone.pad);
 		getparint  ("lag_nu0_keep", &lt.cone.nu0_keep);
+		getparint  ("lag_nv",      &lt.cone.nv);
+		if (lt.cone.nv < 1)
+			verr("lag_nv=%d must be >= 1 (1 = one stationary cutoff).",
+			     lt.cone.nv);
 
 		/* An opening angle, if given, overrides the slopes. */
 		if (getparfloat("lag_theta_pass", &theta_pass) &&
 		    getparfloat("lag_theta_stop", &theta_stop)) {
-			if (!getparfloat("lag_v", &vcone))
-				verr("lag_theta_pass/lag_theta_stop need lag_v= (the velocity "
-				     "that turns an angle into a slope).");
 			if (!(theta_stop < theta_pass))
 				verr("need lag_theta_stop < lag_theta_pass (a WIDER angle is a "
 				     "SMALLER slope), got %g and %g deg.", theta_pass, theta_stop);
-			lt.cone.s_pass = lagConeAngleToSlope(theta_pass, vcone);
-			lt.cone.s_stop = lagConeAngleToSlope(theta_stop, vcone);
+			/* Keep the ANGLES: with lag_nv>1 the slope is rebuilt per velocity
+			 * bin, so a single pre-baked s_pass cannot be used. */
+			lt.cone.theta_pass = theta_pass;
+			lt.cone.theta_stop = theta_stop;
+			if (!getparfloat("lag_v", &vcone)) {
+				if (lt.cone.nv <= 1)
+					verr("lag_theta_pass/lag_theta_stop need either lag_v= (one "
+					     "velocity for the angle->slope map) or lag_nv>1 (the "
+					     "cutoff then follows the model's own Vp/Vs).");
+				vcone = 0.0f;
+			} else {
+				lt.cone.s_pass = lagConeAngleToSlope(theta_pass, vcone);
+				lt.cone.s_stop = lagConeAngleToSlope(theta_stop, vcone);
+			}
+		} else if (lt.cone.nv > 1) {
+			verr("lag_nv=%d makes the cone cutoff follow v(x,z), which is only "
+			     "defined for an ANGLE: give lag_theta_pass= and lag_theta_stop= "
+			     "(deg).  A slope already has one velocity baked into it.",
+			     lt.cone.nv);
 		}
 
 		/* The SAME mask the driver's taperGradientSrcRcv would have applied.
@@ -1880,9 +2113,15 @@ int main(int argc, char **argv)
 			vmess("  %d frequencies, %.3f - %.3f Hz", lt.nfreq, lt.fmin, lt.fmax);
 			vmess("  %d lags, dtau=%.5f s  ->  |tau| <= %.5f s",
 			      lt.nt | 1, lt.dt, 0.5f * (float)((lt.nt | 1) - 1) * lt.dt);
-			vmess("  cone: pass |p| <= %.4f ms/m, stop |p| >= %.4f ms/m "
-			      "(small slope = wide angle = tomographic)",
-			      lt.cone.s_pass, lt.cone.s_stop);
+			if (lt.cone.nv > 1)
+				vmess("  cone: pass 2theta >= %.1f deg, stop 2theta <= %.1f deg, "
+				      "cutoff FOLLOWS v(x,z) over %d bins (Vp cube vs Vp, Vs "
+				      "cube vs Vs)",
+				      lt.cone.theta_pass, lt.cone.theta_stop, lt.cone.nv);
+			else
+				vmess("  cone: pass |p| <= %.4f ms/m, stop |p| >= %.4f ms/m "
+				      "(small slope = wide angle = tomographic), ONE velocity",
+				      lt.cone.s_pass, lt.cone.s_stop);
 			vmess("  edge tapers tau/x/z = %.2f/%.2f/%.2f, pad=%d",
 			      lt.cone.tap_tau, lt.cone.tap_x, lt.cone.tap_z, lt.cone.pad);
 			vmess("  grad_taper=%d (core=%d) applied to the cubes BEFORE "
@@ -2228,6 +2467,12 @@ int main(int argc, char **argv)
 				vmess("Tikhonov: lambda=%.2e lx=%.2f lz=%.2f",
 				      tik_lambda, tik_lx, tik_lz);
 		}
+
+		/* Petrophysical constraint (before scaling) */
+		applyPetroConstraint(&fcost, grad_vec, &mod, &bnd, param,
+		                     nmodel, nparam, &petro, &pmask, water_mask,
+		                     petro_xlame, petro_glam, petro_gmuu,
+		                     petro_gvec, file_grad, verbose);
 
 		/* Prior model regularization (before scaling) */
 		if (prior_lambda > 0.0f) {
@@ -2678,6 +2923,12 @@ int main(int argc, char **argv)
 					                   tik_lambda, tik_lx, tik_lz, NULL, 1);
 				}
 
+				/* Petrophysical constraint (loop) */
+				applyPetroConstraint(&fcost, grad_vec, &mod, &bnd, param,
+				                     nmodel, nparam, &petro, &pmask, water_mask,
+				                     petro_xlame, petro_glam, petro_gmuu,
+				                     petro_gvec, file_grad, verbose);
+
 				/* TOY2DAC scaling (loop) */
 				if (scaling_mode == 1)
 					apply_toy2dac_scaling(&fcost, grad_vec, nvec, toy2dac_sf);
@@ -3105,6 +3356,11 @@ int main(int argc, char **argv)
 	free(x);
 	if (x_frozen) free(x_frozen);
 	if (water_mask) free(water_mask);
+	petroFree(&petro);
+	if (petro_xlame) free(petro_xlame);
+	if (petro_glam) free(petro_glam);
+	if (petro_gmuu) free(petro_gmuu);
+	if (petro_gvec) free(petro_gvec);
 	free(grad_vec);
 	if (grad_preco_vec) free(grad_preco_vec);
 	free(grad1); free(grad3);
