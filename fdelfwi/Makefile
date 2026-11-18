@@ -210,6 +210,7 @@ SRCC	= fdfwimodc.c \
 		energy_weights.c  \
 		energy_imaging.c  \
 		lag_gradient.c  \
+		lag_modesep.c  \
 		space_lag_gradient.c  \
 		lag_cone_filter.c  \
 		lag_cone_pspi.c  \

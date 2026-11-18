@@ -741,6 +741,40 @@ void lagGradientWriteStack(modPar *mod, const char *base, int verbose);
 /* Release everything including the stack; call after the shot loop. */
 void lagGradientFree(void);
 
+/* Read-only view of the per-shot DFT accumulators of lag_gradient.c, for
+ * lag_modesep.c.  Layout of every array: complex, frequency fastest,
+ * element (ig, k) at ((size_t)ig*nfreq + k)*2 (re, im). */
+typedef struct _lagStatePar {
+	int    on, rho_on, rho_nacc, nfreq;
+	size_t sizem;
+	float  df, dt;
+	const float *omega;
+	const float *exx, *ezz, *shr;   /* forward D+x vx, D+z vz, D-z vx + D-x vz */
+	const float *pxx, *pzz, *pxz;   /* adjoint psi_txx, psi_tzz, psi_txz       */
+	const float *dsx, *dsz;         /* forward -rox Dsig_vx, -roz Dsig_vz      */
+	const float *pvx, *pvz;         /* adjoint psi_vx, psi_vz                  */
+} lagStatePar;
+void lagGradientState(lagStatePar *s);
+/* lag_gradient.c helpers shared with lag_modesep.c (same bounds, stencils,
+ * interior strip and lag-axis guard as the conventional lag cubes). */
+void lagBounds(modPar *mod, bndPar *bnd,
+    int *ibPx, int *iePx, int *ibPz, int *iePz,
+    int *ibTx, int *ieTx, int *ibTz, int *ieTz);
+void lagCoef(modPar *mod, float *c1, float *c2, float *c3, float *c4);
+void lagStrip(float *dst, float *src, modPar *mod, bndPar *bnd);
+int  lagAxisCheck(const char *who, int nlag, float dlag);
+
+/* --- lag_modesep.c: P/S mode-separated time-lag gradients ---
+ * After lagGradientWrite for a shot, split every accumulated factor into its
+ * P and S parts (exact discrete Helmholtz projection, per frequency) and
+ * write the PP and SS lag cubes of g_Vs and g_rho:
+ *   <base>_PP_shotNNN_lag{vs,rho}.su, <base>_SS_shotNNN_lag{vs,rho}.su
+ * plus <base>_shotNNN_modesep.txt (energy fractions, tau=0 closure check).
+ * g_Vp needs no file: it is identically PP (S parts are traceless).
+ * Requires lag_rho=1.  mask as for lagGradientWrite. */
+void lagModeSepWrite(modPar *mod, bndPar *bnd, const char *base, int ishot,
+    int nlag, float dlag, float *mask, int verbose);
+
 
 /* --- space_lag_gradient.c: space-lag extended imaging condition ---
  * The same lambda/mu kernels with the two wavefields separated by a space

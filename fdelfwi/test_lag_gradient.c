@@ -159,6 +159,14 @@ char *sdoc[] = {
 "                 g_Vs only.",
 "   lag_dt=       lag increment in s (default 10*dt).  Need not be a",
 "                 multiple of dt: the shift is a phase rotation.",
+"   lag_modesep=0 1: ALSO write the P/S mode-separated cubes of each shot,",
+"                 <out_base>_PP_shotNNN_lag{vs,rho}.su (P part of both",
+"                 wavefields) and <out_base>_SS_shotNNN_lag{vs,rho}.su (S",
+"                 part of both), plus <out_base>_shotNNN_modesep.txt.  The",
+"                 split is a discrete Helmholtz projection of the DFT",
+"                 accumulators (lag_modesep.c); g_Vp is pure PP by",
+"                 construction and gets no file.  Needs lag_rho=1.  The",
+"                 ordinary cubes are written unchanged.",
 " ",
 " Gradient parameters:",
 "   comp=_rp      residual component(s), comma separated: _rvx,_rvz,_rp,",
@@ -275,6 +283,7 @@ int main(int argc, char **argv)
 	int     chk_skipdt, res_taper, grad_taper, grad_taper_core, lag_shift;
 	int     shot_first, shot_last;
 	int     lag_nfreq, lag_nt, lag_rho, nfreq_dense;
+	int     lag_modesep;
 	float   lag_fmin, lag_fmax, lag_dt, trec;
 
 	float  *grad1, *grad2, *grad3;
@@ -421,6 +430,10 @@ int main(int argc, char **argv)
 		     1.0f/trec, nfreq_dense);
 	if (!getparint("lag_nt", &lag_nt)) lag_nt = 21;
 	if (!getparint("lag_rho", &lag_rho)) lag_rho = 1;
+	if (!getparint("lag_modesep", &lag_modesep)) lag_modesep = 0;
+	if (lag_modesep && !lag_rho)
+		verr("test_lag_gradient: lag_modesep=1 needs lag_rho=1 (the density "
+		     "factors are split too).");
 	if (!getparint("lag_shift", &lag_shift)) lag_shift = 0;
 	if (!getparfloat("lag_dt", &lag_dt)) lag_dt = 10.0f * mod.dt;
 	if (lag_dt <= 0.0f)
@@ -437,6 +450,8 @@ int main(int argc, char **argv)
 		lag_nt, lag_dt, lag_nfreq, lag_fmin, lag_fmax);
 	vmess("Residual taper: %d samples   gradient taper: %d grid pts",
 		res_taper, grad_taper);
+	if (lag_modesep)
+		vmess("Mode separation: ON -- PP and SS cubes of g_Vs and g_rho per shot");
 
 	/* The taper mask is built ONCE and used both for the lag cubes (inside
 	 * lagGradientWrite, per lag) and for the raw gradient below, so the
@@ -629,6 +644,11 @@ int main(int argc, char **argv)
 		/* ----- 4. This shot's lag cubes ----- */
 		lagGradientWrite(&mod, &bnd, out_base, ishot,
 			lag_nt, lag_dt, taper_mask, verbose);
+
+		/* ----- 4b. P/S mode-separated cubes, from the same accumulators ----- */
+		if (lag_modesep)
+			lagModeSepWrite(&mod, &bnd, out_base, ishot,
+				lag_nt, lag_dt, taper_mask, verbose);
 
 		for (i = 0; i < (int)sizem; i++) {
 			grad1[i] += g1_shot[i];

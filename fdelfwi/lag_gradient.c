@@ -227,7 +227,7 @@ static float  lg_stk_dlag = 0.0f;
  * tau = 0 slice is accumulated over identical grid points: absorbing
  * taper exclusion, free-surface row exclusion, and FD stencil margins.
  ***********************************************************************/
-static void lagBounds(modPar *mod, bndPar *bnd,
+void lagBounds(modPar *mod, bndPar *bnd,
                       int *ibPx, int *iePx, int *ibPz, int *iePz,
                       int *ibTx, int *ieTx, int *ibTz, int *ieTz)
 {
@@ -276,7 +276,7 @@ static void lagBounds(modPar *mod, bndPar *bnd,
 /***********************************************************************
  * lagCoef -- FD coefficients matching the forward stress update.
  ***********************************************************************/
-static void lagCoef(modPar *mod, float *c1, float *c2, float *c3, float *c4)
+void lagCoef(modPar *mod, float *c1, float *c2, float *c3, float *c4)
 {
 	*c3 = *c4 = 0.0f;
 	switch (mod->iorder) {
@@ -839,7 +839,7 @@ static void lagSliceRho(modPar *mod, float tau, float *grho)
 /***********************************************************************
  * lagStrip -- Copy the interior of a padded array into a dense one.
  ***********************************************************************/
-static void lagStrip(float *dst, float *src, modPar *mod, bndPar *bnd)
+void lagStrip(float *dst, float *src, modPar *mod, bndPar *bnd)
 {
 	int ix, iz;
 	int ibndx = mod->ioPx;
@@ -942,7 +942,7 @@ static void lagEmit(modPar *mod, const char *prefix,
  * cannot be bypassed by whichever entry point is used.  `who` only names the
  * caller in the messages.
  ***********************************************************************/
-static int lagAxisCheck(const char *who, int nlag, float dlag)
+int lagAxisCheck(const char *who, int nlag, float dlag)
 {
 	float tau_max;
 
@@ -1325,4 +1325,29 @@ void lagGradientFree(void)
 	if (lg_stk_rho) { free(lg_stk_rho); lg_stk_rho = NULL; }
 	lg_stk_nlag = lg_stk_nmodel = lg_stk_nshot = 0;
 	lg_stk_dlag = 0.0f;
+}
+
+
+/***********************************************************************
+ * lagGradientState -- Read-only view of this shot's DFT accumulators.
+ *
+ * For lag_modesep.c, which splits the accumulated factors into their P and
+ * S parts after the time loop.  A pure accessor: nothing here changes what
+ * this module computes or writes.  Valid between lagGradientInit and the
+ * next lagGradientInit / lagGradientFree.
+ ***********************************************************************/
+void lagGradientState(lagStatePar *s)
+{
+	s->on        = lg_on;
+	s->rho_on    = lg_rho_on;
+	s->rho_nacc  = lg_rho_nacc;
+	s->nfreq     = lg_nfreq;
+	s->sizem     = lg_sizem;
+	s->df        = lg_df;
+	s->dt        = lg_dt;
+	s->omega     = lg_omega;
+	s->exx = lg_exx;  s->ezz = lg_ezz;  s->shr = lg_shr;
+	s->pxx = lg_pxx;  s->pzz = lg_pzz;  s->pxz = lg_pxz;
+	s->dsx = lg_dsx;  s->dsz = lg_dsz;
+	s->pvx = lg_pvx;  s->pvz = lg_pvz;
 }
