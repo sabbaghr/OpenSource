@@ -40,8 +40,8 @@
  * WHAT IS DELIBERATELY ABSENT
  * ---------------------------
  * No preconditioner, no pseudo-Hessian output, no parameter scaling, no
- * gradient smoothing, no energy_ic angle filter, no cross-correlation or
- * K-H misfit, no multiscale bands, no Born/TRN path.  The gradient is
+ * gradient smoothing, no energy_ic angle filter, no cross-correlation
+ * misfit, no multiscale bands, no Born/TRN path.  The gradient is
  * written RAW -- nothing is applied to it but grad_taper -- because the
  * tau=0 slice of the lag cube has nothing else to be compared against.
  *
@@ -177,6 +177,13 @@ char *sdoc[] = {
 "                 are comparing against: fwi_inversion DEFAULTS it to 1",
 "                 whenever scaling>0, and on two velocity channels the weights",
 "                 differ enough to change the kernel.",
+"   misfit=0      objective: 0=L2, 2=Kirchhoff-Helmholtz energy flux, whose",
+"                 adjoint source is the TENSORIAL injection (velocity residual",
+"                 -> stress source, traction residual -> force source; see",
+"                 kh_misfit.c).  misfit=2 needs comp=_rvx,_rvz,_rtxz,_rtzz",
+"                 and data_weight=0.  The gradient equations are unchanged.",
+"   kh_normal=1   z component of the recording-surface normal (misfit=2).",
+"                 Flipping it flips the sign of J and of the whole gradient.",
 "   out_base=lag  output stem",
 "   res_taper=0   cosine ramp (samples) on each end of the residual trace",
 "   grad_taper=0  source/receiver taper radius in grid points.  Applied to",
@@ -279,6 +286,10 @@ int main(int argc, char **argv)
 
 	char   *chk_base, *comp_str, *file_obs, *out_base;
 	int     data_weight;
+	int     misfit_int;
+	float   kh_normal;
+	misfitType mtype;
+	khPar  *kh = NULL;
 	float  *comp_weights = NULL;
 	int     chk_skipdt, res_taper, grad_taper, grad_taper_core, lag_shift;
 	int     shot_first, shot_last;
@@ -309,6 +320,16 @@ int main(int argc, char **argv)
 		     "per-component RMS).  The energy norm (2) needs the receiver "
 		     "sampling fwi_inversion builds and is not wired into this driver.",
 		     data_weight);
+	if (!getparint("misfit", &misfit_int)) misfit_int = 0;
+	if (misfit_int != 0 && misfit_int != 2)
+		verr("test_lag_gradient: misfit=%d not supported here (0=L2, "
+		     "2=Kirchhoff-Helmholtz energy flux).", misfit_int);
+	mtype = (misfitType)misfit_int;
+	if (mtype == MISFIT_KH && data_weight != 0)
+		verr("test_lag_gradient: misfit=2 requires data_weight=0; the energy "
+		     "flux pairs a traction with a velocity, so reweighting the "
+		     "channels destroys the flux.");
+	if (!getparfloat("kh_normal", &kh_normal)) kh_normal = 1.0f;
 	if (!getparint("res_taper", &res_taper)) res_taper = 0;
 	if (!getparint("grad_taper", &grad_taper)) grad_taper = 0;
 	if (!getparint("grad_taper_core", &grad_taper_core)) grad_taper_core = 0;
@@ -520,6 +541,17 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* ---- misfit=2: Kirchhoff-Helmholtz receiver quadrature ----
+	 * Same construction as test_gradient_visual: built once from the
+	 * receiver line, used by computeResidual for every shot. */
+	if (mtype == MISFIT_KH) {
+		kh = khWeightsBuild(&rec, kh_normal, verbose);
+		vmess("Misfit: Kirchhoff-Helmholtz energy flux (tensorial injection), "
+		      "kh_normal=%g", kh_normal);
+	}
+	else
+		vmess("Misfit: L2");
+
 	/* ================================================================ *
 	 * Shot loop: forward -> residual -> adjoint (+ lag DFTs) -> cubes
 	 * ================================================================ */
@@ -559,7 +591,7 @@ int main(int argc, char **argv)
 			computeHydrophone(syn_tzz, syn_txx, syn_p, verbose);
 		}
 
-		/* ----- 2. Residual, L2 ----- */
+		/* ----- 2. Residual (L2, or K-H with misfit=2) ----- */
 		strncpy(comp_buf, comp_str, sizeof(comp_buf) - 1);
 		comp_buf[sizeof(comp_buf) - 1] = '\0';
 		token = strtok(comp_buf, ",");
@@ -582,7 +614,7 @@ int main(int argc, char **argv)
 		snprintf(res_fname, sizeof(res_fname), "res_lag_%03d.su", ishot);
 
 		shot_misfit = computeResidual(ncomp, obs_arr, syn_arr, res_fname,
-			MISFIT_L2, comp_weights, NULL, NULL, verbose);
+			mtype, comp_weights, NULL, kh, verbose);
 		total_misfit += shot_misfit;
 		vmess("  misfit %.6e (cumulative %.6e)", shot_misfit, total_misfit);
 
@@ -724,6 +756,7 @@ int main(int argc, char **argv)
 	free(wfld);
 	free(grad_vec);
 	if (taper_mask) free(taper_mask);
+	if (kh) khWeightsFree(kh);
 
 	return 0;
 }
