@@ -91,6 +91,11 @@
  *     parameterization differ, the constrained pair carries rho, so
  *     dJ_P/drho is NOT zero.
  *
+ *  4. HESSIAN.  petroHessVec (the exact J_P Hessian the TRN family adds
+ *     to every Hd) against a central difference of petroAccumGradient,
+ *     both params, far field and at the PDF centroid.  Catches a dropped
+ *     second-derivative term of the parameter map in the mixed cases.
+ *
  * Usage:
  *   test_petro petro_file=wells.txt [petro_space=] [petro_nlam=]
  *              [petro_nmu=] [petro_smooth=] [petro_eps=] [verbose=]
@@ -115,7 +120,7 @@ char *sdoc[] = {
 "   petro_eps=0        floor on d(m,p); 0 = half a histogram bin diagonal",
 "   verbose=1          1=print the three check tables",
 "  ",
-" Runs three checks on J_P (Aragao & Sava 2020, eq 16-20) with no wave",
+" Runs four checks on J_P (Aragao & Sava 2020, eq 16-20) with no wave",
 " propagation: a Taylor test of (J,g) consistency, an attraction test that",
 " catches a sign error the Taylor test cannot, and a finite-difference test",
 " of petroAccumGradient for both param=1 and param=2, including the",
@@ -444,6 +449,102 @@ int main(int argc, char **argv)
 				}
 			}
 			vmess("");
+		}
+	}
+
+	/* ==================================================================
+	 * CHECK 4 -- petroHessVec vs finite difference of the gradient
+	 *
+	 * H_P d  =?  [g(m + h d) - g(m - h d)] / 2h,  g = petroAccumGradient
+	 *
+	 * Both params, so both the matched (linear map, T_k = 0) and the mixed
+	 * (second-derivative T_k term essential) cases are exercised.  Two
+	 * points: the far-field point of check 3, and the PDF centroid, where
+	 * hess D is dominated by the S term and can be indefinite.
+	 * ================================================================== */
+	vmess("");
+	vmess("=== CHECK 4: petroHessVec vs finite difference of gradient ===");
+	{
+		float pts[2][3];
+		const char *ptname[2] = {"far field", "centroid "};
+		int   ipt, param;
+#define NHSTEP 7
+		const double hstep[NHSTEP] = {1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 3e-5, 1e-5};
+
+		petroMakeLame(space,
+		              pp.c1_max + 0.3f*(pp.c1_max - pp.c1_min),
+		              pp.c2_max + 0.3f*(pp.c2_max - pp.c2_min),
+		              2200.0f, pts[0]);
+		petroMakeLame(space, c1_c, c2_c, 2100.0f, pts[1]);
+
+		vmess("   point      param   ||H d||          ||FD||           rel.err");
+		for (ipt = 0; ipt < 2; ipt++) {
+			for (param = 1; param <= 2; param++) {
+				float  v0[3], dv[3], hd[3], gp[3], gm[3], v[3], t[3];
+				float  ga[1], gb[1];
+				double nh = 0.0, nf = 0.0, rel, hbest;
+				int    ih;
+				const float *one = pts[ipt];
+
+				if (param == 2) {
+					v0[2] = one[2];
+					v0[0] = sqrtf((one[0] + 2.0f*one[1]) / one[2]);
+					v0[1] = sqrtf(one[1] / one[2]);
+					dv[0] =  0.7f * v0[0];
+					dv[1] = -0.5f * v0[1];
+					dv[2] =  0.4f * v0[2];
+				} else {
+					v0[0] = one[0]; v0[1] = one[1]; v0[2] = one[2];
+					dv[0] =  0.7f * (one[0] + 2.0f*one[1]);
+					dv[1] = -0.5f * (one[0] + 2.0f*one[1]);
+					dv[2] =  0.4f * one[2];
+				}
+
+				memset(hd, 0, sizeof(hd));
+				petroHessVec(hd, dv, 1, param, one, &pp, NULL, 1.0f);
+				for (k = 0; k < 3; k++) nh += (double)hd[k]*hd[k];
+
+				/* Step sweep, best step reported.  g_P is float32 and, near
+				 * the cloud, a small net of large cancelling per-cell terms,
+				 * so its FD has a rounding floor ~ ulp(sum|terms|)/h that
+				 * grows as h shrinks while truncation shrinks with h.  A
+				 * fixed h either under-resolves or drowns in that floor; a
+				 * correct Hd shows a clear minimum, a wrong one never
+				 * converges at any h. */
+				rel = 1.0e30; hbest = 0.0;
+				for (ih = 0; ih < NHSTEP; ih++) {
+					double h = hstep[ih], nf_h = 0.0, ne_h = 0.0, r_h;
+
+					for (k = 0; k < 3; k++) v[k] = v0[k] + (float)h * dv[k];
+					petroParamToLame(param, v, t);
+					petroCostGrad(t, 1, &pp, NULL, ga, gb);
+					memset(gp, 0, sizeof(gp));
+					petroAccumGradient(gp, 1, param, t, ga, gb, 1.0f, &pp);
+
+					for (k = 0; k < 3; k++) v[k] = v0[k] - (float)h * dv[k];
+					petroParamToLame(param, v, t);
+					petroCostGrad(t, 1, &pp, NULL, ga, gb);
+					memset(gm, 0, sizeof(gm));
+					petroAccumGradient(gm, 1, param, t, ga, gb, 1.0f, &pp);
+
+					for (k = 0; k < 3; k++) {
+						double fd = ((double)gp[k] - (double)gm[k]) / (2.0*h);
+						nf_h += fd*fd;
+						ne_h += (hd[k]-fd)*(hd[k]-fd);
+					}
+					r_h = sqrt(ne_h) / (sqrt(nf_h) > 0.0 ? sqrt(nf_h) : 1.0);
+					if (verbose >= 2)
+						vmess("        h=%8.1e  ||FD||=%14.6e  rel.err=%9.2e",
+						      h, sqrt(nf_h), r_h);
+					if (r_h < rel) { rel = r_h; nf = nf_h; hbest = h; }
+				}
+				vmess("   %s    %d    %14.6e  %14.6e   %9.2e  (h=%.0e)",
+				      ptname[ipt], param, sqrt(nh), sqrt(nf), rel, hbest);
+				if (rel > 5.0e-3) {
+					vmess("    ^ FAIL: H_P d disagrees with FD of g_P");
+					nfail++;
+				}
+			}
 		}
 	}
 

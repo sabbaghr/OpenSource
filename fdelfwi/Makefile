@@ -145,6 +145,7 @@ test_space_lag_gradient: $(PRG19)
 test_cpml_dp: $(PRG21)
 test_fs_col: $(PRG22)
 test_petro: $(PRG20)
+petro_gradient: $(PRG24)
 
 PRG3 = fwi_driver
 PRG4 = fwi_mpi_driver
@@ -165,6 +166,7 @@ PRG19 = test_space_lag_gradient
 PRG20 = test_petro
 PRG21 = test_cpml_dp
 PRG22 = test_fs_col
+PRG24 = petro_gradient
 
 # Alias must come AFTER PRG13 is defined: make expands prerequisites
 # immediately when the rule is read.
@@ -479,6 +481,15 @@ $(PRG20):	$(OBJC) fdelfwi.h test_petro.c
 	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG20) test_petro.o \
 		$(OBJC) fileOpen.o writeRec.o $(LIBS)
 
+# petro_gradient -- adds a*g_P (model-only) to an existing data gradient.
+# No wave propagation; same petro_constraint.c code fwi_inversion uses.
+$(PRG24):	$(OBJC) fdelfwi.h petro_gradient.c
+	$(CC) $(CFLAGS) $(OPTC) -c fileOpen.c
+	$(CC) $(CFLAGS) $(OPTC) -c writeRec.c
+	$(CC) $(CFLAGS) $(OPTC) -c petro_gradient.c
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OPTC) -o $(PRG24) petro_gradient.o \
+		$(OBJC) fileOpen.o writeRec.o $(LIBS)
+
 # Bare-propagator dot product test: <F^N S0, R> = <S0, (F^T)^N R> over the
 # full padded wavefield, with no source and no receivers.  This is the test
 # that isolates the boundary transpose -- CFS-CPML in particular -- from the
@@ -515,7 +526,7 @@ clean:
 			test_wave_op_dp.o test_dotproduct.o test_taylor.o test_hessian_dp.o \
 			test_gradient_visual.o fdelfwi_fwd.o test_recop_dp.o \
 			test_ei_planewave.o test_ei_modesep.o test_lag_gradient.o \
-			test_space_lag_gradient.o test_petro.o test_cpml_dp.o \
+			test_space_lag_gradient.o test_petro.o petro_gradient.o test_cpml_dp.o \
 			test_fs_col.o \
 			$(PRG3) $(PRG4) $(PRG5) $(PRG6) $(PRG7) $(PRG8) $(PRG9) $(PRG10) $(PRG12) $(PRG13) $(PRG14) $(PRG15) $(PRG16) $(PRG17) $(PRG19) $(PRG20) $(PRG21) $(PRG22) \
 			fwi_gpu_inversion fwi_mpi_gpu_inversion

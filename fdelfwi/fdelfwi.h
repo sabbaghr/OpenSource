@@ -370,7 +370,9 @@ typedef struct _petroPar {
     int    on;        /* 1 = constraint active                            */
     int    space;     /* PETRO_SPACE_LAMMU or PETRO_SPACE_VPVS            */
     float  a;         /* trade-off weight (eq 18); set or auto-calibrated */
-    float  balance;   /* >0: pick a so ||g_petro|| = balance*||g_data||   */
+    float  balance;   /* >0: pick a so ||g_petro|| = balance*||g_data||,
+                       * norms taken in the optimizer's (scaled) space,
+                       * re-picked at the start of every frequency band  */
     int    calibrated;/* 1 once 'a' has been fixed (must not drift)       */
     int    wrote_grad;/* 1 once g_petro has been written to disk          */
     int    ncell;     /* number of significant PDF cells                  */
@@ -389,6 +391,9 @@ double petroCostGrad(const float *xlame, int nmodel, const petroPar *pp,
 void   petroAccumGradient(float *g, int nmodel, int param, const float *xlame,
                           const float *g1, const float *g2, float a,
                           const petroPar *pp);
+void   petroHessVec(float *hd, const float *d, int nmodel, int param,
+                    const float *xlame, const petroPar *pp, const int *wmask,
+                    float a);
 void   petroFree(petroPar *pp);
 
 energyWeight *energyWeightsBuild(modPar *mod, bndPar *bnd, recPar *rec, int verbose);

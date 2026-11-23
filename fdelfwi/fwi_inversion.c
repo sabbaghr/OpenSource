@@ -259,10 +259,14 @@ char *sdoc[] = {
 "   petro_a=0          trade-off weight a (eq 18).  Paper sweeps 1e-9 to",
 "                      5e-8; the right value depends on your J_D scale,",
 "                      so prefer petro_balance unless reproducing a run.",
-"   petro_balance=0    auto-calibrate a at the FIRST gradient so that",
-"                      ||g_petro|| = petro_balance*||g_data||, then hold",
-"                      a fixed.  0.1 is a good starting point.",
+"   petro_balance=0    auto-calibrate a at the first gradient of each",
+"                      frequency band so that ||g_petro|| =",
+"                      petro_balance*||g_data||, both norms measured in",
+"                      the optimizer's scaled space (scaling=1), then hold",
+"                      a fixed within the band.  0.1 is a good start.",
 "                      Mutually exclusive with petro_a.",
+"                      TRN/PTRN (algorithm 4-7) get the exact J_P Hessian",
+"                      added to every Hessian-vector product.",
 "   petro_nlam=100     PDF histogram bins along axis 1 (lambda or Vp)",
 "   petro_nmu=100      PDF histogram bins along axis 2 (mu or Vs)",
 "   petro_smooth=1     Gaussian smoothing of the histogram, in bins",
@@ -605,7 +609,7 @@ static void applyPetroConstraint(float *fcost, float *grad_vec,
                                  const paramMask *pmask, const int *water_mask,
                                  float *xlame, float *glam, float *gmuu,
                                  float *gvec, const char *file_grad,
-                                 int verbose)
+                                 const float *m0w, int verbose)
 {
 	double dsum;
 	int    i, nvec = nparam * nmodel;
@@ -630,10 +634,24 @@ static void applyPetroConstraint(float *fcost, float *grad_vec,
 	 * between linesearch trials and break the Wolfe conditions -- the
 	 * same reason the energy-norm weights Q are sampled only once. */
 	if (!pp->calibrated) {
+		/* Both norms are measured in the space the OPTIMIZER works in,
+		 * not on the raw physical gradient.  The raw vector mixes units
+		 * per block (per Pa for lambda/mu, per kg/m^3 for rho; per m/s vs
+		 * per kg/m^3 with param=2), so its norm is unit-dependent: with
+		 * param=1 the lambda/mu blocks are ~1e-7 of the rho block, so
+		 * ||g_data|| was effectively ||g_rho|| while the matched lam-mu
+		 * g_petro has no rho part -- 'a' came out ~1e5-1e6 too large and
+		 * the prior drove the inversion.  With Brossier range scaling the
+		 * optimizer sees g_p * m0[p], so weight each block by m0[p]
+		 * (m0w == NULL means no per-block scaling: the raw vector IS the
+		 * optimizer's, and a TOY2DAC global factor cancels in the ratio). */
 		double gd = 0.0, gp = 0.0;
 		for (i = 0; i < nvec; i++) {
-			gd += (double)grad_vec[i] * (double)grad_vec[i];
-			gp += (double)gvec[i]     * (double)gvec[i];
+			double w  = m0w ? (double)m0w[i / nmodel] : 1.0;
+			double wd = w * (double)grad_vec[i];
+			double wp = w * (double)gvec[i];
+			gd += wd * wd;
+			gp += wp * wp;
 		}
 		gd = sqrt(gd);
 		gp = sqrt(gp);
@@ -647,8 +665,8 @@ static void applyPetroConstraint(float *fcost, float *grad_vec,
 		pp->calibrated = 1;
 		if (verbose >= 1)
 			vmess("Petrophysical constraint: calibrated a=%.4e "
-			      "(||g_data||=%.4e, ||g_petro||=%.4e, balance=%.3f)",
-			      pp->a, gd, gp, pp->balance);
+			      "(%s ||g_data||=%.4e, ||g_petro||=%.4e, balance=%.3f)",
+			      pp->a, m0w ? "scaled" : "raw", gd, gp, pp->balance);
 	}
 
 	/* Write g_petro once, at the first gradient, so it can be compared with
@@ -1316,9 +1334,16 @@ static void compute_hessian_vector_product(
 
 	/* Extract to flat vector (raw, no scaling — matching SEISCOPE
 	 * convention: optimizer receives unscaled Hd).
-	 * Use param=1 (Lame) since hess_shot accumulated in Lame space. */
+	 *
+	 * hess_shot accumulated in Lame space (its param=1 above), so the ONE
+	 * chain-rule conversion belongs here, with the user's 'param'.  It was
+	 * previously extracted with param=1 ("strip only"), which for param=2
+	 * returned H_L (J d) instead of J^T H_L J d: perturbFDcoefficients
+	 * applies J to d on the way in, but J^T was never applied on the way
+	 * out, so the TRN inner CG saw a per-Pa Hd against a per-(m/s) d.
+	 * test_hessian_dp.c (Step 5) does the conversion -- this now matches. */
 	if (mpi_rank == 0) {
-		extractGradientVector(Hd_flat, hd1, hd2, hd3, mod, bnd, 1);
+		extractGradientVector(Hd_flat, hd1, hd2, hd3, mod, bnd, param);
 
 		if (verbose > 0) {
 			float hnorm = 0.0f;
@@ -1956,6 +1981,10 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* Per-block weights the petro_balance calibration measures its two
+	 * norms with: the optimizer's metric, not raw physical units. */
+	const float *petro_m0w = (scaling > 0 && scaling_mode == 0) ? m0 : NULL;
+
 	/* Apply preconditioner boost (Yang et al. 2018, eq 48).
 	 * Multiplies on top of whatever s1,s2,s3 already are (from Brossier
 	 * scaling or manual precond_scale). Since the pseudo-Hessian is
@@ -2198,6 +2227,16 @@ int main(int argc, char **argv)
 		vmess("=== Frequency band %d/%d: [%.1f, %.1f] Hz, %d iterations ===",
 		      iband + 1, bands.nbands, current_flo, current_fhi,
 		      bands.niter_per_band[iband]);
+
+	/* petro_balance: re-pick 'a' at the first gradient of EVERY band.
+	 * ||g_data|| changes from band to band (different bandwidth, and the
+	 * Brossier data weights are recomputed per band), so an 'a' frozen in
+	 * band 1 silently drifts away from the requested balance.  Within a
+	 * band it stays frozen, so J is still a fixed function for the
+	 * linesearch; the optimizer state is reset between bands anyway.
+	 * A fixed petro_a is the user's explicit choice and is left alone. */
+	if (petro.on && petro.balance > 0.0f)
+		petro.calibrated = 0;
 
 	/* Pre-filter observed data for this band (sufilter, rank 0 only).
 	 * Synthetic data is filtered per-shot inside compute_fwi_gradient
@@ -2472,7 +2511,7 @@ int main(int argc, char **argv)
 		applyPetroConstraint(&fcost, grad_vec, &mod, &bnd, param,
 		                     nmodel, nparam, &petro, &pmask, water_mask,
 		                     petro_xlame, petro_glam, petro_gmuu,
-		                     petro_gvec, file_grad, verbose);
+		                     petro_gvec, file_grad, petro_m0w, verbose);
 
 		/* Prior model regularization (before scaling) */
 		if (prior_lambda > 0.0f) {
@@ -2927,7 +2966,7 @@ int main(int argc, char **argv)
 				applyPetroConstraint(&fcost, grad_vec, &mod, &bnd, param,
 				                     nmodel, nparam, &petro, &pmask, water_mask,
 				                     petro_xlame, petro_glam, petro_gmuu,
-				                     petro_gvec, file_grad, verbose);
+				                     petro_gvec, file_grad, petro_m0w, verbose);
 
 				/* TOY2DAC scaling (loop) */
 				if (scaling_mode == 1)
@@ -3065,6 +3104,18 @@ int main(int argc, char **argv)
 				opt.d, opt.Hd, nvec,
 				grad_taper, grad_taper_core,
 				comp_weights, ew, verbose);
+
+			/* Petrophysical constraint: add a * H_P d (exact, block
+			 * diagonal).  The gradient the inner CG was given contains
+			 * g_P, so Hd must contain H_P d or the Newton system is not
+			 * the Hessian of the objective.  Rank 0 only -- it owns the
+			 * reduced Hd and is the only rank that added g_P.  d is still
+			 * in physical units here, which is what petroHessVec takes. */
+			if (mpi_rank == 0 && petro.on) {
+				extractModelVector(petro_xlame, &mod, &bnd, 1);
+				petroHessVec(opt.Hd, opt.d, nmodel, param, petro_xlame,
+				             &petro, water_mask, petro.a);
+			}
 
 			/* Zero Hessian output for frozen parameters and water layer */
 			applyParamMask(opt.Hd, nmodel, nparam, &pmask);

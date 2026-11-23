@@ -33,8 +33,14 @@
  * D(m) is a harmonic-mean distance: every PDF cell pulls on every model
  * point, weighted by its probability and inversely by its distance
  * (their Figure 2).  Inside the high-probability region D and its
- * gradient are ~0 and the data misfit J_D alone drives the inversion;
- * far outside, the J_P gradient dominates and drags the point back.
+ * gradient are SMALL, not zero: a harmonic mean over a distribution of
+ * finite spread has a floor of order that spread, and the other clusters
+ * of a multi-modal crossplot keep pulling.  On the three-cluster demo
+ * crossplot min_m D = 0.72 GPa (~11 eps) and |g| at a true-rock point is
+ * ~13% of its value at the initial model.  So J_P adds a constant floor to
+ * the cost and a small residual bias even at the correct model; 'a' sets
+ * how much.  Far outside, the J_P gradient dominates and drags the point
+ * back.
  *
  * CROSSPLOT SPACE.  The paper works exclusively in (lambda, mu), which is
  * where the elastic radiation patterns make the crosstalk, and that is
@@ -527,6 +533,183 @@ void petroAccumGradient(float *g, int nmodel, int param, const float *xlame,
 		g[i]            += g_lam * 2.0f * r * vp;
 		g[nmodel + i]   += 2.0f * r * vs * (g_muu - 2.0f * g_lam);
 		g[2*nmodel + i] += g_lam * (vp2 - 2.0f*vs2) + g_muu * vs2;
+	}
+}
+
+
+/*--------------------------------------------------------------------
+ * petroHessVec -- add a * H_P d into hd, H_P the EXACT Hessian of J_P/a.
+ *
+ * Needed by the truncated-Newton family (algorithm 4-7): the gradient
+ * handed to the optimizer contains g_P, so the Hessian-vector product the
+ * inner CG sees must contain H_P d, or the Newton system it solves is not
+ * the Hessian of the objective whose gradient it was given.
+ *
+ * J_P is a sum of independent per-cell terms, so H_P is block diagonal,
+ * one 3x3 block per model point, and the product is O(nmodel*ncell) --
+ * the same cost as one petroCostGrad.
+ *
+ * Crossplot-plane Hessian.  With r = a - p, s = sum_p f/d, D = 1/s and
+ * d = sqrt(|r|^2 + eps^2) (the softened eq 16):
+ *
+ *     grad s     = -G,               G = sum_p f r / d^3
+ *     hess s     =  S,               S = sum_p f (3 r r^T / d^5 - I / d^3)
+ *     grad D     =  D^2 G                                      (eq 19/20)
+ *     hess D     =  2 D^3 G G^T - D^2 S
+ *
+ * hess D is NOT positive definite in general -- the harmonic mean has a
+ * saddle between every two clusters of a multi-modal crossplot -- and it is
+ * kept exact on purpose.  The TRN/PTRN inner CG already terminates on
+ * negative curvature (optimization/trn.c, ptrn.c, enriched.c), which is
+ * the correct response to an indefinite Hessian; a PSD surrogate would
+ * just hide the curvature from it.
+ *
+ * Parameterization.  With a(m) the map from the inversion variables m to
+ * the crossplot axes (J = da/dm, 2x3; T_k = d^2 a_k/dm^2, 3x3):
+ *
+ *     H_m = J^T (hess D) J + sum_k (grad D)_k T_k
+ *
+ * In the two MATCHED cases (lam-mu with param=1, Vp-Vs with param=2) a is
+ * linear in m, T_k = 0, and the rho row/column is zero.  In the two mixed
+ * cases the second term is essential: dropping it gives a Hessian that is
+ * not the derivative of the gradient petroAccumGradient produces, and
+ * test_petro check 4 fails.  J and T include the GPa / km/s unit factor,
+ * so d and hd are in the physical units of 'param', exactly as
+ * compute_hessian_vector_product sees them.
+ *
+ * hd, d  - [3*nmodel] in the inversion parameterization (param 1 or 2)
+ * xlame  - [3*nmodel] model in Pa, [lambda | mu | rho]
+ * wmask  - water mask (skipped), or NULL
+ *--------------------------------------------------------------------*/
+void petroHessVec(float *hd, const float *d, int nmodel, int param,
+                  const float *xlame, const petroPar *pp, const int *wmask,
+                  float a)
+{
+	const float *lam_pa = xlame;
+	const float *muu_pa = xlame + nmodel;
+	const float *rho_in = xlame + 2*nmodel;
+	int vpvs  = (pp->space == PETRO_SPACE_VPVS);
+	int i;
+
+	if (!pp->on || a == 0.0f) return;
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+	for (i = 0; i < nmodel; i++) {
+		double lam = lam_pa[i], mu = muu_pa[i], r = rho_in[i];
+		double vp, vs, a1, a2, c;
+		double J[2][3], T[2][3][3];
+		double s = 0.0, G1 = 0.0, G2 = 0.0, S11 = 0.0, S12 = 0.0, S22 = 0.0;
+		double D, D2, g1, g2, H11, H12, H22, Jd1, Jd2, dv[3], out[3];
+		int    p, k, l;
+
+		if (wmask && wmask[i]) continue;
+		if (r <= 0.0 || mu <= 0.0) continue;    /* fluid / unphysical */
+
+		vp = sqrt((lam + 2.0*mu) / r);
+		vs = sqrt(mu / r);
+		memset(J, 0, sizeof(J));
+		memset(T, 0, sizeof(T));
+
+		if (vpvs) {
+			c  = 1.0e-3;                         /* m/s -> km/s */
+			a1 = c * vp;
+			a2 = c * vs;
+			if (param == 2) {                    /* identity */
+				J[0][0] = c;
+				J[1][1] = c;
+			} else {                             /* m = (lam, mu, rho) */
+				double u = lam + 2.0*mu;
+				J[0][0] = c / (2.0*r*vp);
+				J[0][1] = c / (r*vp);
+				J[0][2] = -c * vp / (2.0*r);
+				J[1][1] = c / (2.0*r*vs);
+				J[1][2] = -c * vs / (2.0*r);
+				/* Vp = u^1/2 rho^-1/2, u = lam + 2 mu */
+				T[0][0][0] = -c*vp / (4.0*u*u);
+				T[0][0][1] = -c*vp / (2.0*u*u);
+				T[0][1][1] = -c*vp / (u*u);
+				T[0][0][2] = -c*vp / (4.0*u*r);
+				T[0][1][2] = -c*vp / (2.0*u*r);
+				T[0][2][2] =  3.0*c*vp / (4.0*r*r);
+				/* Vs = mu^1/2 rho^-1/2 */
+				T[1][1][1] = -c*vs / (4.0*mu*mu);
+				T[1][1][2] = -c*vs / (4.0*mu*r);
+				T[1][2][2] =  3.0*c*vs / (4.0*r*r);
+			}
+		} else {
+			c  = 1.0e-9;                         /* Pa -> GPa */
+			a1 = c * lam;
+			a2 = c * mu;
+			if (param == 1) {                    /* identity */
+				J[0][0] = c;
+				J[1][1] = c;
+			} else {                             /* m = (Vp, Vs, rho) */
+				/* lam = rho (Vp^2 - 2 Vs^2), mu = rho Vs^2 */
+				J[0][0] =  c * 2.0*r*vp;
+				J[0][1] = -c * 4.0*r*vs;
+				J[0][2] =  c * (vp*vp - 2.0*vs*vs);
+				J[1][1] =  c * 2.0*r*vs;
+				J[1][2] =  c * vs*vs;
+				T[0][0][0] =  c * 2.0*r;
+				T[0][0][2] =  c * 2.0*vp;
+				T[0][1][1] = -c * 4.0*r;
+				T[0][1][2] = -c * 4.0*vs;
+				T[1][1][1] =  c * 2.0*r;
+				T[1][1][2] =  c * 2.0*vs;
+			}
+		}
+		/* symmetrise the upper-triangle fills */
+		for (k = 0; k < 2; k++)
+			for (l = 0; l < 3; l++) {
+				int m;
+				for (m = l+1; m < 3; m++) T[k][m][l] = T[k][l][m];
+			}
+
+		for (p = 0; p < pp->ncell; p++) {
+			double r1 = a1 - pp->c1[p];
+			double r2 = a2 - pp->c2[p];
+			double fp = pp->f[p];
+			double dd = sqrt(r1*r1 + r2*r2 + (double)pp->eps*pp->eps);
+			double id3 = fp / (dd*dd*dd);
+			double id5 = 3.0 * id3 / (dd*dd);
+			s   += fp / dd;
+			G1  += id3 * r1;
+			G2  += id3 * r2;
+			S11 += id5 * r1*r1 - id3;
+			S12 += id5 * r1*r2;
+			S22 += id5 * r2*r2 - id3;
+		}
+		if (s <= 0.0) continue;
+
+		D   = 1.0 / s;
+		D2  = D * D;
+		g1  = D2 * G1;
+		g2  = D2 * G2;
+		H11 = 2.0*D*D2*G1*G1 - D2*S11;
+		H12 = 2.0*D*D2*G1*G2 - D2*S12;
+		H22 = 2.0*D*D2*G2*G2 - D2*S22;
+
+		dv[0] = d[i];
+		dv[1] = d[nmodel + i];
+		dv[2] = d[2*nmodel + i];
+
+		Jd1 = J[0][0]*dv[0] + J[0][1]*dv[1] + J[0][2]*dv[2];
+		Jd2 = J[1][0]*dv[0] + J[1][1]*dv[1] + J[1][2]*dv[2];
+		{
+			double h1 = H11*Jd1 + H12*Jd2;
+			double h2 = H12*Jd1 + H22*Jd2;
+			for (l = 0; l < 3; l++) {
+				out[l] = J[0][l]*h1 + J[1][l]*h2
+				       + g1 * (T[0][l][0]*dv[0] + T[0][l][1]*dv[1] + T[0][l][2]*dv[2])
+				       + g2 * (T[1][l][0]*dv[0] + T[1][l][1]*dv[1] + T[1][l][2]*dv[2]);
+			}
+		}
+
+		hd[i]            += (float)(a * out[0]);
+		hd[nmodel + i]   += (float)(a * out[1]);
+		hd[2*nmodel + i] += (float)(a * out[2]);
 	}
 }
 
