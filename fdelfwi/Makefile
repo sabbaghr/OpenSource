@@ -225,6 +225,7 @@ SRCC	= fdfwimodc.c \
 		born_shot.c  \
 		hess_shot.c  \
 		preconditioner.c  \
+		illum_precond.c  \
 		taper_source.c  \
 		precond_shot.c  \
 		smooth2d.c  \

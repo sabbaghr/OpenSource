@@ -277,13 +277,23 @@ char *sdoc[] = {
 "                      would still spike there.",
 "   shin_precond=0     Shin diagonal preconditioner for acoustic (0=off, 1=on)",
 "   shin_eps=1e-4      Shin preconditioner threshold parameter",
+"   illum_precond=0    1: diagonal SOURCE-illumination preconditioner",
+"                      P = nu/(I+beta), I = sum_shots sum_t |v_fwd|^2, used as",
+"                      the PLBFGS H0 (requires algorithm=2).  Rebuilt at every",
+"                      accepted model; nu = ||g||/||P g|| fixed per iteration.",
+"                      Allowed with lag_tomo=1 (applied AFTER the cone filter).",
+"                      Exclusive with precond= and shin_precond=.",
+"   illum_eps=1e-2     beta = illum_eps * max I, max taken outside the",
+"                      grad_taper mask (the source singularity is excluded).",
+"                      Writes <file_grad>_illum.su and _illum_precond.su.",
 " ",
 " Time-lag tomographic gradient (lag_gradient.c + lag_cone_filter.c):",
 "   lag_tomo=0         1: drive the inversion with the CONE-FILTERED time-lag",
 "                      gradient instead of the zero-lag kernel.  Keeps the",
 "                      small-slope (wide opening angle) transmission kernel and",
 "                      discards the specular migration imprint.",
-"                      Requires ischeme=3, param=2, precond=0, algorithm=0 or 1,",
+"                      Requires ischeme=3, param=2, precond=0, algorithm=0 or 1",
+"                      (or 2 with illum_precond=1),",
 "                      and rho frozen (active_params=vp,vs) -- there is no g_rho",
 "                      at non-zero lag.",
 "   lag_nfreq=         number of DFT bins.  Required.  df=(fmax-fmin)/(nfreq-1)",
@@ -805,7 +815,7 @@ static float compute_fwi_gradient(
 
 		/* Per-shot wavefield energy for Plessix & Mulder preconditioner */
 		float *shot_wfld_energy = NULL;
-		if (hess_lam)
+		if (wfld_energy)
 			shot_wfld_energy = (float *)calloc(sizem, sizeof(float));
 
 		/* Per-shot Hessian diagonal arrays (zeroed) */
@@ -1103,11 +1113,15 @@ static float compute_fwi_gradient(
 				MPI_Allreduce(hess_muu_rho, tmp_h, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
 				memcpy(hess_muu_rho, tmp_h, sizem * sizeof(float));
 			}
-			if (wfld_energy) {
-				MPI_Allreduce(wfld_energy, tmp_h, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
-				memcpy(wfld_energy, tmp_h, sizem * sizeof(float));
-			}
 			free(tmp_h);
+		}
+		/* Outside the hess_lam block: illum_precond has the energy without
+		 * a pseudo-Hessian. */
+		if (wfld_energy) {
+			float *tmp_e = (float *)calloc(sizem, sizeof(float));
+			MPI_Allreduce(wfld_energy, tmp_e, (int)sizem, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+			memcpy(wfld_energy, tmp_e, sizem * sizeof(float));
+			free(tmp_e);
 		}
 
 		/* The cone filter is rank-local (each rank filters its own shots'
@@ -1625,6 +1639,25 @@ int main(int argc, char **argv)
 	if (!getparint("shin_precond", &shin_precond)) shin_precond = 0;
 	if (!getparfloat("shin_eps", &shin_eps)) shin_eps = 1e-4f;
 
+	/* Source-illumination preconditioner (illum_precond.c), the PLBFGS H0 */
+	int illum_on = 0;
+	float illum_eps = 1e-2f;
+	if (!getparint("illum_precond", &illum_on)) illum_on = 0;
+	if (!getparfloat("illum_eps", &illum_eps)) illum_eps = 1e-2f;
+	if (illum_on) {
+		if (use_precond || shin_precond)
+			verr("illum_precond=1 is its own preconditioner; it cannot be "
+			     "combined with precond=%d / shin_precond=%d.",
+			     use_precond, shin_precond);
+		if (algorithm != 2)
+			verr("illum_precond=1 needs algorithm=2 (PLBFGS): P is applied "
+			     "as the L-BFGS H0, so the (s,y) pairs stay plain gradients "
+			     "and P may be rebuilt each iteration.  Got algorithm=%d.",
+			     algorithm);
+		if (!(illum_eps > 0.0f))
+			verr("illum_eps=%g must be > 0.", illum_eps);
+	}
+
 #ifdef USE_CUDA
 	if (!getparint("ndom", &ndom)) ndom = 1;
 	if (ndom < 1) verr("ndom must be >= 1");
@@ -1864,6 +1897,25 @@ int main(int argc, char **argv)
 		if (algorithm == 2 || algorithm == 3 || algorithm == 6 || algorithm == 7)
 			grad_preco_vec = (float *)calloc(nvec, sizeof(float));
 	}
+	/* illum_precond: wfld_energy alone (adj_shot fills it whenever it is
+	 * non-NULL; no pseudo-Hessian is needed), P0, and the taper mask that
+	 * keeps the source singularity out of beta. */
+	float *illum_P = NULL, *illum_I = NULL, *illum_mask = NULL;
+	float illum_nu = 1.0f;
+	if (illum_on) {
+		wfld_energy    = (float *)calloc(sizem, sizeof(float));
+		grad_preco_vec = (float *)calloc(nvec, sizeof(float));
+		illum_P        = (float *)calloc(nmodel, sizeof(float));
+		illum_I        = (float *)calloc(nmodel, sizeof(float));
+		illum_mask     = buildGradTaperMask(mod.nx, mod.nz, &shot, &rec,
+		                                    grad_taper, grad_taper_core);
+		if (!wfld_energy || !grad_preco_vec || !illum_P || !illum_I || !illum_mask)
+			verr("illum_precond: allocation failed.");
+		if (mpi_rank == 0)
+			vmess("*** illum_precond=1: PLBFGS H0 = nu/(I+beta), "
+			      "I = sum_s sum_t |v_f|^2 (source only), illum_eps=%.2e ***",
+			      illum_eps);
+	}
 
 	/* Extract initial model into optimizer vector */
 	extractModelVector(x, &mod, &bnd, param);
@@ -2069,8 +2121,9 @@ int main(int argc, char **argv)
 			verr("lag_tomo=1 requires precond=0: the pseudo-Hessian is the "
 			     "zero-lag, Lame-space one and does not match the filtered "
 			     "velocity gradient.");
-		if (algorithm > 1)
-			verr("lag_tomo=1 supports algorithm=0 (SD) or 1 (L-BFGS); "
+		if (algorithm > 1 && !(algorithm == 2 && illum_on))
+			verr("lag_tomo=1 supports algorithm=0 (SD), 1 (L-BFGS), or 2 "
+			     "(PLBFGS) with illum_precond=1; "
 			     "algorithm=%d needs a Hessian-vector product, which is not "
 			     "lag-filtered and would be inconsistent with the gradient.",
 			     algorithm);
@@ -2533,6 +2586,29 @@ int main(int argc, char **argv)
 		if (scaling > 0 && scaling_mode == 0)
 			scaling_scale_gradient(grad_vec, nmodel, nparam, m0);
 
+		/* Source-illumination preconditioner: build P0 at this model, fix
+		 * nu from this gradient, and hand PLBFGS grad_preco = nu P0 g for
+		 * its first descent.  Later iterations go through OPT_PREC. */
+		if (illum_on) {
+			char fn[512];
+			illumPrecondBuild(wfld_energy, &mod, &bnd, illum_mask, illum_eps,
+			                  illum_P, illum_I, verbose);
+			illum_nu = illumPrecondNu(illum_P, grad_vec, nmodel, nparam);
+			illumPrecondApply(grad_preco_vec, grad_vec, illum_P, illum_nu,
+			                  nmodel, nparam);
+			applyParamMask(grad_preco_vec, nmodel, nparam, &pmask);
+			applyWaterMask(grad_preco_vec, nmodel, nparam, water_mask);
+			vmess("illum_precond: nu=%.4e", illum_nu);
+
+			snprintf(fn, sizeof(fn), "%s_illum.su", file_grad);
+			writesufile(fn, illum_I, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+			snprintf(fn, sizeof(fn), "%s_illum_precond.su", file_grad);
+			writesufile(fn, illum_P, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+			snprintf(fn, sizeof(fn), "%s_initial_preco_%s.su", file_grad,
+			         (param == 1) ? "lam" : "vp");
+			writesufile(fn, grad_preco_vec, mod.nz, mod.nx, mod.z0, mod.x0, mod.dz, mod.dx);
+		}
+
 		/* Shin diagonal preconditioner for acoustic */
 		if (shin_precond && !elastic && hess_lam && grad_preco_vec &&
 		    (algorithm == 2 || algorithm == 6)) {
@@ -2730,6 +2806,21 @@ int main(int argc, char **argv)
 						float nu = getPrecondNu();
 						for (i = 0; i < nvec; i++)
 							opt.q_plb[i] *= nu;
+					} else if (illum_on) {
+						/* OPT_PREC follows the gradient at the newly
+						 * ACCEPTED model, so wfld_energy and grad_vec are
+						 * both at x_k: rebuild P0 there, fix nu from the
+						 * gradient (not from q_plb), apply to q_plb. */
+						illumPrecondBuild(wfld_energy, &mod, &bnd, illum_mask,
+						                  illum_eps, illum_P, illum_I, verbose);
+						illum_nu = illumPrecondNu(illum_P, grad_vec, nmodel, nparam);
+						illumPrecondApply(opt.q_plb, opt.q_plb, illum_P, illum_nu,
+						                  nmodel, nparam);
+						applyParamMask(opt.q_plb, nmodel, nparam, &pmask);
+						applyWaterMask(opt.q_plb, nmodel, nparam, water_mask);
+						if (verbose >= 1)
+							vmess("illum_precond: rebuilt at iter %d, nu=%.4e",
+							      opt.cpt_iter, illum_nu);
 					}
 					plbfgs_run(nvec, x, fcost, grad_vec,
 					           grad_preco_vec ? grad_preco_vec : grad_vec,
@@ -3226,6 +3317,7 @@ int main(int argc, char **argv)
 				vmess("Iteration %d: misfit = %.6e (%.2f%% of initial)",
 				      opt_iter, fcost, 100.0f * fcost / opt.f0);
 
+
 				/* CG summary for TRN/PTRN/Enriched/PEnriched */
 				if (algorithm >= 4 && verbose >= 1) {
 					const char *method = "";
@@ -3285,6 +3377,21 @@ int main(int argc, char **argv)
 					vmess("  =========================================================");
 					diag_gnorm_raw_start = diag_gnorm_raw;
 					diag_new_iter = 1;
+				}
+				/* Quasi-Newton trial step = 1.  The L-BFGS direction is
+				 * already scaled by gamma = <s,y>/<y,y> (Nocedal & Wright
+				 * 7.20), so its natural step is alpha=1.  Carrying the
+				 * iteration-1 alpha=1/||g|| (set for the unscaled -g) over
+				 * multiplies it by 1/||g||: with ||g~||=6.6e-7 that is a
+				 * 1.5e6x overshoot, every trial lands on the bound-box
+				 * corners (Vs>Vp) -> NaN on all shots, and nls_max
+				 * bisections never get back to O(1).  SD/NLCG directions
+				 * are not curvature-scaled, so they keep the carried alpha. */
+				if ((algorithm == 1 || algorithm == 2) && opt.alpha != 1.0f) {
+					if (verbose >= 1)
+						vmess("  L-BFGS: next trial alpha %.4e -> 1 (quasi-Newton step)",
+						      opt.alpha);
+					opt.alpha = 1.0f;
 				}
 			}
 
@@ -3414,6 +3521,9 @@ int main(int argc, char **argv)
 	if (petro_gvec) free(petro_gvec);
 	free(grad_vec);
 	if (grad_preco_vec) free(grad_preco_vec);
+	if (illum_P) free(illum_P);
+	if (illum_I) free(illum_I);
+	if (illum_mask) free(illum_mask);
 	free(grad1); free(grad3);
 	if (grad2) free(grad2);
 	if (hess_lam) free(hess_lam);

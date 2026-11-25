@@ -1024,6 +1024,15 @@ int     cpmlStateLoad(const float *buf, size_t n);
 void    cpmlStateSelect(int ctx);
 int     cpmlStateContext(void);
 
+/* illum_precond.c -- diagonal source-illumination preconditioner
+ * (illum_precond=1, PLBFGS H0).  P0 = 1/(I+beta), I = sum_s sum_t |v_f|^2. */
+void  illumPrecondBuild(const float *wfld_energy, modPar *mod, bndPar *bnd,
+                        const float *mask, float eps, float *P, float *I_out,
+                        int verbose);
+float illumPrecondNu(const float *P, const float *g, int nmodel, int nparam);
+void  illumPrecondApply(float *out, const float *in, const float *P,
+                        float nu, int nmodel, int nparam);
+
 #if __STDC_VERSION__ >= 199901L
   /* "restrict" is a keyword */
 #else
